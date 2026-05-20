@@ -1,0 +1,9 @@
+[Match]
+Type=ether
+Name=!veth*
+
+[Network]
+Address=192.168.58.234/24
+Gateway=192.168.58.1
+DNS=192.168.58.1
+

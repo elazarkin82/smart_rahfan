@@ -1,0 +1,62 @@
+# step 1
+	mkdir -p ~/yocto-radxa/sources
+	cd ~/yocto-radxa/sources
+
+	git clone https://git.yoctoproject.org/poky -b scarthgap
+	git clone https://git.yoctoproject.org/meta-arm -b scarthgap
+	git clone https://git.openembedded.org/meta-openembedded -b scarthgap
+	git clone https://github.com/radxa/meta-rockchip.git -b scarthgap
+
+	cd ~/yocto-radxa
+	source sources/poky/oe-init-build-env build
+
+# step 2
+	bitbake-layers add-layer ../meta-arm/meta-arm-toolchain
+	bitbake-layers add-layer ../meta-arm/meta-arm
+	bitbake-layers add-layer ../meta-openembedded/meta-oe
+	bitbake-layers add-layer ../meta-openembedded/meta-python
+	bitbake-layers add-layer ../meta-rockchip
+	
+# step 2 alternative - create/update conf/bblayers.conf
+	POKY_BBLAYERS_CONF_VERSION = "2"
+
+	BBPATH = "${TOPDIR}"
+	BBFILES ?= ""
+
+	BBLAYERS ?= " \
+	  ${TOPDIR}/../poky/meta \
+	  ${TOPDIR}/../poky/meta-poky \
+	  ${TOPDIR}/../poky/meta-yocto-bsp \
+	  ${TOPDIR}/../meta-arm/meta-arm \
+	  ${TOPDIR}/../meta-arm/meta-arm-toolchain \
+	  ${TOPDIR}/../meta-openembedded/meta-oe \
+	  ${TOPDIR}/../meta-openembedded/meta-python \
+	  ${TOPDIR}/../meta-openembedded/meta-networking \
+	  ${TOPDIR}/../meta-openembedded/meta-filesystems \
+	  ${TOPDIR}/../meta-rockchip \
+	  "
+
+# conf/local.conf:
+	MACHINE = "radxa-zero-3e"
+	DISTRO ?= "poky"
+	PACKAGE_CLASSES = "package_ipk"
+	CONF_VERSION = "2"
+
+	DL_DIR = "${TOPDIR}/../downloads"
+	SSTATE_DIR = "${TOPDIR}/../sstate-cache"
+
+	INIT_MANAGER = "systemd"
+
+	EXTRA_IMAGE_FEATURES += "ssh-server-openssh"
+
+	MACHINE_ESSENTIAL_EXTRA_RRECOMMENDS += "kernel-modules"
+
+	IMAGE_FSTYPES += "wic wic.bmap"
+
+	IMAGE_INSTALL:append = " \
+		v4l-utils \
+	"
+
+
+# build
+	bitbake core-image-minimal

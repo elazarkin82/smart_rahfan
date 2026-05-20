@@ -1,0 +1,65 @@
+# =========================================================================
+# Root .gitignore for smart_rahfan project
+# =========================================================================
+
+# --- Yocto / Build System ---
+# Ignore external layers fetched/managed by init_project.sh
+yocto/poky/
+yocto/meta-arm/
+yocto/meta-openembedded/
+yocto/meta-rockchip/
+
+# Ignore Yocto download and state caches
+yocto/downloads/
+yocto/sstate-cache/
+
+# Ignore Yocto build temporary and cache directories, but keep build/conf/
+yocto/build/cache/
+yocto/build/tmp/
+yocto/build/*.log
+
+# --- C/C++ & CMake (examples) ---
+# Ignore CMake and C++ build artifacts
+examples/**/build/
+examples/**/bin/
+examples/**/obj/
+training/**/build/
+training/**/bin/
+training/**/obj/
+*.so
+
+# --- Python & Deep Learning (training) ---
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Jupyter Notebook & IDEs
+.ipynb_checkpoints
+.vscode/
+.idea/
+
+# Project-specific weights/checkpoints/datasets
+*.h5
+*.keras
+checkpoints/
+*.ckpt
+*.ckpt.*
+data/
+datasets/
+
+# --- OS-generated files ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
