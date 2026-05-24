@@ -245,3 +245,59 @@ python3 training/tracker/dataset_visual_test.py --images_path /path/to/your/imag
 * **Controls**:
   - **`Space`**: Dynamically generates the next single-sample tracking sequence (`batch_size=1`) and displays it.
   - **`Escape`**: Closes the application and cleans up temporary visual test files.
+
+---
+
+### 🖥️ How to Run Dataset Generator directly via CLI
+
+You can execute the generator directly from the command line by running `model.py` with the `generate_dataset` subcommand:
+
+```bash
+python3 training/tracker/model.py generate_dataset \
+    --images_path /path/to/your/images_or_txt_file \
+    --output_path /path/to/save/pickles \
+    --batch_size 256 \
+    --num_of_samples 16384
+```
+
+* **Flags**:
+  - `--images_path`: Path to a directory containing images or a `.txt` file containing image file paths (one per line).
+  - `--output_path`: Folder where the numbered pickle batches (`dataset_0.pkl`, `dataset_1.pkl`, ...) will be saved.
+  - `--batch_size`: Batch size per pickle file. Optional (default: `256`).
+  - `--num_of_samples`: Total number of synthetic samples to generate. Optional (default: `16384`).
+
+---
+
+### 🏋️ How to Run Target Tracker Model Training via CLI
+
+You can train the model directly using `model.py` with the `train` subcommand, specifying the dataset, learning rate, loss function, validation splitting, model resuming, and output checkpointing:
+
+```bash
+python3 training/tracker/model.py train \
+    --dataset_dir /path/to/pickles \
+    --lr 0.001 \
+    --num_of_epochs 10 \
+    --loss logcosh \
+    --eval_pkl_num 4 \
+    --init_keras_file /path/to/resume_model.keras \
+    --output /path/to/save_best_model.keras
+```
+
+* **Flags**:
+  - `--dataset_dir` (required): Directory containing the numbered `.pkl` batches (`dataset_0.pkl` ...).
+  - `--lr`: Learning rate for Adam optimizer. Optional (default: `1e-3`).
+  - `--num_of_epochs`: Number of training epochs. Optional (default: `10`).
+  - `--loss`: The loss function to optimize. Choices are:
+    - `logcosh` (default): Smooth L1 approximation, extremely stable.
+    - `wing`: Custom Wing Loss for highly precise pixel-level keypoint regression.
+    - `huber`: Smooth L1 loss with `delta=1.0`.
+    - `mse`: Standard Mean Squared Error (L2 loss).
+  - `--eval_pkl_num`: Number of initial pickle files (e.g., `0` to `eval_pkl_num-1`) allocated for evaluation/validation. The remaining pickles are used for training. Optional (default: `4`).
+  - `--init_keras_file`: Path to an existing `.keras` model file to load and resume training from. If it doesn't exist or is not specified, a new model is built. Optional.
+  - `--output`: Path where the best trained Keras model will be saved. If not specified, saves the model automatically as `tracker_model_score_{best_score:.4f}.keras` in the current folder when a score improvement occurs. Optional.
+
+#### 📈 Score-Based Checkpointing & Saving
+Before starting the training loop, the script samples the initial model performance on the validation pickles, establishing a baseline `best_score` calculated as:
+$$\text{score} = \frac{1}{\text{validation\_loss} + 10^{-7}}$$
+
+At the end of each epoch, the model evaluates itself on the validation pickles. If the current `epoch_score > best_score`, the model is saved to `--output` (or the score-stamped filename), and `best_score` is updated.

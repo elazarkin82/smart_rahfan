@@ -53,13 +53,18 @@ def run_tests():
     
     # Create tf.data.Dataset
     # The training loop expects: ((hist_frames, hist_coords, prev_frames, prev_coords, curr_frames), target_coords)
-    dataset = tf.data.Dataset.from_tensor_slices((
+    train_dataset = tf.data.Dataset.from_tensor_slices((
+        (x_hist, coords_hist, x_prev, coords_prev, x_curr),
+        coords_target
+    )).batch(batch_size)
+    
+    val_dataset = tf.data.Dataset.from_tensor_slices((
         (x_hist, coords_hist, x_prev, coords_prev, x_curr),
         coords_target
     )).batch(batch_size)
     
     # Execute training
-    history = tracker.train(dataset, lr=1e-3, num_of_epochs=2)
+    history = tracker.train(train_dataset, val_dataset, lr=1e-3, num_of_epochs=2, loss_name="logcosh")
     
     assert 'train_loss' in history, "Expected history to contain train_loss"
     assert len(history['train_loss']) == 2, "Expected history to contain 2 epochs of train_loss"

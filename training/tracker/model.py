@@ -375,24 +375,115 @@ class TargetTracker:
             
         print(f"Dataset generation completed. All pickles saved to {output_path}")
         
-    def evaluate(self, dataset):
+    @staticmethod
+    def load_dataset_from_pickles(dataset_dir, eval_pkl_num=4):
         """
-        Evaluates the tracking performance on the provided validation dataset.
+        Discovers, sorts, and splits dataset pickle files into training and evaluation datasets.
         
-        TODO: Implement tracking-specific metrics:
-          - Center Location Error (CLE): Euclidean distance between prediction and target.
-          - Bounding Box Intersection over Union (IoU) if bounding boxes are used.
-          - Recursive Stability Drift: evaluate error accumulation over sequences of N consecutive frames.
-          
         Args:
-            dataset: The validation dataset.
+            dataset_dir (str): Path to folder containing dataset pickle files.
+            eval_pkl_num (int): Number of initial pickles to allocate for evaluation (validation).
             
         Returns:
-            float: Average Center Location Error or evaluation loss value.
+            tuple: (train_dataset, val_dataset) as tf.data.Dataset instances.
         """
-        # TODO: Implement full tracking evaluation logic
-        print("TODO: Implement evaluate() for deep tracking accuracy and drift metrics.")
-        return 0.0
+        import os
+        import pickle
+        import tensorflow as tf
+        
+        if not os.path.exists(dataset_dir):
+            raise FileNotFoundError(f"Dataset directory '{dataset_dir}' does not exist.")
+            
+        # Discover and sort pickles numerically
+        pickle_files = []
+        for f in os.listdir(dataset_dir):
+            if f.startswith("dataset_") and f.endswith(".pkl"):
+                pickle_files.append(f)
+                
+        if not pickle_files:
+            raise FileNotFoundError(f"No pickle files (dataset_*.pkl) found in '{dataset_dir}'.")
+            
+        # Sort numerically: dataset_0.pkl, dataset_1.pkl, ... dataset_63.pkl
+        def extract_num(filename):
+            try:
+                return int(filename.split("_")[1].split(".")[0])
+            except Exception:
+                return 999999
+                
+        pickle_files.sort(key=extract_num)
+        print(f"Discovered {len(pickle_files)} dataset pickle files.")
+        
+        # Split pickles
+        val_files = [os.path.join(dataset_dir, f) for f in pickle_files[:eval_pkl_num]]
+        train_files = [os.path.join(dataset_dir, f) for f in pickle_files[eval_pkl_num:]]
+        
+        if not val_files:
+            raise ValueError(f"No validation pickle files. Adjust eval_pkl_num ({eval_pkl_num}) or add pickles.")
+        if not train_files:
+            print("Warning: No training pickles left after validation split! Using validation pickles for training too.")
+            train_files = val_files
+            
+        print(f"Split: {len(val_files)} pickles for evaluation, {len(train_files)} pickles for training.")
+        
+        # Generator creator
+        def make_generator(paths):
+            def generator():
+                for path in paths:
+                    with open(path, "rb") as f:
+                        data = pickle.load(f)
+                    inputs = data["inputs"]
+                    targets = data["targets"]
+                    # Yields a tuple of (inputs, targets)
+                    yield (tuple(inputs), targets)
+            return generator
+            
+        # Output signature specs
+        output_signature = (
+            (
+                tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32, name="hist_frame"),
+                tf.TensorSpec(shape=(None, 2), dtype=tf.float32, name="hist_coords"),
+                tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32, name="prev_frame"),
+                tf.TensorSpec(shape=(None, 2), dtype=tf.float32, name="prev_coords"),
+                tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32, name="curr_frame"),
+            ),
+            tf.TensorSpec(shape=(None, 2), dtype=tf.float32, name="target_coords")
+        )
+        
+        # Construct tf.data.Dataset
+        val_dataset = tf.data.Dataset.from_generator(
+            make_generator(val_files),
+            output_signature=output_signature
+        ).prefetch(tf.data.AUTOTUNE)
+        
+        train_dataset = tf.data.Dataset.from_generator(
+            make_generator(train_files),
+            output_signature=output_signature
+        ).prefetch(tf.data.AUTOTUNE)
+        
+        return train_dataset, val_dataset
+
+    def evaluate(self, dataset, loss_fn):
+        """
+        Evaluates the model on the provided validation dataset.
+        
+        Args:
+            dataset: The validation dataset (tf.data.Dataset)
+            loss_fn: The loss function to evaluate with.
+            
+        Returns:
+            float: Average loss value on the validation dataset.
+        """
+        if self.model is None:
+            raise ValueError("Model is not initialized. Call create_model() or load a model first.")
+            
+        val_loss_avg = tf.keras.metrics.Mean()
+        
+        for inputs, targets in dataset:
+            predictions = self.model(inputs, training=False)
+            loss_value = loss_fn(targets, predictions)
+            val_loss_avg.update_state(loss_value)
+            
+        return float(val_loss_avg.result())
 
     def train_epoch(self, dataset, optimizer, loss_fn):
         """
@@ -410,7 +501,6 @@ class TargetTracker:
         epoch_loss_avg = tf.keras.metrics.Mean()
         
         for step, (inputs, targets) in enumerate(dataset):
-            # inputs is expected to be a list/tuple: [prev_frames, curr_frames, prev_coords]
             with tf.GradientTape() as tape:
                 predictions = self.model(inputs, training=True)
                 loss_value = loss_fn(targets, predictions)
@@ -422,50 +512,207 @@ class TargetTracker:
             
         return float(epoch_loss_avg.result())
         
-    def train(self, dataset, lr, num_of_epochs, validation_data=None):
+    def train(self, train_dataset, val_dataset, lr, num_of_epochs, loss_name="logcosh", output_path=None):
         """
         Executes the main training process.
         
         It alternates between running a single training epoch via train_epoch
-        and performing evaluation via evaluate.
+        and performing evaluation via evaluate. It implements score tracking
+        and conditional model saving.
         
         Args:
-            dataset: The training dataset (e.g. tf.data.Dataset).
+            train_dataset: The training dataset (tf.data.Dataset).
+            val_dataset: The validation dataset (tf.data.Dataset).
             lr (float): Learning rate for training.
             num_of_epochs (int): Number of epochs to train.
-            validation_data (tf.data.Dataset, optional): Optional validation dataset.
+            loss_name (str): Selected loss function ('mse', 'huber', 'logcosh', 'wing').
+            output_path (str, optional): Target file to save the best model.
             
         Returns:
             dict: Dictionary with lists of training and validation metrics.
         """
+        # Determine the loss function
+        if loss_name == "mse":
+            loss_fn = losses.MeanSquaredError()
+        elif loss_name == "huber":
+            loss_fn = losses.Huber(delta=1.0)
+        elif loss_name == "logcosh":
+            loss_fn = losses.LogCosh()
+        elif loss_name == "wing":
+            # Custom Wing Loss for Coordinate Regression
+            def wing_loss(y_true, y_pred, w=0.1, epsilon=0.01):
+                diff = tf.abs(y_true - y_pred)
+                C = w - w * tf.math.log(1.0 + w / epsilon)
+                loss = tf.where(
+                    diff < w,
+                    w * tf.math.log(1.0 + diff / epsilon),
+                    diff - C
+                )
+                return tf.reduce_mean(loss)
+            loss_fn = wing_loss
+        else:
+            raise ValueError(f"Unknown loss function: {loss_name}")
+            
         if self.model is None:
-            self.create_model()
+            raise ValueError("Model is not initialized. Call create_model() or load a model first.")
             
         optimizer = optimizers.Adam(learning_rate=lr)
-        loss_fn = losses.MeanSquaredError()
+        
+        # Calculate initial score before training
+        epsilon = 1e-12
+        print("Calculating initial score on validation dataset...")
+        initial_val_loss = self.evaluate(val_dataset, loss_fn)
+        best_score = 1.0 / (initial_val_loss + epsilon)
+        print(f"Initial Validation Loss ({loss_name}): {initial_val_loss:.6f} | Initial Best Score: {best_score:.4f}")
         
         history = {
             "train_loss": [],
-            "val_loss": []
+            "val_loss": [],
+            "val_score": []
         }
         
-        print(f"Starting target tracker training: {num_of_epochs} epochs, lr={lr}...")
+        print(f"Starting target tracker training: {num_of_epochs} epochs, lr={lr}, loss={loss_name}...")
         
         for epoch in range(1, num_of_epochs + 1):
             # Train for one epoch
-            epoch_loss = self.train_epoch(dataset, optimizer, loss_fn)
+            epoch_loss = self.train_epoch(train_dataset, optimizer, loss_fn)
             history["train_loss"].append(epoch_loss)
             
             # Evaluate model
-            if validation_data is not None:
-                val_loss = self.evaluate(validation_data)
-            else:
-                # Fallback to evaluate using a sample subset of training data to log progress
-                val_loss = self.evaluate(dataset)
-                
+            val_loss = self.evaluate(val_dataset, loss_fn)
+            epoch_score = 1.0 / (val_loss + epsilon)
+            
             history["val_loss"].append(val_loss)
+            history["val_score"].append(epoch_score)
             
-            print(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss (MSE): {epoch_loss:.6f} | Val Loss/CLE: {val_loss:.6f}")
+            print(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} | Val Loss: {val_loss:.6f} | Score: {epoch_score:.4f}")
             
+            # Save model if score improved
+            if epoch_score > best_score:
+                old_score = best_score
+                best_score = epoch_score
+                
+                # Determine save path
+                if output_path is not None:
+                    save_path = output_path
+                else:
+                    save_path = f"tracker_model_score_{best_score:.4f}.keras"
+                
+                print(f"   [IMPROVEMENT] Score improved from {old_score:.4f} to {best_score:.4f}! Saving model to {save_path}...")
+                self.model.save(save_path)
+                
         print("Training completed successfully.")
         return history
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="TargetTracker CLI Tool")
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Available subcommands")
+    
+    # Subparser for generate_dataset
+    gen_parser = subparsers.add_parser("generate_dataset", help="Generate a synthetic tracking dataset")
+    gen_parser.add_argument(
+        "--images_path", 
+        required=True, 
+        help="Path to a directory containing raw images OR path to a .txt file containing image paths (one per line)"
+    )
+    gen_parser.add_argument(
+        "--output_path", 
+        required=True, 
+        help="Output directory where numbered pickle files will be saved"
+    )
+    gen_parser.add_argument(
+        "--batch_size", 
+        type=int, 
+        default=256, 
+        help="Batch size per pickle file (default: 256)"
+    )
+    gen_parser.add_argument(
+        "--num_of_samples", 
+        type=int, 
+        default=16384, 
+        help="Total number of samples to generate (default: 16384)"
+    )
+    
+    # Subparser for train
+    train_parser = subparsers.add_parser("train", help="Train the target tracker model")
+    train_parser.add_argument(
+        "--dataset_dir", 
+        required=True, 
+        help="Directory containing the .pkl dataset batches"
+    )
+    train_parser.add_argument(
+        "--lr", 
+        type=float, 
+        default=1e-3, 
+        help="Learning rate for optimization (default: 1e-3)"
+    )
+    train_parser.add_argument(
+        "--num_of_epochs", 
+        type=int, 
+        default=10, 
+        help="Number of epochs to train (default: 10)"
+    )
+    train_parser.add_argument(
+        "--loss", 
+        choices=["mse", "huber", "logcosh", "wing"], 
+        default="logcosh", 
+        help="Loss function to optimize (default: logcosh)"
+    )
+    train_parser.add_argument(
+        "--eval_pkl_num", 
+        type=int, 
+        default=4, 
+        help="Number of initial pickle files to allocate for evaluation (default: 4)"
+    )
+    train_parser.add_argument(
+        "--init_keras_file", 
+        type=str, 
+        default=None, 
+        help="Path to initial Keras model file to resume training from"
+    )
+    train_parser.add_argument(
+        "--output", 
+        type=str, 
+        default=None, 
+        help="Path to save the trained Keras model (if not defined, saves with score in filename)"
+    )
+    
+    args = parser.parse_args()
+    
+    if args.command == "generate_dataset":
+        TargetTracker.generate_dataset(
+            images_path=args.images_path,
+            output_path=args.output_path,
+            batch_size=args.batch_size,
+            num_of_samples=args.num_of_samples
+        )
+    elif args.command == "train":
+        # Load and split pickles
+        train_ds, val_ds = TargetTracker.load_dataset_from_pickles(
+            dataset_dir=args.dataset_dir, 
+            eval_pkl_num=args.eval_pkl_num
+        )
+        
+        # Instantiate tracker
+        tracker = TargetTracker()
+        
+        # Resume or build new model
+        if args.init_keras_file and os.path.exists(args.init_keras_file):
+            import tensorflow as tf
+            print(f"Resuming training: loading existing model from {args.init_keras_file}...")
+            tracker.model = tf.keras.models.load_model(args.init_keras_file, compile=False)
+        else:
+            print("No initial model file found or specified. Building new Keras model...")
+            tracker.create_model()
+            
+        # Start training
+        tracker.train(
+            train_dataset=train_ds,
+            val_dataset=val_ds,
+            lr=args.lr,
+            num_of_epochs=args.num_of_epochs,
+            loss_name=args.loss,
+            output_path=args.output
+        )
