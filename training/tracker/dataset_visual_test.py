@@ -83,7 +83,7 @@ class DatasetVisualizer:
         lbl = tk.Label(
             container, 
             text=label_text, 
-            font=("Inter", 11, "semibold"), 
+            font=("Inter", 11, "bold"), 
             bg="#121212", 
             fg="#00e6ff" if "Current" in label_text else "#e0e0e0"
         )
