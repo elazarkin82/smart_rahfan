@@ -604,8 +604,9 @@ class TargetTracker:
         print("Training completed successfully.")
         return history
 
-if __name__ == "__main__":
+def main(args_list=None):
     import argparse
+    import os
     
     parser = argparse.ArgumentParser(description="TargetTracker CLI Tool")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available subcommands")
@@ -679,7 +680,7 @@ if __name__ == "__main__":
         help="Path to save the trained Keras model (if not defined, saves with score in filename)"
     )
     
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
     
     if args.command == "generate_dataset":
         TargetTracker.generate_dataset(
@@ -716,3 +717,6 @@ if __name__ == "__main__":
             loss_name=args.loss,
             output_path=args.output
         )
+
+if __name__ == "__main__":
+    main()
