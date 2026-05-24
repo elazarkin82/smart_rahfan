@@ -1,0 +1,213 @@
+# Recursive Geometric Target Tracker (Keras)
+
+A high-performance, deep-learning-based recursive target tracking system implemented in Keras and Python. This model is specifically engineered to track a target object across video sequences by exploiting temporal motion dynamics and historical context. It is designed to be highly stable when running recursively while remaining highly resilient to geometric transformations (such as scaling, rotations, and perspective warping).
+
+---
+
+## 📐 Architecture Design
+
+The tracker processes three temporal frames alongside two historical coordinate inputs, extracting deep features via a shared Siamese network, injecting coordinates at feature bottlenecks, and regressing local target displacement.
+
+```mermaid
+graph TD
+    %% Inputs
+    subgraph Inputs ["Inputs (normalized)"]
+        H_Img["Distant Frame<br>(256, 256, 1)"]
+        H_Coord["Distant Coords<br>(x_hist, y_hist)"]
+        P_Img["Previous Frame<br>(256, 256, 1)"]
+        P_Coord["Previous Coords<br>(x_prev, y_prev)"]
+        C_Img["Current Frame<br>(256, 256, 1)"]
+    end
+
+    %% Siamese Feature Extraction
+    subgraph Siamese_Backbone ["Siamese CNN Feature Extractor (Shared Weights)"]
+        CNN_H["Siamese CNN"]
+        CNN_P["Siamese CNN"]
+        CNN_C["Siamese CNN"]
+    end
+
+    H_Img --> CNN_H
+    P_Img --> CNN_P
+    C_Img --> CNN_C
+
+    %% CNN Feature Maps
+    CNN_H --> F_H["Hist Features<br>(8, 8, 256)"]
+    CNN_P --> F_P["Prev Features<br>(8, 8, 256)"]
+    CNN_C --> F_C["Curr Features<br>(8, 8, 256)"]
+
+    %% Coordinate Projections
+    subgraph Coord_Injection ["Spatial Coordinate Injection"]
+        Proj_H["Dense + Reshape"]
+        Proj_P["Dense + Reshape"]
+        
+        H_Coord --> Proj_H
+        P_Coord --> Proj_P
+        
+        Grid_H["Hist Grid<br>(8, 8, 16)"]
+        Grid_P["Prev Grid<br>(8, 8, 16)"]
+        
+        Proj_H --> Grid_H
+        Proj_P --> Grid_P
+    end
+
+    %% Bottleneck Fusion
+    subgraph Spatial_Fusion ["Bottleneck Fusion"]
+        Concat_H["Concatenate"]
+        Concat_P["Concatenate"]
+        
+        F_H --> Concat_H
+        Grid_H --> Concat_H
+        
+        F_P --> Concat_P
+        Grid_P --> Concat_P
+        
+        Conv_1x1_H["Conv 1x1 (256)"]
+        Conv_1x1_P["Conv 1x1 (256)"]
+        
+        Concat_H --> Conv_1x1_H
+        Concat_P --> Conv_1x1_P
+        
+        Fused_H["Fused Hist Features<br>(8, 8, 256)"]
+        Fused_P["Fused Prev Features<br>(8, 8, 256)"]
+        
+        Conv_1x1_H --> Fused_H
+        Conv_1x1_P --> Fused_P
+    end
+
+    %% Temporal and Motion Fusion
+    subgraph Motion_Dynamics ["Motion Dynamics & Temporal Fusion"]
+        Sub_H2P["Subtract (Prev - Hist)"]
+        Sub_P2C["Subtract (Curr - Prev)"]
+        
+        Fused_H --> Sub_H2P
+        Fused_P --> Sub_H2P
+        
+        Fused_P --> Sub_P2C
+        F_C --> Sub_P2C
+        
+        Concat_Temp["Concatenate Channel-wise"]
+        
+        Fused_H --> Concat_Temp
+        Fused_P --> Concat_Temp
+        F_C --> Concat_Temp
+        Sub_H2P --> Concat_Temp
+        Sub_P2C --> Concat_Temp
+    end
+
+    %% Decision Network
+    subgraph Regressor ["Regression Network"]
+        Disp_Conv["Conv 3x3 + BN + ReLU<br>(256 channels)"]
+        GAP["Global Average Pooling"]
+        FC1["Dense (128) + Dropout (0.2)"]
+        FC2["Dense (64)"]
+        Raw_Offset["Dense (2, tanh)"]
+        Scale_Offset["Scale (x max_offset)"]
+        
+        Concat_Temp --> Disp_Conv
+        Disp_Conv --> GAP
+        GAP --> FC1
+        FC1 --> FC2
+        FC2 --> Raw_Offset
+        Raw_Offset --> Scale_Offset
+    end
+
+    %% Residual Addition
+    subgraph Residual_Output ["Residual Offset Addition"]
+        Add_Node["tf.keras.layers.Add"]
+        P_Coord --> Add_Node
+        Scale_Offset --> Add_Node
+        New_Coord["Predicted Coords<br>(x_new, y_new)"]
+        Add_Node --> New_Coord
+    end
+```
+
+---
+
+## 🛠️ Key Architectural Paradigms
+
+### 1. Siamese Feature Extraction
+Frames separated in time share a single convolutional neural network. This forces the model to learn invariant descriptors of the target's physical appearance (e.g. textures, boundaries, local geometry) rather than temporal-specific noise, boosting tracking robustness.
+
+### 2. Dual Spatial Coordinate Injection
+Standard CNNs are translation-invariant and cannot easily associate raw scalar numbers like coordinates `[x, y]` with high-dimensional feature grids. To solve this:
+* Scalar `[x, y]` coordinates are projected to a higher-dimensional space ($8 \times 8 \times 16$) using a Dense layer.
+* These spatial coordinate grids are concatenated with the convolutional features extracted from the corresponding frames.
+* A $1 \times 1$ convolution blends visual features with spatial location priors, enabling the CNN to remain translation-aware.
+
+### 3. Temporal Motion & Geometric Warping Fusion
+The network explicitly models motion displacement across two temporal steps:
+$$\mathbf{M}_{\text{hist}\to\text{prev}} = \mathbf{F}_{\text{prev\_fused}} - \mathbf{F}_{\text{hist\_fused}}$$
+$$\mathbf{M}_{\text{prev}\to\text{curr}} = \mathbf{F}_{\text{curr}} - \mathbf{F}_{\text{prev\_fused}}$$
+
+By combining these displacement matrices with the visual appearances, the model captures the velocity, acceleration, and scaling trends of the target object. This provides resilience to geometric warping such as aspect ratio shifts or rotation.
+
+### 4. Residual (Offset) Regression for Stability
+To eliminate tracking drift, the network performs **local neighborhood regression**:
+* Rather than predicting raw coordinates over the entire $256 \times 256$ workspace, the model predicts the relative offset vector $(\Delta x, \Delta y)$ from the immediate previous known location $\mathbf{C}_{\text{prev}}$.
+* The output is squashed using a `tanh` activation to $[-1, 1]$ and scaled by a configurable `max_offset` constraint (e.g., $0.2$, representing $20\%$ of the image dimension):
+$$\mathbf{C}_{\text{new}} = \mathbf{C}_{\text{prev}} + \text{max\_offset} \cdot \tanh(\mathbf{z})$$
+* This limits the search window, filters out extreme outlying predictions, and ensures strong numerical convergence when run recursively.
+
+---
+
+## 📂 File Structure
+
+* **`tracker/__init__.py`**: Exposes the main model class.
+* **`tracker/model.py`**: Implementation of `TargetTracker`, custom epoch training steps, and loop logic.
+* **`test_tracker.py`**: An automated, self-contained verification test suite to check model construction, shapes, forward pass, and backpropagation gradients.
+
+---
+
+## 📘 API Reference
+
+### `TargetTracker`
+
+#### `__init__(input_shape=(256, 256, 1), max_offset=0.2)`
+Initializes the target tracker.
+* `input_shape`: Dimension of the input video frames (Height, Width, Channels). Default is `(256, 256, 1)`.
+* `max_offset`: Maximum fractional displacement step allowed per frame. Default is `0.2` (max $51.2$ pixels movement per step).
+
+#### `create_model()`
+Constructs the Keras functional model graph.
+* **Inputs**:
+  1. `hist_frame`: `(batch_size, 256, 256, 1)`
+  2. `hist_coords`: `(batch_size, 2)`
+  3. `prev_frame`: `(batch_size, 256, 256, 1)`
+  4. `prev_coords`: `(batch_size, 2)`
+  5. `curr_frame`: `(batch_size, 256, 256, 1)`
+* **Outputs**:
+  * `new_coords`: `(batch_size, 2)` representing predicted `[x, y]` coordinates.
+
+#### `train_epoch(dataset, optimizer, loss_fn)`
+Trains the tracker model for one full epoch using a custom `tf.GradientTape` loop.
+* `dataset`: A `tf.data.Dataset` yielding:
+  `((hist_frames, hist_coords, prev_frames, prev_coords, curr_frames), target_coords)`
+* `optimizer`: `tf.keras.optimizers.Optimizer` instance.
+* `loss_fn`: `tf.keras.losses.Loss` instance.
+* **Returns**: Average training loss (MSE) for the epoch.
+
+#### `train(dataset, lr, num_of_epochs, validation_data=None)`
+Runs the complete training process, alternating between running `train_epoch()` and `evaluate()`.
+* `dataset`: The training dataset.
+* `lr`: Learning rate for the Adam optimizer.
+* `num_of_epochs`: Number of epochs to train.
+* `validation_data`: Optional validation dataset to evaluate against.
+
+#### `generate_dataset(*args, **kwargs)`
+*(TODO Placeholder)* Preparing/generating the dataset pipeline. Recommend applying random Gaussian noise to `prev_coords` during training to simulate recursive tracking errors and avoid compounding feedback drift.
+
+#### `evaluate(dataset)`
+*(TODO Placeholder)* Evaluates the model on validation data. Recommend measuring Euclidean **Center Location Error (CLE)** and tracking success rates over long sequences (recursive drift evaluation).
+
+---
+
+## 🚀 How to Run Verification
+
+The verification script runs fully inside your dedicated Docker environment. It builds the model, verifies functional paths, tests shape compliance, and trains on a small dummy dataset.
+
+Navigate to the `smart_rahfan` project directory and run:
+
+```bash
+cd /home/elazarkin/work/deeplearning/home/work/projects/ksg/smart_rahfan
+PYTHONPATH=training python3 training/test_tracker.py
+```
