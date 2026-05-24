@@ -221,19 +221,29 @@ class TargetTracker:
         # Ensure output directory exists
         os.makedirs(output_path, exist_ok=True)
         
-        # Helper to apply random affine warp for parallax simulation
+        # Helper to apply random affine warp and rotation for parallax simulation
         def apply_parallax_warp(img_256, coords):
-            src_pts = np.float32([[10, 10], [246, 10], [10, 246]])
-            delta = 6.0  # Max pixel distortion perturbation
+            # 1. Random Orientation Rotation (between -20.0 and +20.0 degrees)
+            angle = np.random.uniform(-20.0, 20.0)
+            R = cv2.getRotationMatrix2D((128.0, 128.0), angle, 1.0)
+            rotated_img = cv2.warpAffine(img_256, R, (256, 256), borderMode=cv2.BORDER_REPLICATE)
+            
+            # Map normalized target coordinates to 256x256 pixel space and apply rotation
+            x_px, y_px = coords[0] * 256.0, coords[1] * 256.0
+            pt_rot = np.array([x_px, y_px, 1.0], dtype=np.float32)
+            rotated_pt = np.dot(R, pt_rot)
+            
+            # 2. Strong Affine Distortion (Corner perturbations up to 25 pixels)
+            src_pts = np.float32([[15, 15], [240, 15], [15, 240]])
+            delta = 25.0  # Increased for highly visible, strong geometric warping
             dst_pts = src_pts + np.random.uniform(-delta, delta, src_pts.shape).astype(np.float32)
             
             M = cv2.getAffineTransform(src_pts, dst_pts)
-            warped_img = cv2.warpAffine(img_256, M, (256, 256), borderMode=cv2.BORDER_REPLICATE)
+            warped_img = cv2.warpAffine(rotated_img, M, (256, 256), borderMode=cv2.BORDER_REPLICATE)
             
-            # Map normalized coords to 256x256 pixel space
-            x_px, y_px = coords[0] * 256.0, coords[1] * 256.0
-            pt = np.array([x_px, y_px, 1.0], dtype=np.float32)
-            warped_pt = np.dot(M, pt)
+            # Apply affine warp to the already rotated coordinates
+            pt_warp = np.array([rotated_pt[0], rotated_pt[1], 1.0], dtype=np.float32)
+            warped_pt = np.dot(M, pt_warp)
             
             # Re-normalize and clip to [0, 1]
             x_warped = np.clip(warped_pt[0] / 256.0, 0.0, 1.0)
