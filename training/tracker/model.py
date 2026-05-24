@@ -6,19 +6,21 @@ class TargetTracker:
     A recursive deep-learning-based target tracker in Keras.
     
     This model tracks a target object across consecutive video frames. It takes:
-      1. Previous frame: (256, 256, 1) grayscale image
-      2. Current frame: (256, 256, 1) grayscale image
-      3. Previous target coordinates: [x, y] in normalized [0, 1] range
+      1. Distant (historical) frame: (256, 256, 1) grayscale image
+      2. Distant (historical) target coordinates: [x, y] in normalized [0, 1] range
+      3. Previous frame: (256, 256, 1) grayscale image
+      4. Previous target coordinates: [x, y] in normalized [0, 1] range
+      5. Current frame: (256, 256, 1) grayscale image
     
     It outputs:
       - Predicted new target coordinates [x, y] in the current frame.
       
     To achieve high recursive stability and prevent drift over time, the model:
-      - Uses a shared Siamese CNN to learn frame-invariant target appearance.
-      - Projects previous coordinates to a spatial grid, injecting them at the CNN bottleneck
-        to merge visual content with location priors.
-      - Regresses a relative coordinate offset (bounded by a maximum displacement)
-        rather than absolute coordinates, stabilizing tracking predictions.
+      - Uses a shared Siamese CNN to learn frame-invariant target appearance across all three frames.
+      - Projects both historical and previous coordinates to spatial grids, injecting them at the 
+        CNN bottlenecks to merge visual content with corresponding location priors.
+      - Regresses a relative coordinate offset (bounded by a maximum displacement) relative to the 
+        previous target position, ensuring local consistency and preventing sudden drift.
     """
     
     def __init__(self, input_shape=(256, 256, 1), max_offset=0.2):
@@ -69,40 +71,55 @@ class TargetTracker:
             tf.keras.Model: The constructed Keras tracking model.
         """
         # Inputs
+        hist_frame_in = layers.Input(shape=self.input_shape, name="hist_frame")
+        hist_coords_in = layers.Input(shape=(2,), name="hist_coords") # [x, y] normalized
+        
         prev_frame_in = layers.Input(shape=self.input_shape, name="prev_frame")
-        curr_frame_in = layers.Input(shape=self.input_shape, name="curr_frame")
         prev_coords_in = layers.Input(shape=(2,), name="prev_coords") # [x, y] normalized
+        
+        curr_frame_in = layers.Input(shape=self.input_shape, name="curr_frame")
         
         # Instantiate Siamese CNN Backbone
         cnn_backbone = self._create_cnn_backbone()
         
-        # Extract features from both frames
+        # Extract features from all three frames
+        hist_features = cnn_backbone(hist_frame_in) # Shape: (8, 8, 256)
         prev_features = cnn_backbone(prev_frame_in) # Shape: (8, 8, 256)
         curr_features = cnn_backbone(curr_frame_in) # Shape: (8, 8, 256)
         
-        # Spatial Coordinate Injection:
-        # Standard CNNs struggle to relate numerical coordinates to spatial feature maps.
-        # We project the [x, y] vector into a spatial map and merge it with prev_features.
-        coord_proj = layers.Dense(8 * 8 * 16, activation="relu", name="coords_projection")(prev_coords_in)
-        coord_grid = layers.Reshape((8, 8, 16), name="coords_reshaped")(coord_proj)
-        
-        # Concatenate coordinate grid to the previous frame's feature map
-        prev_features_with_coords = layers.Concatenate(axis=-1, name="prev_spatial_fusion")(
-            [prev_features, coord_grid]
+        # Spatial Coordinate Injection for Historical Frame:
+        hist_coord_proj = layers.Dense(8 * 8 * 16, activation="relu", name="hist_coords_projection")(hist_coords_in)
+        hist_coord_grid = layers.Reshape((8, 8, 16), name="hist_coords_reshaped")(hist_coord_proj)
+        hist_features_with_coords = layers.Concatenate(axis=-1, name="hist_spatial_fusion")(
+            [hist_features, hist_coord_grid]
         ) # Shape: (8, 8, 272)
         
-        # Fuse spatial visual features and coordinates via 1x1 convolution
+        hist_features_fused = layers.Conv2D(256, (1, 1), padding="same", activation="relu", name="hist_bottleneck")(
+            hist_features_with_coords
+        )
+        hist_features_fused = layers.BatchNormalization()(hist_features_fused)
+        
+        # Spatial Coordinate Injection for Previous Frame:
+        prev_coord_proj = layers.Dense(8 * 8 * 16, activation="relu", name="prev_coords_projection")(prev_coords_in)
+        prev_coord_grid = layers.Reshape((8, 8, 16), name="prev_coords_reshaped")(prev_coord_proj)
+        prev_features_with_coords = layers.Concatenate(axis=-1, name="prev_spatial_fusion")(
+            [prev_features, prev_coord_grid]
+        ) # Shape: (8, 8, 272)
+        
         prev_features_fused = layers.Conv2D(256, (1, 1), padding="same", activation="relu", name="prev_bottleneck")(
             prev_features_with_coords
         )
         prev_features_fused = layers.BatchNormalization()(prev_features_fused)
         
-        # Feature Fusion for Displacement Logic:
-        # We concatenate previous fused features, current features, and their element-wise difference (motion cue)
-        motion_cue = layers.Subtract(name="visual_motion_cue")([curr_features, prev_features_fused])
+        # Temporal Feature Fusion & Motion Dynamics:
+        # We calculate displacements: hist -> prev, and prev -> curr
+        motion_hist_to_prev = layers.Subtract(name="visual_motion_hist_to_prev")([prev_features_fused, hist_features_fused])
+        motion_prev_to_curr = layers.Subtract(name="visual_motion_prev_to_curr")([curr_features, prev_features_fused])
+        
+        # Concatenate fused visual features and motion dynamics to handle geometric transformations
         fused_features = layers.Concatenate(axis=-1, name="temporal_visual_fusion")(
-            [prev_features_fused, curr_features, motion_cue]
-        ) # Shape: (8, 8, 768)
+            [hist_features_fused, prev_features_fused, curr_features, motion_hist_to_prev, motion_prev_to_curr]
+        ) # Shape: (8, 8, 1280)
         
         # Process fused representations
         x = layers.Conv2D(256, (3, 3), padding="same", activation="relu", name="displacement_conv")(fused_features)
@@ -114,7 +131,7 @@ class TargetTracker:
         x = layers.Dropout(0.2, name="dropout_regressor")(x)
         x = layers.Dense(64, activation="relu", name="fc_regressor_2")(x)
         
-        # Regression Layer - outputs delta coordinates in [-1, 1] via tanh activation
+        # Regression Layer - outputs delta coordinates relative to previous frame position
         delta_coords = layers.Dense(2, activation="tanh", name="delta_coords_raw")(x)
         
         # Scale displacement by max_offset to constrain step size and maximize recursive stability
@@ -128,7 +145,7 @@ class TargetTracker:
         
         # Define functional Keras model
         self.model = models.Model(
-            inputs=[prev_frame_in, curr_frame_in, prev_coords_in],
+            inputs=[hist_frame_in, hist_coords_in, prev_frame_in, prev_coords_in, curr_frame_in],
             outputs=new_coords,
             name="TargetTrackerNetwork"
         )
@@ -142,9 +159,11 @@ class TargetTracker:
         TODO: Implement custom dataset pipeline or tf.data.Dataset generator.
         The dataset should yield:
           - inputs: A dictionary or tuple containing:
+              - 'hist_frame': shape (batch_size, 256, 256, 1)
+              - 'hist_coords': shape (batch_size, 2) representing target coordinates [x, y] in hist_frame
               - 'prev_frame': shape (batch_size, 256, 256, 1)
-              - 'curr_frame': shape (batch_size, 256, 256, 1)
               - 'prev_coords': shape (batch_size, 2) representing target coordinates [x, y] in prev_frame
+              - 'curr_frame': shape (batch_size, 256, 256, 1)
           - targets: shape (batch_size, 2) representing target coordinates [x, y] in curr_frame
           
         Recommended data preparation steps:
@@ -180,7 +199,7 @@ class TargetTracker:
         
         Args:
             dataset: A tf.data.Dataset yielding a tuple:
-                     ((prev_frames, curr_frames, prev_coords), target_coords)
+                     ((hist_frames, hist_coords, prev_frames, prev_coords, curr_frames), target_coords)
             optimizer: A tf.keras.optimizers.Optimizer instance.
             loss_fn: A tf.keras.losses.Loss instance.
             

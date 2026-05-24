@@ -18,18 +18,20 @@ def run_tests():
     print("   [SUCCESS] Model successfully built.")
     
     # Verify input/output shapes
-    assert len(model.inputs) == 3, f"Expected 3 inputs, got {len(model.inputs)}"
+    assert len(model.inputs) == 5, f"Expected 5 inputs, got {len(model.inputs)}"
     assert model.output_shape == (None, 2), f"Expected output shape (None, 2), got {model.output_shape}"
     print(f"   [SUCCESS] Input count: {len(model.inputs)}, Output shape: {model.output_shape}")
     
     # 3. Dummy Forward Pass
     print("\n3. Testing forward pass with dummy tensors...")
     batch_size = 4
+    dummy_hist_frame = tf.random.uniform((batch_size, 256, 256, 1), dtype=tf.float32)
+    dummy_hist_coords = tf.random.uniform((batch_size, 2), minval=0.1, maxval=0.9, dtype=tf.float32)
     dummy_prev_frame = tf.random.uniform((batch_size, 256, 256, 1), dtype=tf.float32)
-    dummy_curr_frame = tf.random.uniform((batch_size, 256, 256, 1), dtype=tf.float32)
     dummy_prev_coords = tf.random.uniform((batch_size, 2), minval=0.1, maxval=0.9, dtype=tf.float32)
+    dummy_curr_frame = tf.random.uniform((batch_size, 256, 256, 1), dtype=tf.float32)
     
-    predictions = model([dummy_prev_frame, dummy_curr_frame, dummy_prev_coords])
+    predictions = model([dummy_hist_frame, dummy_hist_coords, dummy_prev_frame, dummy_prev_coords, dummy_curr_frame])
     
     print(f"   Input prev_coords sample:\n{dummy_prev_coords.numpy()}")
     print(f"   Output new_coords sample:\n{predictions.numpy()}")
@@ -42,15 +44,17 @@ def run_tests():
     
     # Create fake dataset of 5 batches
     num_batches = 5
+    x_hist = np.random.rand(num_batches * batch_size, 256, 256, 1).astype(np.float32)
+    coords_hist = np.random.uniform(0.1, 0.9, (num_batches * batch_size, 2)).astype(np.float32)
     x_prev = np.random.rand(num_batches * batch_size, 256, 256, 1).astype(np.float32)
-    x_curr = np.random.rand(num_batches * batch_size, 256, 256, 1).astype(np.float32)
     coords_prev = np.random.uniform(0.1, 0.9, (num_batches * batch_size, 2)).astype(np.float32)
+    x_curr = np.random.rand(num_batches * batch_size, 256, 256, 1).astype(np.float32)
     coords_target = np.clip(coords_prev + np.random.uniform(-0.1, 0.1, (num_batches * batch_size, 2)), 0.0, 1.0).astype(np.float32)
     
     # Create tf.data.Dataset
-    # The training loop expects: ((prev_frames, curr_frames, prev_coords), target_coords)
+    # The training loop expects: ((hist_frames, hist_coords, prev_frames, prev_coords, curr_frames), target_coords)
     dataset = tf.data.Dataset.from_tensor_slices((
-        (x_prev, x_curr, coords_prev),
+        (x_hist, coords_hist, x_prev, coords_prev, x_curr),
         coords_target
     )).batch(batch_size)
     
