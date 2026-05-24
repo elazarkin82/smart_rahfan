@@ -233,3 +233,15 @@ To run the automated dataset generator test suite (which sets up dummy images, r
 ```bash
 PYTHONPATH=training python3 training/test_generator.py
 ```
+
+### 🖼️ How to Run Visual Dataset Inspector (GUI)
+
+To visually inspect the synthetically generated frames (Distant, Previous, and Current) with their target labels in a graphical dark-mode Tkinter interface, run:
+
+```bash
+python3 training/tracker/dataset_visual_test.py --image_dir /path/to/your/images
+```
+
+* **Controls**:
+  - **`Space`**: Dynamically generates the next single-sample tracking sequence (`batch_size=1`) and displays it.
+  - **`Escape`**: Closes the application and cleans up temporary visual test files.
