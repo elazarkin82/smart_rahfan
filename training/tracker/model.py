@@ -135,8 +135,8 @@ class TargetTracker:
         delta_coords = layers.Dense(2, activation="tanh", name="delta_coords_raw")(x)
         
         # Scale displacement by max_offset to constrain step size and maximize recursive stability
-        scaled_delta = layers.Lambda(
-            lambda d: d * self.max_offset, 
+        scaled_delta = layers.Rescaling(
+            scale=float(self.max_offset), 
             name="delta_coords_scaled"
         )(delta_coords)
         
