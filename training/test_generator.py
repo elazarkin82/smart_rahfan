@@ -11,12 +11,14 @@ def run_generator_tests():
     # 1. Setup Temporary Directories
     test_img_dir = "temp_test_images"
     test_output_dir = "temp_output_pickles"
+    test_txt_list = "temp_test_images_list.txt"
     
     os.makedirs(test_img_dir, exist_ok=True)
     os.makedirs(test_output_dir, exist_ok=True)
     
     print("1. Creating dummy test images...")
     # Create two dummy images of size 500x500 with simple shapes
+    image_filepaths = []
     for i in range(2):
         img = np.zeros((500, 500), dtype=np.uint8)
         # Draw a square target in the center
@@ -25,42 +27,76 @@ def run_generator_tests():
         cv2.circle(img, (100, 100), 40, 128, -1)
         cv2.circle(img, (400, 400), 30, 80, -1)
         
-        cv2.imwrite(os.path.join(test_img_dir, f"dummy_{i}.png"), img)
+        path = os.path.abspath(os.path.join(test_img_dir, f"dummy_{i}.png"))
+        cv2.imwrite(path, img)
+        image_filepaths.append(path)
         
     print(f"   [SUCCESS] 2 dummy images created in '{test_img_dir}/'.")
     
-    # 2. Execute generate_dataset
-    print("\n2. Executing TargetTracker.generate_dataset()...")
+    # Create a text file listing these images
+    with open(test_txt_list, "w", encoding="utf-8") as f:
+        for p in image_filepaths:
+            f.write(p + "\n")
+    print(f"   [SUCCESS] Image list file created: '{test_txt_list}'")
+    
+    # 2. Execute generate_dataset using Directory Mode
+    print("\n2. Executing TargetTracker.generate_dataset() in Directory Mode...")
     batch_size = 4
     num_samples = 8
     
     try:
         TargetTracker.generate_dataset(
-            image_dir=test_img_dir,
+            images_path=test_img_dir,
             output_path=test_output_dir,
             batch_size=batch_size,
             num_of_samples=num_samples
         )
-        print("   [SUCCESS] generate_dataset completed execution.")
+        print("   [SUCCESS] generate_dataset directory mode completed execution.")
     except Exception as e:
-        print(f"   [FAILURE] generate_dataset failed: {e}")
-        # Cleanup and raise
-        shutil.rmtree(test_img_dir)
-        shutil.rmtree(test_output_dir)
+        print(f"   [FAILURE] generate_dataset directory mode failed: {e}")
+        cleanup(test_img_dir, test_output_dir, test_txt_list)
         raise e
         
-    # 3. Verify Output Pickles
-    print("\n3. Verifying output pickle files...")
-    pickle_files = sorted(os.listdir(test_output_dir))
+    # Verify Output Pickles
+    verify_pickles(test_output_dir, batch_size, num_samples)
+    
+    # Clear directory mode output
+    shutil.rmtree(test_output_dir)
+    os.makedirs(test_output_dir, exist_ok=True)
+    
+    # 3. Execute generate_dataset using Text List Mode
+    print("\n3. Executing TargetTracker.generate_dataset() in Text File List Mode...")
+    try:
+        TargetTracker.generate_dataset(
+            images_path=test_txt_list,
+            output_path=test_output_dir,
+            batch_size=batch_size,
+            num_of_samples=num_samples
+        )
+        print("   [SUCCESS] generate_dataset text file list mode completed execution.")
+    except Exception as e:
+        print(f"   [FAILURE] generate_dataset text file list mode failed: {e}")
+        cleanup(test_img_dir, test_output_dir, test_txt_list)
+        raise e
+        
+    # Verify Output Pickles from text file mode
+    verify_pickles(test_output_dir, batch_size, num_samples)
+    
+    # 4. Final Cleanup
+    print("\n4. Cleaning up temporary test directories...")
+    cleanup(test_img_dir, test_output_dir, test_txt_list)
+    print("   [SUCCESS] Cleanup completed.")
+    
+    print("\n=== All Dataset Generator Tests Passed Successfully! ===")
+
+def verify_pickles(output_dir, batch_size, num_samples):
+    pickle_files = sorted(os.listdir(output_dir))
     expected_pickles = [f"dataset_{i}.pkl" for i in range(num_samples // batch_size)]
     
     assert pickle_files == expected_pickles, f"Expected pickles {expected_pickles}, but got {pickle_files}"
-    print(f"   [SUCCESS] Created expected pickle files: {pickle_files}")
     
-    # 4. Verify Shapes and Bounds of Loaded Data
-    print("\n4. Loading and validating pickle data structure...")
     for pf in pickle_files:
-        filepath = os.path.join(test_output_dir, pf)
+        filepath = os.path.join(output_dir, pf)
         with open(filepath, "rb") as f:
             data = pickle.load(f)
             
@@ -89,14 +125,15 @@ def run_generator_tests():
         assert np.all(prev_coords >= 0.0) and np.all(prev_coords <= 1.0), "prev_coords contain values out of [0, 1]"
         assert np.all(targets >= 0.0) and np.all(targets <= 1.0), "targets contain values out of [0, 1]"
         
-        print(f"   [SUCCESS] Checked {pf}: All shapes and bounds are correct.")
-        
-    print("\n5. Cleaning up temporary test directories...")
-    shutil.rmtree(test_img_dir)
-    shutil.rmtree(test_output_dir)
-    print("   [SUCCESS] Cleanup completed.")
-    
-    print("\n=== All Dataset Generator Tests Passed Successfully! ===")
+    print(f"   [SUCCESS] Verified pickle outputs: All shapes and bounds are correct.")
+
+def cleanup(img_dir, output_dir, txt_file):
+    if os.path.exists(img_dir):
+        shutil.rmtree(img_dir)
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    if os.path.exists(txt_file):
+        os.remove(txt_file)
 
 if __name__ == "__main__":
     run_generator_tests()

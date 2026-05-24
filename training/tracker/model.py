@@ -153,9 +153,9 @@ class TargetTracker:
         return self.model
         
     @staticmethod
-    def generate_dataset(image_dir, output_path, batch_size=256, num_of_samples=16384):
+    def generate_dataset(images_path, output_path, batch_size=256, num_of_samples=16384):
         """
-        Generates a synthetic tracking dataset from a directory of raw images.
+        Generates a synthetic tracking dataset from a directory of raw images or a text file listing images.
         
         This method processes raw images and extracts sequences representing:
           1. hist_frame: A distant view (larger bounding box).
@@ -170,7 +170,8 @@ class TargetTracker:
         coordinates are mathematically transformed by the same matrix to ensure label alignment.
         
         Args:
-            image_dir (str): Directory containing raw images.
+            images_path (str): Path to a directory containing raw images OR path to a .txt file
+                               containing absolute/relative image paths (one per line).
             output_path (str): Output directory where the pickle files will be saved.
             batch_size (int): Batch size per pickle file.
             num_of_samples (int): Desired total number of samples. This will be rounded
@@ -183,18 +184,34 @@ class TargetTracker:
         
         print("Starting dataset generation crawling...")
         
-        # 1. Search for images using os.walk (faster than glob)
         image_extensions = (".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG")
         image_paths = []
-        for root, _, files in os.walk(image_dir):
-            for f in files:
-                if f.lower().endswith(image_extensions):
-                    image_paths.append(os.path.join(root, f))
-                    
-        if not image_paths:
-            raise ValueError(f"No images with extensions {image_extensions} found in {image_dir}")
+        
+        if os.path.isdir(images_path):
+            # Crawl directory recursively
+            for root, _, files in os.walk(images_path):
+                for f in files:
+                    if f.lower().endswith(image_extensions):
+                        image_paths.append(os.path.join(root, f))
+            if not image_paths:
+                raise ValueError(f"No images with extensions {image_extensions} found in directory {images_path}")
+        elif os.path.isfile(images_path):
+            # Read from text file list
+            with open(images_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            for line in lines:
+                path = line.strip()
+                if path and path.lower().endswith(image_extensions):
+                    if os.path.exists(path):
+                        image_paths.append(path)
+                    else:
+                        print(f"Warning: Image file listed in txt does not exist: {path}")
+            if not image_paths:
+                raise ValueError(f"No valid existing images listed in text file {images_path}")
+        else:
+            raise ValueError(f"Invalid images_path (not a directory or file): {images_path}")
             
-        print(f"Found {len(image_paths)} images. Preparing samples...")
+        print(f"Found {len(image_paths)} valid images. Preparing samples...")
         
         # 2. Round num_of_samples to be divisible by batch_size
         num_batches = int(np.ceil(num_of_samples / batch_size))

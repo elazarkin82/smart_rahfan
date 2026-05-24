@@ -194,10 +194,10 @@ Runs the complete training process, alternating between running `train_epoch()` 
 * `num_of_epochs`: Number of epochs to train.
 * `validation_data`: Optional validation dataset to evaluate against.
 
-#### `TargetTracker.generate_dataset(image_dir, output_path, batch_size=256, num_of_samples=16384)`
-*(Static Method)* Synthetically generates a high-quality recursive tracking dataset from a directory of raw images.
+#### `TargetTracker.generate_dataset(images_path, output_path, batch_size=256, num_of_samples=16384)`
+*(Static Method)* Synthetically generates a high-quality recursive tracking dataset from a directory of raw images or a text file listing images.
 * **Parameters**:
-  - `image_dir` (str): Folder to recursively scan for images via `os.walk` (finds `.jpg`, `.jpeg`, `.png` files, case-insensitively).
+  - `images_path` (str): Path to a directory containing raw images OR path to a `.txt` file containing absolute/relative image paths (one per line). Grayscale images with extensions `.jpg`, `.jpeg`, `.png` are supported.
   - `output_path` (str): Folder where numbered pickle batches are saved (`dataset_0.pkl`, `dataset_1.pkl`, ...).
   - `batch_size` (int): Number of sequences packed into each pickle file. Default is `256`.
   - `num_of_samples` (int): Desired total sample size. Auto-rounded up to the nearest multiple of `batch_size`. Default is `16384`.
@@ -239,7 +239,7 @@ PYTHONPATH=training python3 training/test_generator.py
 To visually inspect the synthetically generated frames (Distant, Previous, and Current) with their target labels in a graphical dark-mode Tkinter interface, run:
 
 ```bash
-python3 training/tracker/dataset_visual_test.py --image_dir /path/to/your/images
+python3 training/tracker/dataset_visual_test.py --images_path /path/to/your/images_or_txt_file
 ```
 
 * **Controls**:

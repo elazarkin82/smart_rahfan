@@ -15,9 +15,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tracker.model import TargetTracker
 
 class DatasetVisualizer:
-    def __init__(self, root, image_dir):
+    def __init__(self, root, images_path):
         self.root = root
-        self.image_dir = image_dir
+        self.images_path = images_path
         self.temp_dir = "temp_visual_test"
         
         # Configure window
@@ -65,7 +65,7 @@ class DatasetVisualizer:
         # 4. Footer Status Bar
         self.status_bar = tk.Label(
             self.root, 
-            text=f"Press [Space] for Next Sample  |  Press [Esc] to Exit  |  Source: {self.image_dir}",
+            text=f"Press [Space] for Next Sample  |  Press [Esc] to Exit  |  Source: {self.images_path}",
             font=("Inter", 10),
             bg="#1c1c1c",
             fg="#aaaaaa",
@@ -122,7 +122,7 @@ class DatasetVisualizer:
         try:
             # Generate a single sample
             TargetTracker.generate_dataset(
-                image_dir=self.image_dir,
+                images_path=self.images_path,
                 output_path=self.temp_dir,
                 batch_size=1,
                 num_of_samples=1
@@ -162,7 +162,7 @@ class DatasetVisualizer:
                 os.remove(pickle_path)
                 
             self.status_bar.config(
-                text=f"Press [Space] for Next Sample  |  Press [Esc] to Exit  |  Source: {self.image_dir}",
+                text=f"Press [Space] for Next Sample  |  Press [Esc] to Exit  |  Source: {self.images_path}",
                 fg="#aaaaaa"
             )
             
@@ -179,18 +179,18 @@ class DatasetVisualizer:
 def main():
     parser = argparse.ArgumentParser(description="TargetTracker Visual Dataset Inspector GUI")
     parser.add_argument(
-        "--image_dir", 
+        "--images_path", 
         required=True, 
-        help="Path to directory containing raw images (jpg, png, etc.)"
+        help="Path to directory containing raw images OR path to a .txt file listing image paths (one per line)"
     )
     args = parser.parse_args()
     
-    if not os.path.exists(args.image_dir):
-        print(f"Error: Image directory '{args.image_dir}' does not exist.")
+    if not os.path.exists(args.images_path):
+        print(f"Error: Images path '{args.images_path}' does not exist.")
         sys.exit(1)
         
     root = tk.Tk()
-    app = DatasetVisualizer(root, args.image_dir)
+    app = DatasetVisualizer(root, args.images_path)
     root.mainloop()
 
 if __name__ == "__main__":
