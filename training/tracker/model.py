@@ -152,27 +152,201 @@ class TargetTracker:
         
         return self.model
         
-    def generate_dataset(self, *args, **kwargs):
+    @staticmethod
+    def generate_dataset(image_dir, output_path, batch_size=256, num_of_samples=16384):
         """
-        Generates or prepares the tracking dataset.
+        Generates a synthetic tracking dataset from a directory of raw images.
         
-        TODO: Implement custom dataset pipeline or tf.data.Dataset generator.
-        The dataset should yield:
-          - inputs: A dictionary or tuple containing:
-              - 'hist_frame': shape (batch_size, 256, 256, 1)
-              - 'hist_coords': shape (batch_size, 2) representing target coordinates [x, y] in hist_frame
-              - 'prev_frame': shape (batch_size, 256, 256, 1)
-              - 'prev_coords': shape (batch_size, 2) representing target coordinates [x, y] in prev_frame
-              - 'curr_frame': shape (batch_size, 256, 256, 1)
-          - targets: shape (batch_size, 2) representing target coordinates [x, y] in curr_frame
-          
-        Recommended data preparation steps:
-          - Inject Gaussian noise into 'prev_coords' during training to simulate recursive tracking errors.
-          - Apply data augmentation (brightness/contrast jitter, slight rotations, scaling).
+        This method processes raw images and extracts sequences representing:
+          1. hist_frame: A distant view (larger bounding box).
+          2. hist_coords: The [x, y] coordinates of the target in the distant view.
+          3. prev_frame: An immediate previous view (medium bounding box).
+          4. prev_coords: The [x, y] coordinates of the target in the previous view.
+          5. curr_frame: A current view (smaller bounding box, representing zooming in).
+        
+        The targets are the [x, y] coordinates of the target in the current frame.
+        Both hist_frame and prev_frame are warped with random affine transformations
+        to simulate real-world parallax and perspective distortions. The target
+        coordinates are mathematically transformed by the same matrix to ensure label alignment.
+        
+        Args:
+            image_dir (str): Directory containing raw images.
+            output_path (str): Output directory where the pickle files will be saved.
+            batch_size (int): Batch size per pickle file.
+            num_of_samples (int): Desired total number of samples. This will be rounded
+                                  up to the nearest multiple of batch_size.
         """
-        # TODO: Implement dataset loading and preprocessing pipeline
-        print("TODO: Implement generate_dataset() to stream video frame sequences and ground-truth coordinates.")
-        return None
+        import os
+        import cv2
+        import pickle
+        import numpy as np
+        
+        print("Starting dataset generation crawling...")
+        
+        # 1. Search for images using os.walk (faster than glob)
+        image_extensions = (".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG")
+        image_paths = []
+        for root, _, files in os.walk(image_dir):
+            for f in files:
+                if f.lower().endswith(image_extensions):
+                    image_paths.append(os.path.join(root, f))
+                    
+        if not image_paths:
+            raise ValueError(f"No images with extensions {image_extensions} found in {image_dir}")
+            
+        print(f"Found {len(image_paths)} images. Preparing samples...")
+        
+        # 2. Round num_of_samples to be divisible by batch_size
+        num_batches = int(np.ceil(num_of_samples / batch_size))
+        total_samples = num_batches * batch_size
+        print(f"Requested {num_of_samples} samples. Adjusted to {total_samples} samples ({num_batches} batches of size {batch_size}).")
+        
+        # Ensure output directory exists
+        os.makedirs(output_path, exist_ok=True)
+        
+        # Helper to apply random affine warp for parallax simulation
+        def apply_parallax_warp(img_256, coords):
+            src_pts = np.float32([[10, 10], [246, 10], [10, 246]])
+            delta = 6.0  # Max pixel distortion perturbation
+            dst_pts = src_pts + np.random.uniform(-delta, delta, src_pts.shape).astype(np.float32)
+            
+            M = cv2.getAffineTransform(src_pts, dst_pts)
+            warped_img = cv2.warpAffine(img_256, M, (256, 256), borderMode=cv2.BORDER_REPLICATE)
+            
+            # Map normalized coords to 256x256 pixel space
+            x_px, y_px = coords[0] * 256.0, coords[1] * 256.0
+            pt = np.array([x_px, y_px, 1.0], dtype=np.float32)
+            warped_pt = np.dot(M, pt)
+            
+            # Re-normalize and clip to [0, 1]
+            x_warped = np.clip(warped_pt[0] / 256.0, 0.0, 1.0)
+            y_warped = np.clip(warped_pt[1] / 256.0, 0.0, 1.0)
+            
+            return warped_img, [x_warped, y_warped]
+            
+        # Helper to crop a window around target point
+        def get_crop(img, T_x, T_y, W, H, img_w, img_h):
+            # Center of the crop is T_x, T_y with some random lateral offset (drift simulation)
+            cx = T_x + np.random.uniform(-0.3 * W, 0.3 * W)
+            cy = T_y + np.random.uniform(-0.3 * H, 0.3 * H)
+            
+            # Window boundaries
+            x1 = int(cx - W / 2)
+            y1 = int(cy - H / 2)
+            
+            # Clip to image boundaries
+            x1 = max(0, min(x1, img_w - W))
+            y1 = max(0, min(y1, img_h - H))
+            x2 = x1 + W
+            y2 = y1 + H
+            
+            # Extract crop
+            crop = img[y1:y2, x1:x2]
+            
+            # Target position relative to this crop (normalized)
+            x_norm = (T_x - x1) / W
+            y_norm = (T_y - y1) / H
+            
+            # Resize crop to 256x256
+            crop_256 = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_AREA)
+            
+            return crop_256, [x_norm, y_norm]
+            
+        # Generate samples batch by batch
+        sample_idx = 0
+        for b in range(num_batches):
+            hist_frames_batch = []
+            hist_coords_batch = []
+            prev_frames_batch = []
+            prev_coords_batch = []
+            curr_frames_batch = []
+            curr_coords_batch = []
+            
+            for _ in range(batch_size):
+                success = False
+                while not success:
+                    # Choose a random image
+                    random_img_path = np.random.choice(image_paths)
+                    img = cv2.imread(random_img_path, cv2.IMREAD_GRAYSCALE)
+                    
+                    if img is None or img.shape[0] < 300 or img.shape[1] < 300:
+                        continue  # Skip invalid or too small images
+                        
+                    img_h, img_w = img.shape[:2]
+                    
+                    # Define base crop dimensions (roughly 35% to 55% of the image)
+                    w_base = int(img_w * np.random.uniform(0.35, 0.55))
+                    h_base = int(img_h * np.random.uniform(0.35, 0.55))
+                    
+                    # Keep aspect ratio bounded and crop sizes realistic
+                    w_base = max(160, min(w_base, img_w - 60))
+                    h_base = max(160, min(h_base, img_h - 60))
+                    
+                    # Center of base area (around center of image with padding)
+                    cx_base = int(img_w / 2 + np.random.uniform(-0.15 * img_w, 0.15 * img_w))
+                    cy_base = int(img_h / 2 + np.random.uniform(-0.15 * img_h, 0.15 * img_h))
+                    
+                    x1_base = max(30, cx_base - w_base // 2)
+                    y1_base = max(30, cy_base - h_base // 2)
+                    x2_base = min(img_w - 30, x1_base + w_base)
+                    y2_base = min(img_h - 30, y1_base + h_base)
+                    
+                    w_base = x2_base - x1_base
+                    h_base = y2_base - y1_base
+                    
+                    # Choose target point T_x, T_y inside this base crop
+                    T_x = x1_base + np.random.uniform(0.15, 0.85) * w_base
+                    T_y = y1_base + np.random.uniform(0.15, 0.85) * h_base
+                    
+                    # Sizes for all three frames (hist > prev > curr)
+                    w_hist, h_hist = w_base, h_base
+                    w_prev, h_prev = int(w_base * 0.85), int(h_base * 0.85)
+                    w_curr, h_curr = int(w_base * 0.7), int(h_base * 0.7)
+                    
+                    # Crop frames and extract target coordinates
+                    hist_crop, hist_norm = get_crop(img, T_x, T_y, w_hist, h_hist, img_w, img_h)
+                    prev_crop, prev_norm = get_crop(img, T_x, T_y, w_prev, h_prev, img_w, img_h)
+                    curr_crop, curr_norm = get_crop(img, T_x, T_y, w_curr, h_curr, img_w, img_h)
+                    
+                    # Apply random affine warp to hist and prev frames for parallax distortion
+                    hist_crop_warped, hist_norm_warped = apply_parallax_warp(hist_crop, hist_norm)
+                    prev_crop_warped, prev_norm_warped = apply_parallax_warp(prev_crop, prev_norm)
+                    
+                    # Reshape to (256, 256, 1) and normalize pixel values to [0, 1]
+                    hist_frame = np.expand_dims(hist_crop_warped.astype(np.float32) / 255.0, axis=-1)
+                    prev_frame = np.expand_dims(prev_crop_warped.astype(np.float32) / 255.0, axis=-1)
+                    curr_frame = np.expand_dims(curr_crop.astype(np.float32) / 255.0, axis=-1)
+                    
+                    # Add to batches
+                    hist_frames_batch.append(hist_frame)
+                    hist_coords_batch.append(hist_norm_warped)
+                    prev_frames_batch.append(prev_frame)
+                    prev_coords_batch.append(prev_norm_warped)
+                    curr_frames_batch.append(curr_frame)
+                    curr_coords_batch.append(curr_norm)
+                    
+                    success = True
+                    
+            # Package and serialize batch
+            batch_data = {
+                "inputs": [
+                    np.array(hist_frames_batch, dtype=np.float32),
+                    np.array(hist_coords_batch, dtype=np.float32),
+                    np.array(prev_frames_batch, dtype=np.float32),
+                    np.array(prev_coords_batch, dtype=np.float32),
+                    np.array(curr_frames_batch, dtype=np.float32)
+                ],
+                "targets": np.array(curr_coords_batch, dtype=np.float32)
+            }
+            
+            output_file = os.path.join(output_path, f"dataset_{b}.pkl")
+            with open(output_file, "wb") as f:
+                pickle.dump(batch_data, f)
+                
+            sample_idx += batch_size
+            print(f"Generated and saved {sample_idx}/{total_samples} samples -> {output_file}")
+            
+        print(f"Dataset generation completed. All pickles saved to {output_path}")
         
     def evaluate(self, dataset):
         """

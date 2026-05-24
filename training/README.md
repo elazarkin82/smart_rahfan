@@ -155,6 +155,7 @@ $$\mathbf{C}_{\text{new}} = \mathbf{C}_{\text{prev}} + \text{max\_offset} \cdot 
 * **`tracker/__init__.py`**: Exposes the main model class.
 * **`tracker/model.py`**: Implementation of `TargetTracker`, custom epoch training steps, and loop logic.
 * **`test_tracker.py`**: An automated, self-contained verification test suite to check model construction, shapes, forward pass, and backpropagation gradients.
+* **`test_generator.py`**: An automated unit test verifying directory scanning, image cropping, OpenCV affine warping, coordinate translation, and pickle serialization.
 
 ---
 
@@ -193,8 +194,21 @@ Runs the complete training process, alternating between running `train_epoch()` 
 * `num_of_epochs`: Number of epochs to train.
 * `validation_data`: Optional validation dataset to evaluate against.
 
-#### `generate_dataset(*args, **kwargs)`
-*(TODO Placeholder)* Preparing/generating the dataset pipeline. Recommend applying random Gaussian noise to `prev_coords` during training to simulate recursive tracking errors and avoid compounding feedback drift.
+#### `TargetTracker.generate_dataset(image_dir, output_path, batch_size=256, num_of_samples=16384)`
+*(Static Method)* Synthetically generates a high-quality recursive tracking dataset from a directory of raw images.
+* **Parameters**:
+  - `image_dir` (str): Folder to recursively scan for images via `os.walk` (finds `.jpg`, `.jpeg`, `.png` files, case-insensitively).
+  - `output_path` (str): Folder where numbered pickle batches are saved (`dataset_0.pkl`, `dataset_1.pkl`, ...).
+  - `batch_size` (int): Number of sequences packed into each pickle file. Default is `256`.
+  - `num_of_samples` (int): Desired total sample size. Auto-rounded up to the nearest multiple of `batch_size`. Default is `16384`.
+* **Sample Structure**:
+  - **Distant Frame ($W_{hist}$)**: Resized $256 \times 256$ crop representing a larger zoom window. Distorted via a random $2\text{D}$ affine warp to simulate perspective parallax.
+  - **Distant Coords ($[x, y]$)**: Target position normalized in $W_{hist}$, mathematically transformed by the same affine warping matrix.
+  - **Previous Frame ($W_{prev}$)**: Resized $256 \times 256$ crop representing a medium zoom window (closer). Distorted via a separate random affine warp.
+  - **Previous Coords ($[x, y]$)**: Target position normalized in $W_{prev}$ and transformed by the affine matrix.
+  - **Current Frame ($W_{curr}$)**: Resized $256 \times 256$ crop representing a smaller zoom window (even closer), simulating forward progress. Not warped.
+  - **Target Coords ($[x, y]$)**: Target position normalized in $W_{curr}$, serving as the ground-truth regression target.
+* **Camera Drift Simulation**: Small random offsets are injected into the center of each crop window to simulate camera panning. Target coordinates are dynamically shifted relative to these offsets to ensure $100\%$ labeling accuracy.
 
 #### `evaluate(dataset)`
 *(TODO Placeholder)* Evaluates the model on validation data. Recommend measuring Euclidean **Center Location Error (CLE)** and tracking success rates over long sequences (recursive drift evaluation).
@@ -210,4 +224,12 @@ Navigate to the `smart_rahfan` project directory and run:
 ```bash
 cd /home/elazarkin/work/deeplearning/home/work/projects/ksg/smart_rahfan
 PYTHONPATH=training python3 training/test_tracker.py
+```
+
+### 📊 How to Run Dataset Generator Verification
+
+To run the automated dataset generator test suite (which sets up dummy images, runs the pipeline, verifies data shapes, checks coordinate bounds, and performs complete directory cleanups):
+
+```bash
+PYTHONPATH=training python3 training/test_generator.py
 ```
