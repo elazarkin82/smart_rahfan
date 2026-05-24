@@ -1,0 +1,15 @@
+# MSE
+from model import main
+main("train --dataset_dir /content/drive/MyDrive/Colab Notebooks/tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss mse --init_keras_file model_mse.keras --output model_mse.keras".split())
+
+# Huber
+from model import main
+main("train --dataset_dir /content/drive/MyDrive/Colab Notebooks/tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss huber --init_keras_file model_huber.keras --output model_huber.keras".split())
+
+# LogCosh
+from model import main
+main("train --dataset_dir /content/drive/MyDrive/Colab Notebooks/tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss logcosh --init_keras_file model_logcosh.keras --output model_logcosh.keras".split())
+
+# Wing
+from model import main
+main("train --dataset_dir /content/drive/MyDrive/Colab Notebooks/tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss wing --init_keras_file model_wing.keras --output model_wing.keras".split())
