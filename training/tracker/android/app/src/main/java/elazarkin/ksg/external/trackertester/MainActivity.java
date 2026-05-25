@@ -63,4 +63,18 @@ public class MainActivity extends AppCompatActivity {
      * which is packaged with this application.
      */
     public native String stringFromJNI();
+
+    public static native void cropAndMaskFrame(
+            android.graphics.Bitmap srcBitmap,
+            float targetX,
+            float targetY,
+            float cropScale,
+            float maskRadius,
+            float[] outBuffer
+    );
+
+    public static native float[] calculateCenterOfMass(
+            float[] heatmap,
+            float threshold
+    );
 }

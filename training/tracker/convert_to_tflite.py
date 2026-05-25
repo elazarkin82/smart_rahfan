@@ -58,8 +58,10 @@ def main():
     try:
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
         
-        # Configure basic optimizations (like standard weight/activation optimizations)
-        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        # Force a pure unquantized FLOAT32 model conversion.
+        # This completely avoids TFLite runtime errors with TRANSPOSE_CONV layers
+        # (where hybrid INT8 weights and FLOAT32 inputs are not supported on CPU).
+        # converter.optimizations = [tf.lite.Optimize.DEFAULT]
         
         print("[*] Converting model to TFLite format (this may take a minute)...")
         tflite_model = converter.convert()
