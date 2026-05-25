@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 # Add parent directory to path to allow importing tracker module if run directly
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tracker.model import TargetTracker
+from tracker.tracker_model import TargetTracker
 
 class DatasetVisualizer:
     def __init__(self, root, images_path):

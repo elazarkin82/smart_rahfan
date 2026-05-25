@@ -70,7 +70,7 @@ class KerasVisualizer(DatasetVisualizer):
             import pickle
             import numpy as np
             import tensorflow as tf
-            from tracker.model import TargetTracker
+            from tracker.tracker_model import TargetTracker
             from tkinter import messagebox
             
             # Generate a single sample
