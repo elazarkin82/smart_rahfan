@@ -136,9 +136,45 @@ def match_sift_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8):
     for idx_hist, idx_prev in hist_to_prev.items():
         if idx_prev in prev_to_curr:
             idx_curr = prev_to_curr[idx_prev]
-            pts_hist.append(kp_hist[idx_hist].pt)
-            pts_prev.append(kp_prev[idx_prev].pt)
-            pts_curr.append(kp_curr[idx_curr].pt)
+            pt_h = kp_hist[idx_hist].pt
+            pt_p = kp_prev[idx_prev].pt
+            pt_c = kp_curr[idx_curr].pt
+            
+            # 1. Filter A: Motion Magnitude (Velocity)
+            v_pc = np.array([pt_c[0] - pt_p[0], pt_c[1] - pt_p[1]], dtype=np.float32)
+            v_hp = np.array([pt_p[0] - pt_h[0], pt_p[1] - pt_h[1]], dtype=np.float32)
+            
+            dist_pc = np.sqrt(v_pc[0]**2 + v_pc[1]**2)
+            dist_hp = np.sqrt(v_hp[0]**2 + v_hp[1]**2)
+            
+            # Discard static/interior features (short-term threshold: 3.0 px, long-term threshold: 15.0 px)
+            if dist_pc < 3.0 or dist_hp < 15.0:
+                continue
+                
+            # 2. Filter B: Directional Coherence (Cosine Similarity)
+            dot_product = v_hp[0] * v_pc[0] + v_hp[1] * v_pc[1]
+            cos_theta = dot_product / (dist_hp * dist_pc + 1e-8)
+            
+            # Cosine similarity must be > 0.5 (angles less than 60 degrees) to filter out oscillations/vibrations
+            if cos_theta < 0.5:
+                continue
+                
+            # 3. Filter C: Local Texture/Variance Filter (11x11 patch standard deviation)
+            px, py = int(pt_p[0]), int(pt_p[1])
+            if py - 5 >= 0 and py + 6 <= 256 and px - 5 >= 0 and px + 6 <= 256:
+                patch = f_prev[py-5 : py+6, px-5 : px+6]
+                patch_std = np.std(patch)
+                # Standard deviation must be >= 10.0 out of 255 to reject flat/low-texture dashboard/hood parts
+                if patch_std < 10.0:
+                    continue
+            else:
+                # Keypoint too close to frame edge, discard to maintain local window safety
+                continue
+                
+            # Keypoint triplet successfully verified as high-quality background motion!
+            pts_hist.append(pt_h)
+            pts_prev.append(pt_p)
+            pts_curr.append(pt_c)
             kp_triplets.append((idx_hist, idx_prev, idx_curr))
             
     if len(pts_hist) < min_inliers:
