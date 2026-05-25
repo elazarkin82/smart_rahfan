@@ -1,6 +1,77 @@
 import tensorflow as tf
 from tensorflow.keras import layers, models, optimizers, losses
 
+# ==========================================
+# Custom Loss Functions for Target Tracking
+# ==========================================
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+def wing_loss(y_true, y_pred, w=0.1, epsilon=0.01):
+    """
+    Standard Wing Loss for Coordinate Regression (L1-like for large errors, Log-like for small errors).
+    """
+    diff = tf.abs(y_true - y_pred)
+    C = w - w * tf.math.log(1.0 + w / epsilon)
+    loss = tf.where(
+        diff < w,
+        w * tf.math.log(1.0 + diff / epsilon),
+        diff - C
+    )
+    return tf.reduce_mean(loss)
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+def wing2_loss(y_true, y_pred, w=0.015, epsilon=0.001):
+    """
+    Tuned Wing Loss (wing2) with much narrower bounds to maximize sub-pixel precision.
+    """
+    diff = tf.abs(y_true - y_pred)
+    C = w - w * tf.math.log(1.0 + w / epsilon)
+    loss = tf.where(
+        diff < w,
+        w * tf.math.log(1.0 + diff / epsilon),
+        diff - C
+    )
+    return tf.reduce_mean(loss)
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+def focal_l1_loss(y_true, y_pred, gamma=0.5):
+    """
+    Fractional Power Loss / Focal L1 Loss (creates steep gradients for tiny errors near zero).
+    """
+    diff = tf.abs(y_true - y_pred)
+    eps = 1e-8
+    loss = tf.pow(diff + eps, gamma)
+    return tf.reduce_mean(loss)
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+def vector_loss(y_true, y_pred):
+    """
+    Vector Angle + Distance Loss (penalizes coordinate distance and relative directional misalignment).
+    """
+    # 1. Coordinate Distance Part (Log-Cosh is very stable)
+    diff = tf.abs(y_true - y_pred)
+    dist_loss = tf.reduce_mean(tf.math.log(tf.math.cosh(diff)))
+    
+    # 2. Directional Alignment Part relative to the center [0.5, 0.5]
+    v_true = y_true - 0.5
+    v_pred = y_pred - 0.5
+    
+    # Epsilon to avoid division by zero
+    eps = 1e-8
+    norm_true = tf.math.rsqrt(tf.reduce_sum(tf.square(v_true), axis=-1, keepdims=True) + eps)
+    norm_pred = tf.math.rsqrt(tf.reduce_sum(tf.square(v_pred), axis=-1, keepdims=True) + eps)
+    
+    v_true_n = v_true * norm_true
+    v_pred_n = v_pred * norm_pred
+    
+    # Cosine Similarity = dot product of normalized vectors
+    cosine_sim = tf.reduce_sum(v_true_n * v_pred_n, axis=-1)
+    # Cosine Loss = 1.0 - Cosine Similarity
+    cosine_loss = tf.reduce_mean(1.0 - cosine_sim)
+    
+    # Combine distance and direction
+    return dist_loss + 0.2 * cosine_loss
+
 class TargetTracker:
     """
     A recursive deep-learning-based target tracker in Keras.
@@ -539,17 +610,13 @@ class TargetTracker:
         elif loss_name == "logcosh":
             loss_fn = losses.LogCosh()
         elif loss_name == "wing":
-            # Custom Wing Loss for Coordinate Regression
-            def wing_loss(y_true, y_pred, w=0.1, epsilon=0.01):
-                diff = tf.abs(y_true - y_pred)
-                C = w - w * tf.math.log(1.0 + w / epsilon)
-                loss = tf.where(
-                    diff < w,
-                    w * tf.math.log(1.0 + diff / epsilon),
-                    diff - C
-                )
-                return tf.reduce_mean(loss)
             loss_fn = wing_loss
+        elif loss_name == "wing2":
+            loss_fn = wing2_loss
+        elif loss_name == "focal_l1":
+            loss_fn = focal_l1_loss
+        elif loss_name == "vector":
+            loss_fn = vector_loss
         else:
             raise ValueError(f"Unknown loss function: {loss_name}")
             
@@ -598,8 +665,12 @@ class TargetTracker:
                 else:
                     save_path = f"tracker_model_score_{best_score:.4f}.keras"
                 
-                print(f"   [IMPROVEMENT] Score improved from {old_score:.4f} to {best_score:.4f}! Saving model to {save_path}...")
-                self.model.save(save_path)
+                print(f"   [IMPROVEMENT] Score improved from {old_score:.4f} to {best_score:.4f}! Saving clean model to {save_path}...")
+                # Instantiate a clean, uncompiled temporary tracker to completely strip custom loss and optimizer configs
+                temp_tracker = TargetTracker(input_shape=self.input_shape, max_offset=self.max_offset)
+                temp_model = temp_tracker.create_model()
+                temp_model.set_weights(self.model.get_weights())
+                temp_model.save(save_path)
                 
         print("Training completed successfully.")
         return history
@@ -657,7 +728,7 @@ def main(args_list=None):
     )
     train_parser.add_argument(
         "--loss", 
-        choices=["mse", "huber", "logcosh", "wing"], 
+        choices=["mse", "huber", "logcosh", "wing", "wing2", "focal_l1", "vector"], 
         default="logcosh", 
         help="Loss function to optimize (default: logcosh)"
     )

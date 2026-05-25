@@ -1,15 +1,56 @@
-# MSE
-from model import main
-main("train --dataset_dir /content/drive/MyDrive/Colab Notebooks/tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss mse --init_keras_file model_mse.keras --output model_mse.keras".split())
+# =====================================================================
+# Execution Examples for the Original Coordinate Regression Model (tracker_model)
+# =====================================================================
 
-# Huber
-from model import main
-main("train --dataset_dir /content/drive/MyDrive/Colab Notebooks/tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss huber --init_keras_file model_huber.keras --output model_huber.keras".split())
+# 1. Train with Mean Squared Error (MSE) Loss
+from tracker_model import main
+main("train --dataset_dir tracker_dataset --lr 1e-3 --num_of_epochs 100 --loss mse --init_keras_file model_mse.keras --output model_mse.keras".split())
 
-# LogCosh
-from model import main
-main("train --dataset_dir /content/drive/MyDrive/Colab Notebooks/tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss logcosh --init_keras_file model_logcosh.keras --output model_logcosh.keras".split())
+# 2. Train with Huber Loss
+from tracker_model import main
+main("train --dataset_dir tracker_dataset --lr 1e-3 --num_of_epochs 100 --loss huber --init_keras_file model_huber.keras --output model_huber.keras".split())
 
-# Wing
-from model import main
-main("train --dataset_dir /content/drive/MyDrive/Colab Notebooks/tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss wing --init_keras_file model_wing.keras --output model_wing.keras".split())
+# 3. Train with LogCosh Loss
+from tracker_model import main
+main("train --dataset_dir tracker_dataset --lr 1e-3 --num_of_epochs 100 --loss logcosh --init_keras_file drive/model_logcosh.keras --output drive/model_logcosh.keras".split())
+
+# 4. Train with standard Wing Loss
+from tracker_model import main
+main("train --dataset_dir tracker_dataset --lr 1e-3 --num_of_epochs 100 --loss wing --init_keras_file model_wing.keras --output model_wing.keras".split())
+
+# 5. Train with Tuned Wing Loss (wing2) - narrow w=0.015, epsilon=0.001 to maximize sub-pixel precision
+from tracker_model import main
+main("train --dataset_dir tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss wing2 --init_keras_file model_wing2.keras --output model_wing2.keras".split())
+
+# 6. Train with Focal L1 / Fractional Power Loss (gamma = 0.5 to force steep gradients near zero)
+from tracker_model import main
+main("train --dataset_dir tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss focal_l1 --init_keras_file model_focal_l1.keras --output model_focal_l1.keras".split())
+
+# 7. Train with Vector Angle + Distance Loss (constrains absolute coordinate error and motion direction)
+from tracker_model import main
+main("train --dataset_dir tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss vector --init_keras_file model_vector.keras --output model_vector.keras".split())
+
+
+# =====================================================================
+# Execution Examples for the New FCN Heatmap & Masked Attention Model (tracker_model2)
+# =====================================================================
+
+# 1. Generate the masked dataset with 64x64 Gaussian heatmaps
+from tracker_model2 import main
+main("generate_dataset --images_path images --output_path masked_dataset --batch_size 256 --num_of_samples 16384".split())
+
+# 2. Train FCN model with Mean Squared Error (MSE) - highly recommended and stable baseline
+from tracker_model2 import main
+main("train --dataset_dir masked_dataset --lr 1e-3 --num_of_epochs 100 --loss mse --init_keras_file model2_mse.keras --output model2_mse.keras".split())
+
+# 3. Train FCN model with Log-Cosh Loss
+from tracker_model2 import main
+main("train --dataset_dir masked_dataset --lr 1e-3 --num_of_epochs 100 --loss logcosh --init_keras_file model2_logcosh.keras --output model2_logcosh.keras".split())
+
+# 4. Train FCN model with Joint Dice + Binary Cross Entropy (dice_bce) Loss - excellent for spatial peak segmentation
+from tracker_model2 import main
+main("train --dataset_dir masked_dataset --lr 1e-3 --num_of_epochs 100 --loss dice_bce --init_keras_file model2_dice_bce.keras --output model2_dice_bce.keras".split())
+
+# 5. Train FCN model with Sigmoid Focal Loss - designed for extreme background-to-peak pixel imbalance
+from tracker_model2 import main
+main("train --dataset_dir masked_dataset --lr 1e-3 --num_of_epochs 100 --loss focal --init_keras_file model2_focal.keras --output model2_focal.keras".split())
