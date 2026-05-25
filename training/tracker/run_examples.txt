@@ -53,4 +53,4 @@ main("train --dataset_dir tracker2_dataset --lr 1e-3 --num_of_epochs 100 --loss 
 
 # 5. Train FCN model with Sigmoid Focal Loss - designed for extreme background-to-peak pixel imbalance
 from tracker_model2 import main
-main("train --dataset_dir tracker2_dataset --lr 1e-3 --num_of_epochs 100 --loss focal --init_keras_file /content/drive/MyDrive/work/outputs/model2_focal.keras --output /content/drive/MyDrive/work/outputs/model2_focal.keras".split())
+main("train --dataset_dir tracker2_dataset --lr 1e-4 --num_of_epochs 100 --loss focal --init_keras_file /content/drive/MyDrive/work/outputs/model2_focal.keras --output /content/drive/MyDrive/work/outputs/model2_focal.keras --best_train_loss_output /content/drive/MyDrive/work/outputs/best_train_loss_model2_focal.keras".split())
