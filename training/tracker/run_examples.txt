@@ -54,3 +54,27 @@ main("train --dataset_dir tracker2_dataset --lr 1e-3 --num_of_epochs 100 --loss 
 # 5. Train FCN model with Sigmoid Focal Loss - designed for extreme background-to-peak pixel imbalance
 from tracker_model2 import main
 main("train --dataset_dir tracker2_dataset --lr 1e-4 --num_of_epochs 100 --loss focal --init_keras_file /content/drive/MyDrive/work/outputs/model2_focal.keras --output /content/drive/MyDrive/work/outputs/model2_focal.keras --best_train_loss_output /content/drive/MyDrive/work/outputs/best_train_loss_model2_focal.keras".split())
+
+
+# =====================================================================
+# Directory Crawling & Image Path List Generation (generate_image_list.py)
+# =====================================================================
+
+# Crawl a directory recursively, filtering image files whose paths contain 'DCIM', and output absolute paths to background_images.txt
+# Run from command line:
+# python3 training/tracker/generate_image_list.py /path/to/your/images/directory -o background_images.txt
+
+
+# =====================================================================
+# Video-Based Siamese Training Dataset Generation (dataset_generator_from_video.py)
+# =====================================================================
+
+# 1. Run in interactive real-time HUD visualization/preview mode (renders SIFT matches in real-time, no files saved)
+# Controls: Press [SPACE] for next frame, [ESC] or [Q] to exit.
+# Run from command line:
+# python3 training/tracker/dataset_generator_from_video.py training/tracker/videos4dataset -v
+
+# 2. Run in dataset generation mode (saves serialized dataset pickle batches to video_dataset/)
+# Run from command line:
+# python3 training/tracker/dataset_generator_from_video.py training/tracker/videos4dataset -o video_dataset --num_of_samples 8192 --batch_size 256
+
