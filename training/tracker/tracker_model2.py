@@ -82,7 +82,7 @@ def dice_bce_loss(y_true, y_pred, bce_weight=1.0, dice_weight=1.0):
     # 2. Dice Loss
     intersection = tf.reduce_sum(y_true_f * y_pred_f)
     union = tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f)
-    eps = 1e-6
+    eps = 1e-12
     dice_coef = (2. * intersection + eps) / (union + eps)
     dice_loss = 1.0 - dice_coef
     
@@ -91,12 +91,19 @@ def dice_bce_loss(y_true, y_pred, bce_weight=1.0, dice_weight=1.0):
 @tf.keras.utils.register_keras_serializable(package="Custom")
 def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     """
-    Sigmoid Focal Loss to handle extreme pixel-class imbalance between the narrow peak and dark background.
+    100% Stable and NaN-proof Sigmoid Focal Loss for continuous/Gaussian heatmaps.
+    Uses safe clipping and avoids division-by-zero gradients.
     """
-    eps = 1e-8
+    # Clip predictions to prevent log(0) and division by zero gradients
+    eps = 1e-12
     y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
-    pt = tf.where(tf.equal(y_true, 1.0), y_pred, 1.0 - y_pred)
-    loss = -alpha * tf.pow(1.0 - pt, gamma) * tf.math.log(pt)
+    
+    # Calculate binary cross entropy terms safely
+    bce_pos = - y_true * tf.math.log(y_pred) * tf.math.pow(1.0 - y_pred, gamma)
+    bce_neg = - (1.0 - y_true) * tf.math.log(1.0 - y_pred) * tf.math.pow(y_pred, gamma)
+    
+    # Combine and scale
+    loss = alpha * bce_pos + (1.0 - alpha) * bce_neg
     return tf.reduce_mean(loss)
 
 # =====================================================================
@@ -455,7 +462,7 @@ class TargetTracker2:
             
         return float(epoch_loss_avg.result())
 
-    def train(self, train_dataset, val_dataset, lr, num_of_epochs, loss_name="mse", output_path=None):
+    def train(self, train_dataset, val_dataset, lr, num_of_epochs, loss_name="mse", output_path=None, best_train_loss_output=None):
         if loss_name == "mse":
             loss_fn = losses.MeanSquaredError()
         elif loss_name == "huber":
@@ -478,6 +485,7 @@ class TargetTracker2:
         print("Calculating initial score on validation dataset...")
         initial_val_loss = self.evaluate(val_dataset, loss_fn)
         best_score = 1.0 / (initial_val_loss + epsilon)
+        best_train_loss = float('inf')
         print(f"Initial Validation Loss: {initial_val_loss:.6f} | Initial Best Score: {best_score:.4f}")
         
         history = {
@@ -489,6 +497,23 @@ class TargetTracker2:
         for epoch in range(1, num_of_epochs + 1):
             epoch_loss = self.train_epoch(train_dataset, optimizer, loss_fn)
             history["train_loss"].append(epoch_loss)
+            
+            # Save model if training loss improved (if best_train_loss_output is configured)
+            if best_train_loss_output is not None and epoch_loss < best_train_loss:
+                old_train_loss = best_train_loss
+                best_train_loss = epoch_loss
+                print(f"   [TRAIN IMPROVEMENT] Training loss improved from {old_train_loss:.6f} to {best_train_loss:.6f}! Saving clean model to {best_train_loss_output}...")
+                
+                # Auto-create parent directories if they do not exist
+                parent_dir = os.path.dirname(best_train_loss_output)
+                if parent_dir:
+                    os.makedirs(parent_dir, exist_ok=True)
+                    
+                # In-memory weight transfer to completely strip compiled training configs
+                temp_tracker = TargetTracker2(input_shape=self.input_shape)
+                temp_model = temp_tracker.create_model()
+                temp_model.set_weights(self.model.get_weights())
+                temp_model.save(best_train_loss_output)
             
             val_loss = self.evaluate(val_dataset, loss_fn)
             epoch_score = 1.0 / (val_loss + epsilon)
@@ -509,6 +534,11 @@ class TargetTracker2:
                 
                 print(f"   [IMPROVEMENT] Score improved from {old_score:.4f} to {best_score:.4f}! Saving clean model to {save_path}...")
                 
+                # Auto-create parent directories if they do not exist
+                parent_dir = os.path.dirname(save_path)
+                if parent_dir:
+                    os.makedirs(parent_dir, exist_ok=True)
+                    
                 # In-memory weight transfer to completely strip compiled training configs
                 temp_tracker = TargetTracker2(input_shape=self.input_shape)
                 temp_model = temp_tracker.create_model()
@@ -597,6 +627,12 @@ def main(args_list=None):
         default=None, 
         help="Path to save the trained Keras model"
     )
+    train_parser.add_argument(
+        "--best_train_loss_output", 
+        type=str, 
+        default=None, 
+        help="Path to save the best model based on training loss (strips training configs)"
+    )
     
     args = parser.parse_args(args_list)
     
@@ -629,7 +665,8 @@ def main(args_list=None):
             lr=args.lr,
             num_of_epochs=args.num_of_epochs,
             loss_name=args.loss,
-            output_path=args.output
+            output_path=args.output,
+            best_train_loss_output=args.best_train_loss_output
         )
 
 if __name__ == "__main__":

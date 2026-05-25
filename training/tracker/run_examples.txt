@@ -37,7 +37,7 @@ main("train --dataset_dir tracker_dataset --lr 1e-4 --num_of_epochs 100 --loss v
 
 # 1. Generate the masked dataset with 64x64 Gaussian heatmaps
 from tracker_model2 import main
-main("generate_dataset --images_path images --output_path masked_dataset --batch_size 256 --num_of_samples 16384".split())
+main("generate_dataset --images_path images --output_path tracker2_dataset --batch_size 256 --num_of_samples 16384".split())
 
 # 2. Train FCN model with Mean Squared Error (MSE) - highly recommended and stable baseline
 from tracker_model2 import main
@@ -53,4 +53,4 @@ main("train --dataset_dir tracker2_dataset --lr 1e-3 --num_of_epochs 100 --loss 
 
 # 5. Train FCN model with Sigmoid Focal Loss - designed for extreme background-to-peak pixel imbalance
 from tracker_model2 import main
-main("train --dataset_dir tracker2_dataset --lr 1e-3 --num_of_epochs 100 --loss focal --init_keras_file model2_focal.keras --output model2_focal.keras".split())
+main("train --dataset_dir tracker2_dataset --lr 1e-3 --num_of_epochs 100 --loss focal --init_keras_file /content/drive/MyDrive/work/outputs/model2_focal.keras --output /content/drive/MyDrive/work/outputs/model2_focal.keras".split())
