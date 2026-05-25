@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -20,6 +23,27 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        
+        <activity
+            android:name=".AutoCorrelationActivity"
+            android:label="Auto Correlation Test"
+            android:exported="false" />
+            
+        <activity
+            android:name=".ManualDisplacementActivity"
+            android:label="Manual Displacement Test"
+            android:exported="false" />
+            
+        <activity
+            android:name=".RecursiveTrackingActivity"
+            android:label="Recursive Tracking Test"
+            android:exported="false" />
+            
+        <activity
+            android:name=".FrameStreamActivity"
+            android:label="Frame Stream Test"
+            android:exported="false" />
+            
     </application>
 
 </manifest>

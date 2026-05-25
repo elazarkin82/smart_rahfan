@@ -2,8 +2,9 @@ package elazarkin.ksg.external.trackertester;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import android.content.Intent;
 import android.os.Bundle;
-import android.widget.TextView;
+import android.view.View;
 
 import elazarkin.ksg.external.trackertester.databinding.ActivityMainBinding;
 
@@ -23,9 +24,38 @@ public class MainActivity extends AppCompatActivity {
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
-        // Example of a call to a native method
-        TextView tv = binding.sampleText;
-        tv.setText(stringFromJNI());
+        // Set click listeners for dashboard cards
+        binding.cardAutoCorrelation.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent(MainActivity.this, AutoCorrelationActivity.class);
+                startActivity(intent);
+            }
+        });
+
+        binding.cardManualDisplacement.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent(MainActivity.this, ManualDisplacementActivity.class);
+                startActivity(intent);
+            }
+        });
+
+        binding.cardRecursiveTracking.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent(MainActivity.this, RecursiveTrackingActivity.class);
+                startActivity(intent);
+            }
+        });
+
+        binding.cardFrameStream.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent(MainActivity.this, FrameStreamActivity.class);
+                startActivity(intent);
+            }
+        });
     }
 
     /**
