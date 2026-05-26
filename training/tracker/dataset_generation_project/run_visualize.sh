@@ -28,7 +28,7 @@ fi
 echo "=========================================================="
 echo "Starting Dataset Generator in Visualization Mode"
 echo "Videos Source Directory: ${VIDEOS_DIR}"
-echo "Feature Extraction: ASIFT (View viewpoint simulations)"
+echo "Feature Extraction: SURF (Speed-optimized features - ACTIVE)"
 echo "----------------------------------------------------------"
 echo "Applied Permissive Thresholds:"
 echo " - Lowe's Ratio (--ratio): 0.85"
@@ -39,13 +39,63 @@ echo " - Min Motion Hist->Prev (--min_motion_hp): 3.0 px"
 echo " - Min Contrast/Texture (--min_texture_std): 3.0"
 echo "=========================================================="
 
-# Execute python script in visualization mode with permissive threshold tuning
+# =========================================================================
+# Execution Examples (Toggle by commenting/uncommenting the desired mode)
+# =========================================================================
+
+# Example 1: ASIFT Mode (Highly robust to out-of-plane perspective changes) - COMMENTED
+# python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
+#     --output_dir "${SCRIPT_DIR}/video_dataset" \
+#     --feature_type asift \
+#     --ratio 0.85 \
+#     --min_inliers 6 \
+#     --ransac_thresh 5.0 \
+#     --min_motion_pc 1.0 \
+#     --min_motion_hp 3.0 \
+#     --min_texture_std 3.0 \
+#     --mask_type gaussian \
+#     --mask_sigma 15.0 \
+#     --hist_radius 128 \
+#     --prev_radius 50 \
+#     --hover_prob 0.05 \
+#     --num_of_samples 16384 \
+#     --batch_size 256 \
+#     --visualize
+
+# Example 2: Standard SIFT Mode (Classic scale/rotation invariant matching) - COMMENTED
+# python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
+#     --output_dir "${SCRIPT_DIR}/video_dataset" \
+#     --feature_type sift \
+#     --ratio 0.85 \
+#     --min_inliers 6 \
+#     --ransac_thresh 5.0 \
+#     --min_motion_pc 1.0 \
+#     --min_motion_hp 3.0 \
+#     --min_texture_std 3.0 \
+#     --mask_type gaussian \
+#     --mask_sigma 15.0 \
+#     --hist_radius 128 \
+#     --prev_radius 50 \
+#     --hover_prob 0.05 \
+#     --num_of_samples 16384 \
+#     --batch_size 256 \
+#     --visualize
+
+# Example 3: SURF Mode (Natively compiled speed-optimized features) - ENABLED
 python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
-    --feature_type asift \
+    --output_dir "${SCRIPT_DIR}/video_dataset" \
+    --feature_type surf \
     --ratio 0.85 \
     --min_inliers 6 \
     --ransac_thresh 5.0 \
     --min_motion_pc 1.0 \
     --min_motion_hp 3.0 \
     --min_texture_std 3.0 \
+    --mask_type gaussian \
+    --mask_sigma 15.0 \
+    --hist_radius 128 \
+    --prev_radius 50 \
+    --hover_prob 0.05 \
+    --num_of_samples 16384 \
+    --batch_size 256 \
     --visualize
