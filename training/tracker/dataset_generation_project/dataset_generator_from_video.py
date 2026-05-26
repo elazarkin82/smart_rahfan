@@ -423,8 +423,8 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
         
     cv2.putText(header_bar, title_text, (10, 22), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, title_color, 1, cv2.LINE_AA)
-    cv2.putText(header_bar, "[SPACE]: Next  |  [ESC/Q]: Exit", (295, 22), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
+    cv2.putText(header_bar, "[SPACE]: Next  |  [ENTER]: Auto-run  |  [ESC/Q]: Exit", (220, 22), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1, cv2.LINE_AA)
     
     final_output = np.vstack([header_bar, dashboard])
     return final_output
@@ -523,7 +523,7 @@ def main():
     if args.visualize:
         print("\n=== ENTERING HUD PREVIEW MODE ===")
         print("Rendering generated sequences in real-time. No files will be exported to disk.")
-        print("Controls: Press [SPACE] for next frame, [ESC] or [Q] to exit.\n")
+        print("Controls: Press [SPACE] for next single step, [ENTER] to auto-run until success, [ESC/Q] to exit.\n")
         sys.stdout.flush()
         try:
             cv2.namedWindow("Video Dataset Generator Debugger", cv2.WINDOW_AUTOSIZE)
@@ -542,6 +542,10 @@ def main():
         print(f"Generating {total_samples} samples ({num_batches} batches of size {args.batch_size}).")
         
     sample_count = 0
+    
+    # State trackers for visual HUD auto-running and counting
+    auto_run_until_success = False
+    attempt_count = 0
     
     for b in range(num_batches):
         if args.visualize and sample_count >= args.num_of_samples:
@@ -567,6 +571,7 @@ def main():
             if args.visualize and sample_count >= args.num_of_samples:
                 break
                 
+            attempt_count += 1
             is_hover = batch_decisions[len(hist_frames_batch)]
             
             random_video = random.choice(video_paths)
@@ -689,6 +694,8 @@ def main():
             )
             zeros_mask = np.zeros((256, 256, 1), dtype=np.float32)
             
+            is_success = (sift_match_debug is not None and sift_match_debug.get("status") == "success") or is_hover
+            
             # If visualize mode, display HUD preview immediately (including matches and connections)
             if args.visualize:
                 dashboard = render_dashboard(
@@ -699,8 +706,20 @@ def main():
                 )
                 try:
                     cv2.imshow("Video Dataset Generator Debugger", dashboard)
-                    key = cv2.waitKey(0) & 0xFF
-                    if key == 27 or key == ord('q'):  # Esc or Q to quit
+                    
+                    # If auto-running and current attempt is success, stop auto-run and pause
+                    if is_success and auto_run_until_success:
+                        auto_run_until_success = False
+                        
+                    # Auto-run mode: short 100ms delay; Manual mode: wait indefinitely (0)
+                    delay = 100 if auto_run_until_success else 0
+                    key = cv2.waitKey(delay) & 0xFF
+                    
+                    if key == 13 or key == 10:    # Enter Key
+                        auto_run_until_success = True
+                    elif key == 32:               # Space Key
+                        auto_run_until_success = False
+                    elif key == 27 or key == ord('q'):  # Esc or Q to quit
                         cv2.destroyAllWindows()
                         print("\nHUD Preview Mode exited by user.")
                         sys.exit(0)
@@ -709,13 +728,14 @@ def main():
                     print("Please run without the '-v' / '--visualize' flag to export pickle files directly.")
                     sys.exit(1)
                     
-                # In visualization mode, failures are not skipped to show debugging connections
-                if sift_match_debug is not None and sift_match_debug.get("status") == "failed":
-                    print(f"[PREVIEW] SIFT Match Failed: {sift_match_debug.get('reason')} - rendering connections and diagnostics.")
-                    sys.stdout.flush()
-                else:
+                # Print status with current attempt count
+                if is_success:
                     sample_count += 1
-                    print(f"Rendered sample {sample_count}/{args.num_of_samples} (Hover: {is_hover})")
+                    print(f"[Sample {sample_count} | Attempt {attempt_count}] Rendered success (Hover: {is_hover})")
+                    sys.stdout.flush()
+                    attempt_count = 0  # Reset for next sample
+                else:
+                    print(f"[Sample {sample_count + 1} | Attempt {attempt_count}] SIFT Match Failed: {sift_match_debug.get('reason')} - rendering connections.")
                     sys.stdout.flush()
                 continue
                 
@@ -741,6 +761,7 @@ def main():
             curr_coords_batch.append(curr_coords)
             
             sample_count += 1
+            attempt_count = 0  # Reset for next sample in non-visual mode
             
         if args.visualize:
             continue
