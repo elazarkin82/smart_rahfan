@@ -8,31 +8,39 @@ import numpy as np
 import cv2
 
 # =====================================================================
-# Heatmap and Circular Masking Helpers (Matching tracker_model2 exactly)
+# Heatmap and Attention Masking Helpers (Matching tracker_model3 exactly)
 # =====================================================================
 
-def apply_circle_mask(img_uint8, coords, radius):
+def generate_attention_mask(coords, size=256, mask_type='gaussian', radius=128, sigma=15.0):
     """
-    Applies a binary circular mask to a grayscale image (0-255 uint8)
-    centered around the normalized coordinate, blacking out the region outside.
+    Generates a 2D attention mask centered around the normalized coordinate.
     
     Args:
-        img_uint8 (np.ndarray): Grayscale image array of shape (H, W).
         coords (list/tuple): Normalized [x, y] coordinates in [0, 1] range.
-        radius (int): Radius of the circular mask in pixels.
+        size (int): Dimensions of the output mask grid (default: 256).
+        mask_type (str): 'circular' or 'gaussian' (default: 'gaussian').
+        radius (int): Radius of the circular mask in pixels (only used in 'circular' mode).
+        sigma (float): Standard deviation of the Gaussian mask in pixels (only used in 'gaussian' mode).
         
     Returns:
-        np.ndarray: Grayscale image with the mask applied.
+        np.ndarray: Attention mask array of shape (size, size, 1) in [0.0, 1.0].
     """
-    h, w = img_uint8.shape[:2]
-    x_px = int(coords[0] * w)
-    y_px = int(coords[1] * h)
+    h, w = size, size
+    x_target = coords[0] * w
+    y_target = coords[1] * h
     
-    mask = np.zeros_like(img_uint8)
-    cv2.circle(mask, (x_px, y_px), radius, 255, -1)
-    
-    masked_img = cv2.bitwise_and(img_uint8, mask)
-    return masked_img
+    if mask_type == 'circular':
+        mask = np.zeros((h, w, 1), dtype=np.float32)
+        cv2.circle(mask, (int(x_target), int(y_target)), int(radius), 1.0, -1)
+        return mask
+    else:
+        # Gaussian soft mask
+        x = np.arange(0, w, 1, dtype=np.float32)
+        y = np.arange(0, h, 1, dtype=np.float32)
+        x_grid, y_grid = np.meshgrid(x, y)
+        d2 = (x_grid - x_target) ** 2 + (y_grid - y_target) ** 2
+        mask = np.exp(-d2 / (2.0 * (sigma ** 2)))
+        return np.expand_dims(mask, axis=-1)
 
 def generate_gaussian_heatmap(coords, size=64, sigma=4.0):
     """
@@ -44,7 +52,7 @@ def generate_gaussian_heatmap(coords, size=64, sigma=4.0):
         sigma (float): Standard deviation of the Gaussian kernel (default: 4.0).
         
     Returns:
-        np.ndarray: Gaussian heatmap array of shape (size, size, 1).
+        np.ndarray: Gaussian heatmap array of shape (size, size, 1) in [0.0, 1.0].
     """
     x_target = coords[0] * size
     y_target = coords[1] * size
@@ -90,15 +98,8 @@ def match_sift_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8):
     (hist -> prev and prev -> curr). Fits a Fundamental Matrix via RANSAC
     to reject dynamic outliers and returns a list of verified inlier coordinate paths.
     
-    Args:
-        f_hist (np.ndarray): Hist grayscale frame (256x256).
-        f_prev (np.ndarray): Prev grayscale frame (256x256).
-        f_curr (np.ndarray): Curr grayscale frame (256x256).
-        ratio (float): Lowe's ratio test threshold.
-        min_inliers (int): Minimum required verified RANSAC inliers.
-        
-    Returns:
-        dict: Containing matching paths or None if matching failed.
+    If inliers < min_inliers, it still returns the detected raw matches and status="failed"
+    to allow the visualization debug panel to render the failure diagnostic.
     """
     sift = cv2.SIFT_create()
     
@@ -107,7 +108,16 @@ def match_sift_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8):
     kp_curr, des_curr = sift.detectAndCompute(f_curr, None)
     
     if des_hist is None or des_prev is None or des_curr is None:
-        return None
+        return {
+            "status": "failed",
+            "reason": "empty_descriptors",
+            "paths": [],
+            "kp_hist": kp_hist if kp_hist else [],
+            "kp_prev": kp_prev if kp_prev else [],
+            "kp_curr": kp_curr if kp_curr else [],
+            "triplets": [],
+            "inliers": []
+        }
         
     bf = cv2.BFMatcher(cv2.NORM_L2)
     
@@ -147,16 +157,16 @@ def match_sift_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8):
             dist_pc = np.sqrt(v_pc[0]**2 + v_pc[1]**2)
             dist_hp = np.sqrt(v_hp[0]**2 + v_hp[1]**2)
             
-            # Discard static/interior features (short-term threshold: 3.0 px, long-term threshold: 15.0 px)
-            if dist_pc < 3.0 or dist_hp < 15.0:
+            # Discard static/interior features (short-term threshold: 2.0 px, long-term threshold: 8.0 px)
+            if dist_pc < 2.0 or dist_hp < 8.0:
                 continue
                 
             # 2. Filter B: Directional Coherence (Cosine Similarity)
             dot_product = v_hp[0] * v_pc[0] + v_hp[1] * v_pc[1]
             cos_theta = dot_product / (dist_hp * dist_pc + 1e-8)
             
-            # Cosine similarity must be > 0.5 (angles less than 60 degrees) to filter out oscillations/vibrations
-            if cos_theta < 0.5:
+            # Cosine similarity must be > 0.0 to filter out oscillations/vibrations
+            if cos_theta < 0.0:
                 continue
                 
             # 3. Filter C: Local Texture/Variance Filter (11x11 patch standard deviation)
@@ -164,35 +174,48 @@ def match_sift_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8):
             if py - 5 >= 0 and py + 6 <= 256 and px - 5 >= 0 and px + 6 <= 256:
                 patch = f_prev[py-5 : py+6, px-5 : px+6]
                 patch_std = np.std(patch)
-                # Standard deviation must be >= 10.0 out of 255 to reject flat/low-texture dashboard/hood parts
-                if patch_std < 10.0:
+                if patch_std < 6.0:
                     continue
             else:
-                # Keypoint too close to frame edge, discard to maintain local window safety
                 continue
                 
-            # Keypoint triplet successfully verified as high-quality background motion!
             pts_hist.append(pt_h)
             pts_prev.append(pt_p)
             pts_curr.append(pt_c)
             kp_triplets.append((idx_hist, idx_prev, idx_curr))
             
     if len(pts_hist) < min_inliers:
-        return None
+        return {
+            "status": "failed",
+            "reason": "too_few_raw_triplets",
+            "paths": [],
+            "kp_hist": kp_hist,
+            "kp_prev": kp_prev,
+            "kp_curr": kp_curr,
+            "triplets": kp_triplets,
+            "inliers": list(range(len(pts_hist)))  # return all raw matching indexes
+        }
         
     pts_hist = np.float32(pts_hist)
     pts_prev = np.float32(pts_prev)
     pts_curr = np.float32(pts_curr)
     
     # Fit Fundamental Matrices using RANSAC to verify epipolar constraints
-    # (Removes dynamic moving objects like other cars and keeps the rigid background)
     F_12, mask_12 = cv2.findFundamentalMat(pts_hist, pts_prev, cv2.FM_RANSAC, 3.0)
     F_23, mask_23 = cv2.findFundamentalMat(pts_prev, pts_curr, cv2.FM_RANSAC, 3.0)
     
     if F_12 is None or F_23 is None or mask_12 is None or mask_23 is None:
-        return None
+        return {
+            "status": "failed",
+            "reason": "ransac_matrix_failure",
+            "paths": [],
+            "kp_hist": kp_hist,
+            "kp_prev": kp_prev,
+            "kp_curr": kp_curr,
+            "triplets": kp_triplets,
+            "inliers": list(range(len(pts_hist)))
+        }
         
-    # Safely flatten RANSAC masks to 1D flat arrays to avoid array truth ambiguity
     m12_flat = mask_12.ravel()
     m23_flat = mask_23.ravel()
     
@@ -202,7 +225,16 @@ def match_sift_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8):
             inlier_indices.append(i)
             
     if len(inlier_indices) < min_inliers:
-        return None
+        return {
+            "status": "failed",
+            "reason": "too_few_ransac_inliers",
+            "paths": [],
+            "kp_hist": kp_hist,
+            "kp_prev": kp_prev,
+            "kp_curr": kp_curr,
+            "triplets": kp_triplets,
+            "inliers": inlier_indices
+        }
         
     # Construct verified normalized paths
     verified_paths = []
@@ -211,7 +243,6 @@ def match_sift_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8):
         p_pt = pts_prev[idx]
         c_pt = pts_curr[idx]
         
-        # Coordinates normalized to [0, 1] range based on 256x256 frame dims
         path = {
             "hist": [np.clip(h_pt[0] / 256.0, 0.0, 1.0), np.clip(h_pt[1] / 256.0, 0.0, 1.0)],
             "prev": [np.clip(p_pt[0] / 256.0, 0.0, 1.0), np.clip(p_pt[1] / 256.0, 0.0, 1.0)],
@@ -220,6 +251,7 @@ def match_sift_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8):
         verified_paths.append(path)
         
     return {
+        "status": "success",
         "paths": verified_paths,
         "kp_hist": kp_hist,
         "kp_prev": kp_prev,
@@ -275,7 +307,6 @@ def draw_hud_label(img, label, org, color=(0, 255, 0)):
     thickness = 1
     (w, h), baseline = cv2.getTextSize(label, font, scale, thickness)
     
-    # Safely guard bounds to avoid empty slice crashes in custom displays
     y1 = max(0, org[1] - h - 4)
     y2 = min(img.shape[0], org[1] + baseline)
     x1 = max(0, org[0] - 4)
@@ -287,82 +318,111 @@ def draw_hud_label(img, label, org, color=(0, 255, 0)):
         rect[:] = 15  # Very dark grey
         cv2.addWeighted(sub_img, 0.3, rect, 0.7, 0, sub_img)
     
-    # Draw neon text
     cv2.putText(img, label, org, font, scale, color, thickness, cv2.LINE_AA)
 
-def render_dashboard(hist_m, prev_m, curr, hist_norm, prev_norm, curr_norm, sift_info=None):
+def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, hist_norm, prev_norm, curr_norm, sift_info=None):
     """
-    Renders a stunning 4-panel dashboard containing masked historical and previous frames,
-    the current unmasked frame overlaid with green target rings, and a SIFT tracking match diagram.
+    Renders a stunning 4-panel dashboard containing full frames overlaid with highly transparent
+    colored attention masks, green target indicators, and inter-image keypoint matching lines.
     """
-    # 1. Convert grayscale panels to color (BGR)
-    h_color = cv2.cvtColor(hist_m, cv2.COLOR_GRAY2BGR)
-    p_color = cv2.cvtColor(prev_m, cv2.COLOR_GRAY2BGR)
-    c_color = cv2.cvtColor(curr, cv2.COLOR_GRAY2BGR)
+    # 1. Convert grayscale images (Channel 0) to BGR for colorful HUD overlays
+    h_color = cv2.cvtColor(f_hist_256, cv2.COLOR_GRAY2BGR)
+    p_color = cv2.cvtColor(f_prev_256, cv2.COLOR_GRAY2BGR)
+    c_color = cv2.cvtColor(f_curr_256, cv2.COLOR_GRAY2BGR)
     
-    # 2. Draw Target Dots and Mask Boundaries
-    # Hist: Red dot
+    # 2. Blend the attention masks (Channel 1) onto Hist and Prev frames
+    # hist_mask is (256, 256, 1) float32 in [0.0, 1.0]. Convert to red overlay (0, 0, 255)
+    h_mask_bgr = np.zeros_like(h_color)
+    h_mask_bgr[:, :, 2] = (hist_mask[:, :, 0] * 255.0).astype(np.uint8)  # Red channel
+    
+    # prev_mask is (256, 256, 1) float32 in [0.0, 1.0]. Convert to blue overlay (255, 0, 0)
+    p_mask_bgr = np.zeros_like(p_color)
+    p_mask_bgr[:, :, 0] = (prev_mask[:, :, 0] * 255.0).astype(np.uint8)  # Blue channel
+    
+    # Highly transparent blend (alpha = 0.25, beta = 1.0)
+    cv2.addWeighted(h_mask_bgr, 0.25, h_color, 1.0, 0, h_color)
+    cv2.addWeighted(p_mask_bgr, 0.25, p_color, 1.0, 0, p_color)
+    
+    # 3. Draw target indicators
     hx, hy = int(hist_norm[0] * 256), int(hist_norm[1] * 256)
-    cv2.circle(h_color, (hx, hy), 5, (0, 0, 255), -1)
-    cv2.circle(h_color, (hx, hy), 128, (60, 60, 60), 1)
+    cv2.circle(h_color, (hx, hy), 4, (0, 0, 255), -1)  # Red center dot
     
-    # Prev: Blue dot
     px, py = int(prev_norm[0] * 256), int(prev_norm[1] * 256)
-    cv2.circle(p_color, (px, py), 5, (255, 0, 0), -1)
-    cv2.circle(p_color, (px, py), 50, (60, 60, 60), 1)
+    cv2.circle(p_color, (px, py), 4, (255, 0, 0), -1)  # Blue center dot
     
-    # Curr: Neon green tracking rings
     cx, cy = int(curr_norm[0] * 256), int(curr_norm[1] * 256)
-    cv2.circle(c_color, (cx, cy), 8, (0, 255, 0), 2)
-    cv2.circle(c_color, (cx, cy), 2, (0, 255, 0), -1)
+    cv2.circle(c_color, (cx, cy), 8, (0, 255, 0), 2)   # Neon green target ring
+    cv2.circle(c_color, (cx, cy), 2, (0, 255, 0), -1)  # Center dot
     
-    # 3. Create the SIFT Debug panel
-    if sift_info is not None:
-        # Match diagram between f_prev (left) and f_curr (right)
-        sift_panel = np.hstack([prev_m, curr])
-        sift_panel_color = cv2.cvtColor(sift_panel, cv2.COLOR_GRAY2BGR)
-        
+    # 4. SIFT match visualization panel (between prev and curr)
+    is_success = (sift_info is not None and sift_info.get("status") == "success")
+    
+    # Prepare the double-wide horizontal panel
+    sift_panel = np.hstack([f_prev_256, f_curr_256])
+    s_color = cv2.cvtColor(sift_panel, cv2.COLOR_GRAY2BGR)
+    
+    # Draw connections in all visualization states (success and failure)
+    if sift_info is not None and len(sift_info.get("inliers", [])) > 0:
         kp_prev = sift_info["kp_prev"]
         kp_curr = sift_info["kp_curr"]
         triplets = sift_info["triplets"]
         inliers = sift_info["inliers"]
         
-        # Draw all verified inlier match lines in cyan
-        for idx in inliers:
-            trip = triplets[idx]
-            pt_p = kp_prev[trip[1]].pt
-            pt_c = kp_curr[trip[2]].pt
-            
-            p1 = (int(pt_p[0]), int(pt_p[1]))
-            p2 = (int(pt_c[0] + 256), int(pt_c[1]))  # Shifted right by width
-            
-            # Glowing cyan line
-            cv2.line(sift_panel_color, p1, p2, (255, 255, 0), 1, cv2.LINE_AA)
-            cv2.circle(sift_panel_color, p1, 3, (255, 0, 255), -1)
-            cv2.circle(sift_panel_color, p2, 3, (255, 0, 255), -1)
-            
-        s_color = cv2.resize(sift_panel_color, (256, 256), interpolation=cv2.INTER_AREA)
-    else:
-        # Stationary Hover case (no match triplets)
-        s_color = cv2.cvtColor(prev_m, cv2.COLOR_GRAY2BGR)
-        cv2.putText(s_color, "HOVER MODE", (40, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(s_color, "Gimbal Jitter Active", (40, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 200), 1, cv2.LINE_AA)
+        # Color of connection lines: Cyan for success, Bright Orange for failure
+        line_color = (255, 255, 0) if is_success else (0, 128, 255)
         
-    # 4. Draw HUD Labels
-    draw_hud_label(h_color, "HIST FRAME (MASK R=128)", (10, 240), (0, 0, 255))
-    draw_hud_label(p_color, "PREV FRAME (MASK R=50)", (10, 240), (255, 0, 0))
-    draw_hud_label(c_color, "CURR FRAME (GROUND TRUTH)", (10, 240), (0, 255, 0))
-    draw_hud_label(s_color, "SIFT RANSAC TRACKING LINES", (10, 240), (255, 255, 0))
+        for idx in inliers:
+            if idx < len(triplets):
+                trip = triplets[idx]
+                pt_p = kp_prev[trip[1]].pt
+                pt_c = kp_curr[trip[2]].pt
+                
+                p1 = (int(pt_p[0]), int(pt_p[1]))
+                p2 = (int(pt_c[0] + 256), int(pt_c[1]))  # Shifted right by frame width
+                
+                cv2.line(s_color, p1, p2, line_color, 1, cv2.LINE_AA)
+                cv2.circle(s_color, p1, 3, (255, 0, 255), -1)
+                cv2.circle(s_color, p2, 3, (255, 0, 255), -1)
+                
+        # Resize to fit the 256x256 grid
+        s_color = cv2.resize(s_color, (256, 256), interpolation=cv2.INTER_AREA)
+    else:
+        # Hover Mode or Empty matching
+        s_color = cv2.cvtColor(f_prev_256, cv2.COLOR_GRAY2BGR)
+        if sift_info is None:
+            cv2.putText(s_color, "HOVER MODE", (40, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(s_color, "Gimbal Jitter Active", (40, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 200), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(s_color, "NO SIFT MATCHES FOUND", (15, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+            
+    # 5. Draw HUD labels
+    draw_hud_label(h_color, "HIST CONTEXT + SOFT GLOW", (10, 240), (0, 0, 255))
+    draw_hud_label(p_color, "PREV CONTEXT + SOFT GLOW", (10, 240), (255, 0, 0))
+    draw_hud_label(c_color, "CURR CONTEXT (TARGET)", (10, 240), (0, 255, 0))
     
-    # 5. Assemble Grid
+    sift_label = "SIFT CONNECTIONS" if is_success else "SIFT FAILURE CONNECTIONS"
+    sift_label_color = (255, 255, 0) if is_success else (0, 128, 255)
+    draw_hud_label(s_color, sift_label, (10, 240), sift_label_color)
+    
+    # 6. Assemble Grid
     row1 = np.hstack([h_color, p_color])
     row2 = np.hstack([c_color, s_color])
     dashboard = np.vstack([row1, row2])
     
-    # 6. Add Top HUD Dashboard header bar
+    # 7. Add Top HUD Dashboard header bar
     header_bar = np.zeros((35, 512, 3), dtype=np.uint8)
-    cv2.putText(header_bar, "VIDEO DATASET GENERATOR - PREVIEW HUD", (10, 22), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+    
+    if is_success or sift_info is None:
+        title_text = "VIDEO DATASET GENERATOR - PREVIEW HUD"
+        title_color = (0, 255, 255)  # Yellow-cyan
+    else:
+        inliers_count = len(sift_info.get("inliers", []))
+        reason = sift_info.get("reason", "unknown_failure")
+        title_text = f"MATCH FAILURE: Found {inliers_count} inliers ({reason})"
+        title_color = (0, 0, 255)  # Bright Red
+        
+    cv2.putText(header_bar, title_text, (10, 22), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, title_color, 1, cv2.LINE_AA)
     cv2.putText(header_bar, "[SPACE]: Next  |  [ESC/Q]: Exit", (295, 22), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
     
@@ -375,7 +435,7 @@ def render_dashboard(hist_m, prev_m, curr, hist_norm, prev_norm, curr_norm, sift
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generates training datasets for tracker_model2 directly from real driving/drone videos using SIFT RANSAC."
+        description="Generates training datasets for tracker_model3 directly from real driving/drone videos using SIFT RANSAC."
     )
     parser.add_argument(
         "videos_dir",
@@ -418,8 +478,32 @@ def main():
     parser.add_argument(
         "--hover_prob",
         type=float,
-        default=0.15,
-        help="Probability of selecting stationary hovering with gimbal camera shake (default: 0.15)."
+        default=0.05,
+        help="Probability of selecting stationary hovering with gimbal camera shake (default: 0.05)."
+    )
+    parser.add_argument(
+        "--mask_type",
+        default="gaussian",
+        choices=["circular", "gaussian"],
+        help="Type of attention mask generated in Channel 1 (default: gaussian)."
+    )
+    parser.add_argument(
+        "--mask_sigma",
+        type=float,
+        default=15.0,
+        help="Standard deviation (sigma) of the Gaussian soft mask in pixels (default: 15.0)."
+    )
+    parser.add_argument(
+        "--hist_radius",
+        type=int,
+        default=128,
+        help="Radius of the historical circular mask in pixels (default: 128)."
+    )
+    parser.add_argument(
+        "--prev_radius",
+        type=int,
+        default=50,
+        help="Radius of the previous circular mask in pixels (default: 50)."
     )
     
     args = parser.parse_args()
@@ -440,6 +524,7 @@ def main():
         print("\n=== ENTERING HUD PREVIEW MODE ===")
         print("Rendering generated sequences in real-time. No files will be exported to disk.")
         print("Controls: Press [SPACE] for next frame, [ESC] or [Q] to exit.\n")
+        sys.stdout.flush()
         try:
             cv2.namedWindow("Video Dataset Generator Debugger", cv2.WINDOW_AUTOSIZE)
         except cv2.error as e:
@@ -471,21 +556,32 @@ def main():
         prev_coords_batch = []
         curr_coords_batch = []
         
+        # Pre-allocate and shuffle decisions to guarantee exact ratio and perfect random distribution (i.i.d.)
+        num_hover_target = int(args.batch_size * args.hover_prob)
+        num_trans_target = args.batch_size - num_hover_target
+        
+        batch_decisions = [True] * num_hover_target + [False] * num_trans_target
+        random.shuffle(batch_decisions)
+        
         while len(hist_frames_batch) < args.batch_size:
             if args.visualize and sample_count >= args.num_of_samples:
                 break
                 
-            # 1. Decide if this sample should simulate hovering (static frame + jitter)
-            is_hover = random.random() < args.hover_prob
+            is_hover = batch_decisions[len(hist_frames_batch)]
             
             random_video = random.choice(video_paths)
             cap = cv2.VideoCapture(random_video)
             
+            # Robust corrupted video logging as requested by user
             if not cap.isOpened():
+                print(f"[ERROR] Corrupted video file (moov atom not found / failed to open): {os.path.abspath(random_video)}")
+                sys.stdout.flush()
                 continue
                 
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             if total_frames < 200:
+                print(f"[ERROR] Corrupted or incomplete video file (too few frames / moov atom failure): {os.path.abspath(random_video)}")
+                sys.stdout.flush()
                 cap.release()
                 continue
                 
@@ -493,20 +589,20 @@ def main():
             max_start = total_frames - 150
             start_frame_idx = random.randint(0, max_start)
             
-            # Performance Optimization: Seek to F_hist once, then grab frames sequentially
+            # Seek to start frame
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx)
             ret, frame_hist_raw = cap.read()
             if not ret or frame_hist_raw is None:
                 cap.release()
                 continue
                 
-            # Safely convert raw frame to grayscale
+            # Grayscale conversions
             f_hist_full = to_grayscale(frame_hist_raw)
             f_hist_256 = cv2.resize(f_hist_full, (256, 256), interpolation=cv2.INTER_AREA)
             
             if is_hover:
                 # =========================================================
-                # Stationary Hover Scenario (Zero I/O seek, SIFT on 1 frame)
+                # Stationary Hover Scenario (SIFT on 1 frame + Jitter)
                 # =========================================================
                 cap.release()
                 
@@ -515,14 +611,10 @@ def main():
                 if not kp:
                     continue
                     
-                # Pick a random keypoint as target
                 target_kp = random.choice(kp)
                 target_coords = [target_kp.pt[0] / 256.0, target_kp.pt[1] / 256.0]
                 
-                # Jitter frame 1 to get prev
                 f_prev_256, prev_coords = simulate_hover_jitter(f_hist_256, target_coords)
-                
-                # Jitter frame 2 to get curr
                 f_curr_256, curr_coords = simulate_hover_jitter(f_hist_256, target_coords)
                 
                 hist_coords = target_coords
@@ -532,7 +624,6 @@ def main():
                 # =========================================================
                 # Real Drone / Driving Camera Translation (Consecutive Seek)
                 # =========================================================
-                # Fast forward skip (grab frames without heavy decoding)
                 gap_k = random.randint(60, 110)
                 for _ in range(gap_k - 1):
                     cap.grab()
@@ -545,7 +636,7 @@ def main():
                 f_prev_full = to_grayscale(frame_prev_raw)
                 f_prev_256 = cv2.resize(f_prev_full, (256, 256), interpolation=cv2.INTER_AREA)
                 
-                # Skip to current frame (very small step, e.g. 2 frames)
+                # Skip to current frame (very small step)
                 gap_d = 2
                 for _ in range(gap_d - 1):
                     cap.grab()
@@ -558,35 +649,51 @@ def main():
                 f_curr_full = to_grayscale(frame_curr_raw)
                 f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
                 
-                # 2. Keypoint Matching & Geometric RANSAC verification
+                # Match SIFT keypoints across the three branches
                 match_res = match_sift_triplet(
                     f_hist_256, f_prev_256, f_curr_256, 
                     ratio=args.ratio, min_inliers=args.min_inliers
                 )
                 
-                if match_res is None:
-                    continue
+                # If in production dataset generation, skip failed SIFT triplets
+                if not args.visualize:
+                    if match_res is None or match_res.get("status") == "failed":
+                        continue
+                        
+                # Pick a random landmark trajectory (or dummy fallback if visualizing failure)
+                if match_res.get("status") == "success":
+                    selected_path = random.choice(match_res["paths"])
+                    hist_coords = selected_path["hist"]
+                    prev_coords = selected_path["prev"]
+                    curr_coords = selected_path["curr"]
+                else:
+                    # SIFT match failure context (only used in visualization mode)
+                    hist_coords = [0.5, 0.5]
+                    prev_coords = [0.5, 0.5]
+                    curr_coords = [0.5, 0.5]
                     
-                # Pick a random verified inlier landmark path
-                selected_path = random.choice(match_res["paths"])
-                
-                hist_coords = selected_path["hist"]
-                prev_coords = selected_path["prev"]
-                curr_coords = selected_path["curr"]
                 sift_match_debug = match_res
                 
             # =========================================================
             # Common Sample Processing & Packaging
             # =========================================================
             
-            # Apply circular masks centered on matching target landmarks
-            f_hist_masked = apply_circle_mask(f_hist_256, hist_coords, radius=128)
-            f_prev_masked = apply_circle_mask(f_prev_256, prev_coords, radius=50)
+            # Generate the 2D attention masks for Channel 1
+            hist_mask = generate_attention_mask(
+                hist_coords, size=256, mask_type=args.mask_type,
+                radius=args.hist_radius, sigma=args.mask_sigma
+            )
+            prev_mask = generate_attention_mask(
+                prev_coords, size=256, mask_type=args.mask_type,
+                radius=args.prev_radius, sigma=args.mask_sigma
+            )
+            zeros_mask = np.zeros((256, 256, 1), dtype=np.float32)
             
-            # If visualize mode, display HUD preview immediately
+            # If visualize mode, display HUD preview immediately (including matches and connections)
             if args.visualize:
                 dashboard = render_dashboard(
-                    f_hist_masked, f_prev_masked, f_curr_256,
+                    f_hist_256, f_prev_256, f_curr_256,
+                    hist_mask, prev_mask,
                     hist_coords, prev_coords, curr_coords,
                     sift_info=sift_match_debug
                 )
@@ -599,19 +706,28 @@ def main():
                         sys.exit(0)
                 except cv2.error as e:
                     print(f"\nGUI Error: Could not render visualization window ({e}).")
-                    print("This usually occurs in headless environments lacking X11 display forwarding.")
                     print("Please run without the '-v' / '--visualize' flag to export pickle files directly.")
                     sys.exit(1)
                     
-                # Any other key (or space) loops to show next sample
-                sample_count += 1
-                print(f"Rendered sample {sample_count}/{args.num_of_samples} (Hover: {is_hover})")
+                # In visualization mode, failures are not skipped to show debugging connections
+                if sift_match_debug is not None and sift_match_debug.get("status") == "failed":
+                    print(f"[PREVIEW] SIFT Match Failed: {sift_match_debug.get('reason')} - rendering connections and diagnostics.")
+                    sys.stdout.flush()
+                else:
+                    sample_count += 1
+                    print(f"Rendered sample {sample_count}/{args.num_of_samples} (Hover: {is_hover})")
+                    sys.stdout.flush()
                 continue
                 
-            # Convert to target training formats (normalized float32, float32 heatmaps)
-            hist_frame = np.expand_dims(f_hist_masked.astype(np.float32) / 255.0, axis=-1)
-            prev_frame = np.expand_dims(f_prev_masked.astype(np.float32) / 255.0, axis=-1)
-            curr_frame = np.expand_dims(f_curr_256.astype(np.float32) / 255.0, axis=-1)
+            # Convert to target training formats (Channel 0 = Grayscale, Channel 1 = Mask)
+            f_hist_norm = f_hist_256.astype(np.float32) / 255.0
+            f_prev_norm = f_prev_256.astype(np.float32) / 255.0
+            f_curr_norm = f_curr_256.astype(np.float32) / 255.0
+            
+            # Stack along last axis (channel axis) to produce shape (256, 256, 2)
+            hist_frame = np.stack([f_hist_norm, hist_mask[:, :, 0]], axis=-1)
+            prev_frame = np.stack([f_prev_norm, prev_mask[:, :, 0]], axis=-1)
+            curr_frame = np.stack([f_curr_norm, zeros_mask[:, :, 0]], axis=-1)
             
             target_heatmap = generate_gaussian_heatmap(curr_coords, size=64, sigma=4.0)
             
@@ -629,7 +745,7 @@ def main():
         if args.visualize:
             continue
             
-        # Serialize batch to pickle matching tracker_model2 expectations exactly
+        # Serialize batch to pickle matching tracker_model3 expectations exactly
         batch_data = {
             "inputs": [
                 np.array(hist_frames_batch, dtype=np.float32),
