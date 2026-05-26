@@ -210,7 +210,8 @@ def extract_features(img, feature_type='asift', asift_matcher=None):
         kp, des = detector.detectAndCompute(img, None)
         return kp, des
 
-def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8, feature_type='asift', asift_matcher=None):
+def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, feature_type='asift', asift_matcher=None,
+                           ransac_thresh=5.0, min_motion_pc=1.0, min_motion_hp=3.0, min_texture_std=3.0):
     """
     Runs SIFT/ASIFT/SURF keypoint detection and matches features across three frames
     (hist -> prev and prev -> curr). Fits a Fundamental Matrix via RANSAC
@@ -273,8 +274,8 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8, fe
             dist_pc = np.sqrt(v_pc[0]**2 + v_pc[1]**2)
             dist_hp = np.sqrt(v_hp[0]**2 + v_hp[1]**2)
             
-            # Discard static/interior features (short-term threshold: 2.0 px, long-term threshold: 8.0 px)
-            if dist_pc < 2.0 or dist_hp < 8.0:
+            # Eased static filters (using customizable args)
+            if dist_pc < min_motion_pc or dist_hp < min_motion_hp:
                 continue
                 
             # 2. Filter B: Directional Coherence (Cosine Similarity)
@@ -285,12 +286,13 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8, fe
             if cos_theta < 0.0:
                 continue
                 
-            # 3. Filter C: Local Texture/Variance Filter (11x11 patch standard deviation)
+            # 3. Filter C: Local Texture/Variance Filter
             px, py = int(pt_p[0]), int(pt_p[1])
             if py - 5 >= 0 and py + 6 <= 256 and px - 5 >= 0 and px + 6 <= 256:
                 patch = f_prev[py-5 : py+6, px-5 : px+6]
                 patch_std = np.std(patch)
-                if patch_std < 6.0:
+                # Eased texture filter
+                if patch_std < min_texture_std:
                     continue
             else:
                 continue
@@ -317,8 +319,8 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8, fe
     pts_curr = np.float32(pts_curr)
     
     # Fit Fundamental Matrices using RANSAC to verify epipolar constraints
-    F_12, mask_12 = cv2.findFundamentalMat(pts_hist, pts_prev, cv2.FM_RANSAC, 3.0)
-    F_23, mask_23 = cv2.findFundamentalMat(pts_prev, pts_curr, cv2.FM_RANSAC, 3.0)
+    F_12, mask_12 = cv2.findFundamentalMat(pts_hist, pts_prev, cv2.FM_RANSAC, ransac_thresh)
+    F_23, mask_23 = cv2.findFundamentalMat(pts_prev, pts_curr, cv2.FM_RANSAC, ransac_thresh)
     
     if F_12 is None or F_23 is None or mask_12 is None or mask_23 is None:
         return {
@@ -582,14 +584,14 @@ def main():
     parser.add_argument(
         "--ratio",
         type=float,
-        default=0.75,
-        help="Lowe's ratio threshold for filtering SIFT matches (default: 0.75)."
+        default=0.85,
+        help="Lowe's ratio threshold for filtering SIFT matches. Eased for perspective matching (default: 0.85)."
     )
     parser.add_argument(
         "--min_inliers",
         type=int,
-        default=8,
-        help="Minimum number of verified RANSAC inliers to accept a triplet (default: 8)."
+        default=6,
+        help="Minimum number of verified RANSAC inliers to accept a triplet. Eased for perspective matching (default: 6)."
     )
     parser.add_argument(
         "--hover_prob",
@@ -626,6 +628,30 @@ def main():
         default="asift",
         choices=["asift", "sift", "surf"],
         help="Feature matching algorithm. ASIFT is recommended for perspective dilation (default: asift)."
+    )
+    parser.add_argument(
+        "--ransac_thresh",
+        type=float,
+        default=5.0,
+        help="RANSAC reprojection error threshold in pixels (default: 5.0)."
+    )
+    parser.add_argument(
+        "--min_motion_pc",
+        type=float,
+        default=1.0,
+        help="Minimum motion velocity in pixels between prev and curr frames (default: 1.0)."
+    )
+    parser.add_argument(
+        "--min_motion_hp",
+        type=float,
+        default=3.0,
+        help="Minimum motion velocity in pixels between hist and prev frames (default: 3.0)."
+    )
+    parser.add_argument(
+        "--min_texture_std",
+        type=float,
+        default=3.0,
+        help="Minimum local patch standard deviation to accept keypoints in low-contrast areas (default: 3.0)."
     )
     
     args = parser.parse_args()
@@ -781,11 +807,15 @@ def main():
                 f_curr_full = to_grayscale(frame_curr_raw)
                 f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
                 
-                # Match SIFT/ASIFT/SURF keypoints across the three branches
+                # Match SIFT/ASIFT/SURF keypoints across the three branches (using customizable thresholds)
                 match_res = match_features_triplet(
                     f_hist_256, f_prev_256, f_curr_256, 
                     ratio=args.ratio, min_inliers=args.min_inliers,
-                    feature_type=args.feature_type, asift_matcher=asift_matcher
+                    feature_type=args.feature_type, asift_matcher=asift_matcher,
+                    ransac_thresh=args.ransac_thresh,
+                    min_motion_pc=args.min_motion_pc,
+                    min_motion_hp=args.min_motion_hp,
+                    min_texture_std=args.min_texture_std
                 )
                 
                 # If in production dataset generation, skip failed SIFT triplets
