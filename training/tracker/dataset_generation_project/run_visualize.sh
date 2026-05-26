@@ -30,16 +30,13 @@ fi
 # =========================================================================
 FEATURE_TYPE="asift"
 
-# Automatically adapt threshold ratio based on algorithm selection to optimize detections
-if [ "$FEATURE_TYPE" = "surf" ] || [ "$FEATURE_TYPE" = "sift" ]; then
-    # Standard feature types can use a slightly looser ratio test to maximize matches
-    RATIO=0.90
-    MIN_INLIERS=6
-else
-    # ASIFT simulates multiple viewpoints and produces many matches, so 0.85 is ideal
-    RATIO=0.85
-    MIN_INLIERS=6
-fi
+# Hyper-Permissive thresholds to maximize raw keypoint detections in difficult views
+RATIO=0.95
+MIN_INLIERS=5
+RANSAC_THRESH=8.0
+MIN_MOTION_PC=1.0
+MIN_MOTION_HP=1.0
+MIN_TEXTURE_STD=0.0
 
 echo "=========================================================="
 echo "Starting Dataset Generator in Visualization Mode"
@@ -49,10 +46,10 @@ echo "----------------------------------------------------------"
 echo "Applied Permissive Thresholds:"
 echo " - Lowe's Ratio (--ratio): ${RATIO}"
 echo " - Min RANSAC Inliers (--min_inliers): ${MIN_INLIERS}"
-echo " - RANSAC Error Thresh (--ransac_thresh): 5.0"
-echo " - Min Motion Prev->Curr (--min_motion_pc): 1.0 px"
-echo " - Min Motion Hist->Prev (--min_motion_hp): 3.0 px"
-echo " - Min Contrast/Texture (--min_texture_std): 3.0"
+echo " - RANSAC Error Thresh (--ransac_thresh): ${RANSAC_THRESH}"
+echo " - Min Motion Prev->Curr (--min_motion_pc): ${MIN_MOTION_PC} px"
+echo " - Min Motion Hist->Prev (--min_motion_hp): ${MIN_MOTION_HP} px"
+echo " - Min Contrast/Texture (--min_texture_std): ${MIN_TEXTURE_STD}"
 echo "=========================================================="
 
 # Unified Python Execution Call (Widescreen 3x2 HUD mode active)
@@ -61,10 +58,10 @@ python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
     --feature_type "${FEATURE_TYPE}" \
     --ratio "${RATIO}" \
     --min_inliers "${MIN_INLIERS}" \
-    --ransac_thresh 5.0 \
-    --min_motion_pc 1.0 \
-    --min_motion_hp 3.0 \
-    --min_texture_std 3.0 \
+    --ransac_thresh "${RANSAC_THRESH}" \
+    --min_motion_pc "${MIN_MOTION_PC}" \
+    --min_motion_hp "${MIN_MOTION_HP}" \
+    --min_texture_std "${MIN_TEXTURE_STD}" \
     --mask_type gaussian \
     --mask_sigma 15.0 \
     --hist_radius 128 \
