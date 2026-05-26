@@ -66,6 +66,107 @@ def generate_gaussian_heatmap(coords, size=64, sigma=4.0):
     return np.expand_dims(heatmap, axis=-1)
 
 # =====================================================================
+# Affine SIFT (ASIFT) Perspective Simulation Helpers
+# =====================================================================
+
+def get_affine_tilt_matrix(w, h, t, phi):
+    """
+    Constructs the 2x3 affine matrix for a viewpoint tilt t and rotation phi,
+    along with its inverse for keypoint back-projection.
+    """
+    center = (w / 2.0, h / 2.0)
+    
+    # 1. Rotation matrix around center
+    R = cv2.getRotationMatrix2D(center, phi, 1.0)
+    
+    # 2. Horizontal scaling matrix (simulating camera tilt along x-axis)
+    S = np.array([
+        [1.0 / t, 0.0, center[0] * (1.0 - 1.0 / t)],
+        [0.0, 1.0, 0.0]
+    ], dtype=np.float32)
+    
+    # 3. Combine matrices using homogenous 3x3 coordinates
+    R_3x3 = np.vstack([R, [0.0, 0.0, 1.0]])
+    S_3x3 = np.vstack([S, [0.0, 0.0, 1.0]])
+    
+    M_3x3 = np.dot(S_3x3, R_3x3)
+    M = M_3x3[:2, :]
+    
+    # Inverse matrix for projecting coordinates back to the original frame
+    M_inv_3x3 = np.linalg.inv(M_3x3)
+    M_inv = M_inv_3x3[:2, :]
+    
+    return M, M_inv
+
+class ASIFTMatcher:
+    """
+    Highly optimized and accelerated Affine SIFT implementation using OpenCV.
+    Simulates affine camera viewpoints, aggregates keypoints/descriptors,
+    and performs a single global match.
+    """
+    def __init__(self, feature_type='sift'):
+        self.feature_type = feature_type
+        if feature_type == 'surf':
+            self.detector = cv2.xfeatures2d.SURF_create(hessianThreshold=400)
+        else:
+            self.detector = cv2.SIFT_create()
+            
+        # 5 highly representative viewpoints for forward progress & gimbal tilts
+        self.views = [
+            (1.0, 0.0),       # Standard view (no warp)
+            (1.414, 0.0),     # 45 deg tilt along X-axis
+            (1.414, 90.0),    # 45 deg tilt along Y-axis
+            (2.0, 0.0),       # 60 deg tilt along X-axis
+            (2.0, 90.0)       # 60 deg tilt along Y-axis
+        ]
+
+    def detect_and_backproject(self, img):
+        """
+        Warps the image for all simulated viewpoints, extracts keypoints/descriptors,
+        and projects keypoint coordinates back to the original image space.
+        """
+        h, w = img.shape[:2]
+        aggregated_kps = []
+        aggregated_des = []
+        
+        for t, phi in self.views:
+            if t == 1.0 and phi == 0.0:
+                kps, des = self.detector.detectAndCompute(img, None)
+                if des is not None:
+                    for kp in kps:
+                        aggregated_kps.append(kp)
+                    aggregated_des.append(des)
+            else:
+                M, M_inv = get_affine_tilt_matrix(w, h, t, phi)
+                
+                # Perform GPU-equivalent multithreaded CPU warp
+                img_warped = cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+                
+                kps, des = self.detector.detectAndCompute(img_warped, None)
+                if des is not None:
+                    for kp in kps:
+                        pt_w = np.array([kp.pt[0], kp.pt[1], 1.0], dtype=np.float32)
+                        pt_orig = np.dot(M_inv, pt_w)
+                        
+                        # Instantiation using positional constructor for maximum version compatibility
+                        kp_orig = cv2.KeyPoint(
+                            float(pt_orig[0]),
+                            float(pt_orig[1]),
+                            kp.size,
+                            kp.angle + phi,
+                            kp.response,
+                            kp.octave,
+                            kp.class_id
+                        )
+                        aggregated_kps.append(kp_orig)
+                    aggregated_des.append(des)
+                    
+        if len(aggregated_des) == 0:
+            return [], None
+            
+        return aggregated_kps, np.vstack(aggregated_des)
+
+# =====================================================================
 # Video Crawling and Geometric Invariance Helpers
 # =====================================================================
 
@@ -92,20 +193,35 @@ def find_video_files(directory):
                 video_paths.append(os.path.join(root, f))
     return video_paths
 
-def match_sift_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8):
+def extract_features(img, feature_type='asift', asift_matcher=None):
     """
-    Runs SIFT keypoint detection and matches features across three frames
+    Extracts keypoints and descriptors based on the selected feature type.
+    """
+    if feature_type == 'asift':
+        if asift_matcher is None:
+            asift_matcher = ASIFTMatcher(feature_type='sift')
+        return asift_matcher.detect_and_backproject(img)
+    elif feature_type == 'surf':
+        detector = cv2.xfeatures2d.SURF_create(hessianThreshold=400)
+        kp, des = detector.detectAndCompute(img, None)
+        return kp, des
+    else:  # sift
+        detector = cv2.SIFT_create()
+        kp, des = detector.detectAndCompute(img, None)
+        return kp, des
+
+def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.75, min_inliers=8, feature_type='asift', asift_matcher=None):
+    """
+    Runs SIFT/ASIFT/SURF keypoint detection and matches features across three frames
     (hist -> prev and prev -> curr). Fits a Fundamental Matrix via RANSAC
     to reject dynamic outliers and returns a list of verified inlier coordinate paths.
     
     If inliers < min_inliers, it still returns the detected raw matches and status="failed"
     to allow the visualization debug panel to render the failure diagnostic.
     """
-    sift = cv2.SIFT_create()
-    
-    kp_hist, des_hist = sift.detectAndCompute(f_hist, None)
-    kp_prev, des_prev = sift.detectAndCompute(f_prev, None)
-    kp_curr, des_curr = sift.detectAndCompute(f_curr, None)
+    kp_hist, des_hist = extract_features(f_hist, feature_type, asift_matcher)
+    kp_prev, des_prev = extract_features(f_prev, feature_type, asift_matcher)
+    kp_curr, des_curr = extract_features(f_curr, feature_type, asift_matcher)
     
     if des_hist is None or des_prev is None or des_curr is None:
         return {
@@ -354,7 +470,7 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
     cv2.circle(c_color, (cx, cy), 8, (0, 255, 0), 2)   # Neon green target ring
     cv2.circle(c_color, (cx, cy), 2, (0, 255, 0), -1)  # Center dot
     
-    # 4. SIFT match visualization panel (between prev and curr)
+    # 4. SIFT/ASIFT/SURF match visualization panel (between prev and curr)
     is_success = (sift_info is not None and sift_info.get("status") == "success")
     
     # Prepare the double-wide horizontal panel
@@ -393,14 +509,14 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
             cv2.putText(s_color, "HOVER MODE", (40, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(s_color, "Gimbal Jitter Active", (40, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 200), 1, cv2.LINE_AA)
         else:
-            cv2.putText(s_color, "NO SIFT MATCHES FOUND", (15, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+            cv2.putText(s_color, "NO MATCHES FOUND", (35, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
             
     # 5. Draw HUD labels
     draw_hud_label(h_color, "HIST CONTEXT + SOFT GLOW", (10, 240), (0, 0, 255))
     draw_hud_label(p_color, "PREV CONTEXT + SOFT GLOW", (10, 240), (255, 0, 0))
     draw_hud_label(c_color, "CURR CONTEXT (TARGET)", (10, 240), (0, 255, 0))
     
-    sift_label = "SIFT CONNECTIONS" if is_success else "SIFT FAILURE CONNECTIONS"
+    sift_label = "GEOMETRIC CONNECTIONS" if is_success else "GEOMETRIC FAILURE CONNECTIONS"
     sift_label_color = (255, 255, 0) if is_success else (0, 128, 255)
     draw_hud_label(s_color, sift_label, (10, 240), sift_label_color)
     
@@ -435,7 +551,7 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generates training datasets for tracker_model3 directly from real driving/drone videos using SIFT RANSAC."
+        description="Generates training datasets for tracker_model3 directly from real driving/drone videos using ASIFT RANSAC."
     )
     parser.add_argument(
         "videos_dir",
@@ -505,6 +621,12 @@ def main():
         default=50,
         help="Radius of the previous circular mask in pixels (default: 50)."
     )
+    parser.add_argument(
+        "--feature_type",
+        default="asift",
+        choices=["asift", "sift", "surf"],
+        help="Feature matching algorithm. ASIFT is recommended for perspective dilation (default: asift)."
+    )
     
     args = parser.parse_args()
     
@@ -547,6 +669,11 @@ def main():
     auto_run_until_success = False
     attempt_count = 0
     
+    # Initialize the ASIFT matcher if selected
+    asift_matcher = None
+    if args.feature_type == "asift":
+        asift_matcher = ASIFTMatcher(feature_type="sift")
+        
     for b in range(num_batches):
         if args.visualize and sample_count >= args.num_of_samples:
             break
@@ -654,10 +781,11 @@ def main():
                 f_curr_full = to_grayscale(frame_curr_raw)
                 f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
                 
-                # Match SIFT keypoints across the three branches
-                match_res = match_sift_triplet(
+                # Match SIFT/ASIFT/SURF keypoints across the three branches
+                match_res = match_features_triplet(
                     f_hist_256, f_prev_256, f_curr_256, 
-                    ratio=args.ratio, min_inliers=args.min_inliers
+                    ratio=args.ratio, min_inliers=args.min_inliers,
+                    feature_type=args.feature_type, asift_matcher=asift_matcher
                 )
                 
                 # If in production dataset generation, skip failed SIFT triplets
@@ -735,7 +863,7 @@ def main():
                     sys.stdout.flush()
                     attempt_count = 0  # Reset for next sample
                 else:
-                    print(f"[Sample {sample_count + 1} | Attempt {attempt_count}] SIFT Match Failed: {sift_match_debug.get('reason')} - rendering connections.")
+                    print(f"[Sample {sample_count + 1} | Attempt {attempt_count}] Match Failed ({args.feature_type}): {sift_match_debug.get('reason')} - rendering connections.")
                     sys.stdout.flush()
                 continue
                 
