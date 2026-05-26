@@ -210,6 +210,19 @@ def extract_features(img, feature_type='asift', asift_matcher=None):
         kp, des = detector.detectAndCompute(img, None)
         return kp, des
 
+def compute_epipolar_distance(pt1, pt2, F):
+    """
+    Computes the orthogonal distance from pt2 (in image 2) to the epipolar line
+    corresponding to pt1 (in image 1) given by l = F * [pt1[0], pt1[1], 1.0]^T.
+    """
+    h_pt1 = np.array([pt1[0], pt1[1], 1.0], dtype=np.float32)
+    line = np.dot(F, h_pt1)
+    a, b, c = line[0], line[1], line[2]
+    denom = np.sqrt(a**2 + b**2)
+    if denom < 1e-8:
+        return 999.0
+    return abs(a * pt2[0] + b * pt2[1] + c) / denom
+
 def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, feature_type='asift', asift_matcher=None,
                            ransac_thresh=5.0, min_motion_pc=1.0, min_motion_hp=3.0, min_texture_std=3.0):
     """
@@ -354,9 +367,25 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
             "inliers": inlier_indices
         }
         
-    # Construct verified normalized paths
-    verified_paths = []
+    # Calculate epipolar distance errors for each inlier and sort them
+    inliers_with_errors = []
     for idx in inlier_indices:
+        pt_h = pts_hist[idx]
+        pt_p = pts_prev[idx]
+        pt_c = pts_curr[idx]
+        
+        d12 = compute_epipolar_distance(pt_h, pt_p, F_12)
+        d23 = compute_epipolar_distance(pt_p, pt_c, F_23)
+        total_err = d12 + d23
+        inliers_with_errors.append((idx, total_err))
+        
+    # Sort inliers by total epipolar error in ascending order (best first)
+    inliers_with_errors.sort(key=lambda item: item[1])
+    sorted_inlier_indices = [item[0] for item in inliers_with_errors]
+    
+    # Construct verified normalized paths in sorted order (best first)
+    verified_paths = []
+    for idx in sorted_inlier_indices:
         h_pt = pts_hist[idx]
         p_pt = pts_prev[idx]
         c_pt = pts_curr[idx]
@@ -375,7 +404,7 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
         "kp_prev": kp_prev,
         "kp_curr": kp_curr,
         "triplets": kp_triplets,
-        "inliers": inlier_indices
+        "inliers": sorted_inlier_indices
     }
 
 def simulate_hover_jitter(frame_256, coords):
@@ -472,15 +501,16 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
     cv2.circle(c_color, (cx, cy), 8, (0, 255, 0), 2)   # Neon green target ring
     cv2.circle(c_color, (cx, cy), 2, (0, 255, 0), -1)  # Center dot
     
-    # 4. SIFT/ASIFT/SURF match visualization panel (between prev and curr)
+    # 4. SIFT/ASIFT/SURF match visualization panel (across hist -> prev -> curr)
     is_success = (sift_info is not None and sift_info.get("status") == "success")
     
-    # Prepare the double-wide horizontal panel
-    sift_panel = np.hstack([f_prev_256, f_curr_256])
+    # Prepare the triple-wide horizontal panel (hist + prev + curr)
+    sift_panel = np.hstack([f_hist_256, f_prev_256, f_curr_256])
     s_color = cv2.cvtColor(sift_panel, cv2.COLOR_GRAY2BGR)
     
     # Draw connections in all visualization states (success and failure)
     if sift_info is not None and len(sift_info.get("inliers", [])) > 0:
+        kp_hist = sift_info["kp_hist"]
         kp_prev = sift_info["kp_prev"]
         kp_curr = sift_info["kp_curr"]
         triplets = sift_info["triplets"]
@@ -492,43 +522,47 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
         for idx in inliers:
             if idx < len(triplets):
                 trip = triplets[idx]
+                pt_h = kp_hist[trip[0]].pt
                 pt_p = kp_prev[trip[1]].pt
                 pt_c = kp_curr[trip[2]].pt
                 
-                p1 = (int(pt_p[0]), int(pt_p[1]))
-                p2 = (int(pt_c[0] + 256), int(pt_c[1]))  # Shifted right by frame width
+                p1_h = (int(pt_h[0]), int(pt_h[1]))
+                p2_p = (int(pt_p[0] + 256), int(pt_p[1]))  # Shifted right by 256 (prev frame)
+                p3_c = (int(pt_c[0] + 512), int(pt_c[1]))  # Shifted right by 512 (curr frame)
                 
-                cv2.line(s_color, p1, p2, line_color, 1, cv2.LINE_AA)
-                cv2.circle(s_color, p1, 3, (255, 0, 255), -1)
-                cv2.circle(s_color, p2, 3, (255, 0, 255), -1)
+                # Connection hist -> prev
+                cv2.line(s_color, p1_h, p2_p, line_color, 1, cv2.LINE_AA)
+                # Connection prev -> curr
+                cv2.line(s_color, p2_p, p3_c, line_color, 1, cv2.LINE_AA)
                 
-        # Resize to fit the 256x256 grid
-        s_color = cv2.resize(s_color, (256, 256), interpolation=cv2.INTER_AREA)
+                # Circle indicators on all keypoint nodes
+                cv2.circle(s_color, p1_h, 3, (255, 0, 255), -1)
+                cv2.circle(s_color, p2_p, 3, (255, 0, 255), -1)
+                cv2.circle(s_color, p3_c, 3, (255, 0, 255), -1)
     else:
-        # Hover Mode or Empty matching
-        s_color = cv2.cvtColor(f_prev_256, cv2.COLOR_GRAY2BGR)
+        # Hover Mode or Empty matching (centered on 768px widescreen canvas)
         if sift_info is None:
-            cv2.putText(s_color, "HOVER MODE", (40, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(s_color, "Gimbal Jitter Active", (40, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 200), 1, cv2.LINE_AA)
+            cv2.putText(s_color, "HOVER MODE", (280, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(s_color, "Gimbal Jitter Active", (300, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 200), 1, cv2.LINE_AA)
         else:
-            cv2.putText(s_color, "NO MATCHES FOUND", (35, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+            cv2.putText(s_color, "NO MATCHES FOUND", (260, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
             
     # 5. Draw HUD labels
     draw_hud_label(h_color, "HIST CONTEXT + SOFT GLOW", (10, 240), (0, 0, 255))
     draw_hud_label(p_color, "PREV CONTEXT + SOFT GLOW", (10, 240), (255, 0, 0))
     draw_hud_label(c_color, "CURR CONTEXT (TARGET)", (10, 240), (0, 255, 0))
     
-    sift_label = "GEOMETRIC CONNECTIONS" if is_success else "GEOMETRIC FAILURE CONNECTIONS"
+    sift_label = "GEOMETRIC CONNECTIONS (HIST -> PREV -> CURR)" if is_success else "GEOMETRIC FAILURE CONNECTIONS"
     sift_label_color = (255, 255, 0) if is_success else (0, 128, 255)
     draw_hud_label(s_color, sift_label, (10, 240), sift_label_color)
     
-    # 6. Assemble Grid
-    row1 = np.hstack([h_color, p_color])
-    row2 = np.hstack([c_color, s_color])
-    dashboard = np.vstack([row1, row2])
+    # 6. Assemble Grid (Widescreen 3x2 Grid)
+    row1 = np.hstack([h_color, p_color, c_color])  # Shape: (256, 768, 3)
+    row2 = s_color                                # Shape: (256, 768, 3)
+    dashboard = np.vstack([row1, row2])           # Shape: (512, 768, 3)
     
-    # 7. Add Top HUD Dashboard header bar
-    header_bar = np.zeros((35, 512, 3), dtype=np.uint8)
+    # 7. Add Top HUD Dashboard header bar (768px wide)
+    header_bar = np.zeros((35, 768, 3), dtype=np.uint8)
     
     if is_success or sift_info is None:
         title_text = "VIDEO DATASET GENERATOR - PREVIEW HUD"
@@ -541,7 +575,7 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
         
     cv2.putText(header_bar, title_text, (10, 22), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, title_color, 1, cv2.LINE_AA)
-    cv2.putText(header_bar, "[SPACE]: Next  |  [ENTER]: Auto-run  |  [ESC/Q]: Exit", (220, 22), 
+    cv2.putText(header_bar, "[SPACE]: Next  |  [ENTER]: Auto-run  |  [ESC/Q]: Exit", (460, 22), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1, cv2.LINE_AA)
     
     final_output = np.vstack([header_bar, dashboard])
@@ -743,8 +777,15 @@ def main():
                 cap.release()
                 continue
                 
-            # Define maximum starting index to prevent running out of frames
-            max_start = total_frames - 150
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0 or np.isnan(fps):
+                fps = 30.0
+                
+            # Time gap of approx. 1 second between hist and prev (0.9 to 1.1s randomized window for training generalizability)
+            gap_k = random.randint(int(0.9 * fps), int(1.1 * fps))
+            
+            # Define maximum starting index to prevent running out of frames (at least 1.5 seconds)
+            max_start = total_frames - int(fps * 1.5)
             start_frame_idx = random.randint(0, max_start)
             
             # Seek to start frame
@@ -782,7 +823,8 @@ def main():
                 # =========================================================
                 # Real Drone / Driving Camera Translation (Consecutive Seek)
                 # =========================================================
-                gap_k = random.randint(60, 110)
+                # Real Drone / Driving Camera Translation (Consecutive Seek)
+                # gap_k is pre-computed dynamically above to represent approx. 1 second based on video FPS
                 for _ in range(gap_k - 1):
                     cap.grab()
                 ret, frame_prev_raw = cap.read()
@@ -823,9 +865,9 @@ def main():
                     if match_res is None or match_res.get("status") == "failed":
                         continue
                         
-                # Pick a random landmark trajectory (or dummy fallback if visualizing failure)
+                # Pick the mathematically best landmark trajectory (lowest epipolar line error)
                 if match_res.get("status") == "success":
-                    selected_path = random.choice(match_res["paths"])
+                    selected_path = match_res["paths"][0]
                     hist_coords = selected_path["hist"]
                     prev_coords = selected_path["prev"]
                     curr_coords = selected_path["curr"]
