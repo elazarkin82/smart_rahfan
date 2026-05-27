@@ -475,10 +475,32 @@ def draw_hud_label(img, label, org, color=(0, 255, 0)):
     
     cv2.putText(img, label, org, font, scale, color, thickness, cv2.LINE_AA)
 
-def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, hist_norm, prev_norm, curr_norm, sift_info=None, proc_size=800):
+def draw_epipolar_line(img, line, color, thickness=1):
     """
-    Renders a stunning 4-panel dashboard containing full frames overlaid with highly transparent
+    Highly robust utility to draw an epipolar line ax + by + c = 0 on an image.
+    Avoids division by zero and correctly handles nearly vertical/horizontal lines.
+    """
+    a, b, c = line[0], line[1], line[2]
+    h, w = img.shape[:2]
+    if abs(b) > abs(a):
+        # Line is more horizontal, solve for y at x=0 and x=w
+        x0 = 0
+        y0 = int(round(-c / b))
+        x1 = w
+        y1 = int(round(-(c + a * w) / b))
+    else:
+        # Line is more vertical, solve for x at y=0 and y=h
+        y0 = 0
+        x0 = int(round(-c / a))
+        y1 = h
+        x1 = int(round(-(c + b * h) / a))
+    cv2.line(img, (x0, y0), (x1, y1), color, thickness, cv2.LINE_AA)
+
+def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, hist_norm, prev_norm, curr_norm, sift_info=None, proc_size=800, feature_type='asift'):
+    """
+    Renders a stunning 3x3 widescreen grid dashboard containing full frames overlaid with highly transparent
     colored attention masks, green target indicators, and inter-image keypoint matching lines.
+    Additionally displays two real-time epipolar diagnostic panels and a telemetry console (Row 3).
     """
     # 1. Convert grayscale images (Channel 0) to BGR for colorful HUD overlays
     h_color = cv2.cvtColor(f_hist_256, cv2.COLOR_GRAY2BGR)
@@ -524,13 +546,10 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
         triplets = sift_info["triplets"]
         inliers = sift_info["inliers"]
         
-        # Color of connection lines: Cyan for success, Bright Orange for failure
-        line_color = (255, 255, 0) if is_success else (0, 128, 255)
-        
         # Scale coordinates from proc_size back to 256x256 visualization space
         scale = 256.0 / proc_size
         
-        for idx in inliers:
+        for color_idx, idx in enumerate(inliers):
             if idx < len(triplets):
                 trip = triplets[idx]
                 pt_h = kp_hist[trip[0]].pt
@@ -541,15 +560,30 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
                 p2_p = (int(pt_p[0] * scale + 256), int(pt_p[1] * scale))  # Shifted right by 256 (prev frame)
                 p3_c = (int(pt_c[0] * scale + 512), int(pt_c[1] * scale))  # Shifted right by 512 (curr frame)
                 
+                # Dynamic visual representation
+                if color_idx == 0:
+                    # Best match: Neon Fuchsia (Magenta), thicker
+                    color = (255, 0, 255)
+                    thickness = 2
+                    radius = 5
+                else:
+                    # Rainbow HSV color
+                    hue = int((color_idx * 180 / max(2, len(inliers))) % 180)
+                    hsv_color = np.uint8([[[hue, 255, 255]]])
+                    bgr_color = cv2.cvtColor(hsv_color, cv2.COLOR_HSV2BGR)[0][0]
+                    color = (int(bgr_color[0]), int(bgr_color[1]), int(bgr_color[2]))
+                    thickness = 1
+                    radius = 3
+                
                 # Connection hist -> prev
-                cv2.line(s_color, p1_h, p2_p, line_color, 1, cv2.LINE_AA)
+                cv2.line(s_color, p1_h, p2_p, color, thickness, cv2.LINE_AA)
                 # Connection prev -> curr
-                cv2.line(s_color, p2_p, p3_c, line_color, 1, cv2.LINE_AA)
+                cv2.line(s_color, p2_p, p3_c, color, thickness, cv2.LINE_AA)
                 
                 # Circle indicators on all keypoint nodes
-                cv2.circle(s_color, p1_h, 3, (255, 0, 255), -1)
-                cv2.circle(s_color, p2_p, 3, (255, 0, 255), -1)
-                cv2.circle(s_color, p3_c, 3, (255, 0, 255), -1)
+                cv2.circle(s_color, p1_h, radius, color, -1)
+                cv2.circle(s_color, p2_p, radius, color, -1)
+                cv2.circle(s_color, p3_c, radius, color, -1)
     else:
         # Hover Mode or Empty matching (centered on 768px widescreen canvas)
         if sift_info is None:
@@ -558,7 +592,139 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
         else:
             cv2.putText(s_color, "NO MATCHES FOUND", (260, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
             
-    # 5. Draw HUD labels
+    # 5. Row 3: Epipolar lines and Telemetry
+    epipoles_on_prev = cv2.cvtColor(f_prev_256, cv2.COLOR_GRAY2BGR)
+    epipoles_on_hist = cv2.cvtColor(f_hist_256, cv2.COLOR_GRAY2BGR)
+    telemetry_panel = np.zeros((256, 256, 3), dtype=np.uint8) + 20  # dark charcoal (20, 20, 20)
+    
+    avg_err = 0.0
+    inlier_count = 0
+    
+    if sift_info is not None:
+        inliers = sift_info.get("inliers", [])
+        triplets = sift_info.get("triplets", [])
+        kp_hist = sift_info.get("kp_hist", [])
+        kp_prev = sift_info.get("kp_prev", [])
+        
+        if len(inliers) > 0 and len(triplets) > 0:
+            scale = 256.0 / proc_size
+            pts_h_256 = []
+            pts_p_256 = []
+            
+            for idx in inliers:
+                if idx < len(triplets):
+                    trip = triplets[idx]
+                    pt_h = kp_hist[trip[0]].pt
+                    pt_p = kp_prev[trip[1]].pt
+                    pts_h_256.append([pt_h[0] * scale, pt_h[1] * scale])
+                    pts_p_256.append([pt_p[0] * scale, pt_p[1] * scale])
+                    
+            if len(pts_h_256) >= 5:
+                pts_h_256 = np.float32(pts_h_256)
+                pts_p_256 = np.float32(pts_p_256)
+                
+                # Fit fundamental matrix in 256x256 space
+                if len(pts_h_256) >= 8:
+                    F_256, _ = cv2.findFundamentalMat(pts_h_256, pts_p_256, cv2.FM_8POINT)
+                else:
+                    F_256, _ = cv2.findFundamentalMat(pts_h_256, pts_p_256, cv2.FM_LMEDS)
+                    
+                if F_256 is not None:
+                    # Compute epipolar lines in both images
+                    lines_on_prev = cv2.computeCorrespondEpilines(pts_h_256.reshape(-1, 1, 2), 1, F_256)
+                    lines_on_hist = cv2.computeCorrespondEpilines(pts_p_256.reshape(-1, 1, 2), 2, F_256)
+                    
+                    total_err = 0.0
+                    err_count = 0
+                    
+                    for i in range(len(pts_h_256)):
+                        pt_h = pts_h_256[i]
+                        pt_p = pts_p_256[i]
+                        
+                        l_prev = lines_on_prev[i][0]
+                        l_hist = lines_on_hist[i][0]
+                        
+                        # Calculate orthogonal distance for error metric
+                        a, b, c = l_prev[0], l_prev[1], l_prev[2]
+                        denom = np.sqrt(a**2 + b**2)
+                        if denom > 1e-8:
+                            dist = abs(a * pt_p[0] + b * pt_p[1] + c) / denom
+                            total_err += dist
+                            err_count += 1
+                            
+                        # High-contrast coloring: optimal is Neon Fuchsia, others are Rainbow
+                        if i == 0:
+                            color = (255, 0, 255)
+                            thickness = 2
+                            radius = 5
+                        else:
+                            hue = int((i * 180 / len(pts_h_256)) % 180)
+                            hsv_color = np.uint8([[[hue, 255, 255]]])
+                            bgr_color = cv2.cvtColor(hsv_color, cv2.COLOR_HSV2BGR)[0][0]
+                            color = (int(bgr_color[0]), int(bgr_color[1]), int(bgr_color[2]))
+                            thickness = 1
+                            radius = 3
+                            
+                        # Draw line and dot on prev image
+                        draw_epipolar_line(epipoles_on_prev, l_prev, color, thickness)
+                        cv2.circle(epipoles_on_prev, (int(pt_p[0]), int(pt_p[1])), radius, color, -1)
+                        
+                        # Draw line and dot on hist image
+                        draw_epipolar_line(epipoles_on_hist, l_hist, color, thickness)
+                        cv2.circle(epipoles_on_hist, (int(pt_h[0]), int(pt_h[1])), radius, color, -1)
+                        
+                    if err_count > 0:
+                        avg_err = total_err / err_count
+                        
+                    inlier_count = len(pts_h_256)
+                    
+    # Draw telemetry HUD console borders
+    status_color = (0, 255, 0) if is_success else (0, 0, 255)
+    cv2.rectangle(telemetry_panel, (0, 0), (255, 255), status_color, 2)
+    
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.38
+    thickness = 1
+    text_color = (220, 220, 220)
+    label_color = (0, 255, 255)
+    
+    # Render metrics in telemetry console
+    cv2.putText(telemetry_panel, "--- TELEMETRY HUD ---", (45, 25), font, 0.45, status_color, 1, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Detector: ", (15, 55), font, scale, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"{feature_type.upper()}", (95, 55), font, scale, text_color, thickness, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Proc Size: ", (15, 80), font, scale, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"{proc_size}x{proc_size}", (95, 80), font, scale, text_color, thickness, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Inliers: ", (15, 105), font, scale, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"{inlier_count}", (95, 105), font, scale, text_color, thickness, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Avg Epi Err:", (15, 130), font, scale, label_color, thickness, cv2.LINE_AA)
+    avg_err_str = f"{avg_err:.4f} px" if avg_err > 0.0 else "N/A"
+    cv2.putText(telemetry_panel, avg_err_str, (95, 130), font, scale, text_color, thickness, cv2.LINE_AA)
+    
+    hx_256 = hist_norm[0] * 256.0
+    hy_256 = hist_norm[1] * 256.0
+    px_256 = prev_norm[0] * 256.0
+    py_256 = prev_norm[1] * 256.0
+    cx_256 = curr_norm[0] * 256.0
+    cy_256 = curr_norm[1] * 256.0
+    
+    cv2.putText(telemetry_panel, "Hist Coord:", (15, 160), font, scale, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"({hx_256:.1f}, {hy_256:.1f})", (105, 160), font, scale, text_color, thickness, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Prev Coord:", (15, 185), font, scale, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"({px_256:.1f}, {py_256:.1f})", (105, 185), font, scale, text_color, thickness, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Curr Coord:", (15, 210), font, scale, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"({cx_256:.1f}, {cy_256:.1f})", (105, 210), font, scale, text_color, thickness, cv2.LINE_AA)
+    
+    status_str = "SUCCESS" if is_success else ("HOVER" if sift_info is None else "FAILED")
+    cv2.putText(telemetry_panel, "Status: ", (15, 240), font, scale, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, status_str, (95, 240), font, scale, status_color, 1, cv2.LINE_AA)
+    
+    # 6. Draw HUD labels
     draw_hud_label(h_color, "HIST CONTEXT + SOFT GLOW", (10, 240), (0, 0, 255))
     draw_hud_label(p_color, "PREV CONTEXT + SOFT GLOW", (10, 240), (255, 0, 0))
     draw_hud_label(c_color, "CURR CONTEXT (TARGET)", (10, 240), (0, 255, 0))
@@ -567,22 +733,26 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
     sift_label_color = (255, 255, 0) if is_success else (0, 128, 255)
     draw_hud_label(s_color, sift_label, (10, 240), sift_label_color)
     
-    # 6. Assemble Grid (Widescreen 3x2 Grid)
+    draw_hud_label(epipoles_on_prev, "EPIPOLAR LINES: HIST ON PREV", (10, 240), (255, 0, 255) if is_success else (0, 0, 255))
+    draw_hud_label(epipoles_on_hist, "EPIPOLAR LINES: PREV ON HIST", (10, 240), (255, 0, 255) if is_success else (0, 0, 255))
+    
+    # 7. Assemble Grid (Symmetric 3x3 Grid)
     row1 = np.hstack([h_color, p_color, c_color])  # Shape: (256, 768, 3)
     row2 = s_color                                # Shape: (256, 768, 3)
-    dashboard = np.vstack([row1, row2])           # Shape: (512, 768, 3)
+    row3 = np.hstack([epipoles_on_prev, epipoles_on_hist, telemetry_panel]) # Shape: (256, 768, 3)
+    dashboard = np.vstack([row1, row2, row3])     # Shape: (768, 768, 3)
     
-    # 7. Add Top HUD Dashboard header bar (768px wide)
+    # 8. Add Top HUD Dashboard header bar (768px wide)
     header_bar = np.zeros((35, 768, 3), dtype=np.uint8)
     
     if is_success or sift_info is None:
         title_text = "VIDEO DATASET GENERATOR - PREVIEW HUD"
-        title_color = (0, 255, 255)  # Yellow-cyan
+        title_color = (0, 255, 255)
     else:
         inliers_count = len(sift_info.get("inliers", []))
         reason = sift_info.get("reason", "unknown_failure")
         title_text = f"MATCH FAILURE: Found {inliers_count} inliers ({reason})"
-        title_color = (0, 0, 255)  # Bright Red
+        title_color = (0, 0, 255)
         
     cv2.putText(header_bar, title_text, (10, 22), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, title_color, 1, cv2.LINE_AA)
@@ -926,7 +1096,8 @@ def main():
                     hist_mask, prev_mask,
                     hist_coords, prev_coords, curr_coords,
                     sift_info=sift_match_debug,
-                    proc_size=args.proc_size
+                    proc_size=args.proc_size,
+                    feature_type=args.feature_type
                 )
                 try:
                     cv2.imshow("Video Dataset Generator Debugger", dashboard)

@@ -28,15 +28,15 @@ fi
 # =========================================================================
 # FEATURE MATCHING CONFIGURATION (Change FEATURE_TYPE to "surf", "sift", or "asift")
 # =========================================================================
-FEATURE_TYPE="sift"
+FEATURE_TYPE="surf"
 PROC_SIZE=800          # Higher resolution for feature matching (preserves details, default: 800)
 
 # Hyper-Permissive thresholds to maximize raw keypoint detections in difficult views
 RATIO=0.95
 MIN_INLIERS=5
 RANSAC_THRESH=8.0
-MIN_MOTION_PC=3.0
-MIN_MOTION_HP=3.0
+MIN_MOTION_PC=2.0
+MIN_MOTION_HP=5.0
 MIN_TEXTURE_STD=0.0
 
 echo "=========================================================="
