@@ -26,23 +26,76 @@ else
 fi
 
 # =========================================================================
-# FEATURE MATCHING CONFIGURATION (Change FEATURE_TYPE to "surf", "sift", or "asift")
+# FEATURE MATCHING CONFIGURATION & DETECTION QUALITY TUNING
 # =========================================================================
-FEATURE_TYPE="surf"
-PROC_SIZE=800          # Higher resolution for feature matching (preserves details, default: 800)
 
-# Hyper-Permissive thresholds to maximize raw keypoint detections in difficult views
-RATIO=0.95
-MIN_INLIERS=10
-RANSAC_THRESH=2.0
+# 1. FEATURE_TYPE: Keypoint detector and descriptor extractor algorithm.
+#    - "surf": Extremely fast, excellent for sharp textures (corners and edges).
+#    - "sift": Highly precise, robust to illumination and scale changes.
+#    - "asift": Affine SIFT - Fully simulates camera viewpoints (tilt/rotation).
+#               Most robust to out-of-plane perspective changes, but slower.
+FEATURE_TYPE="sift"
+
+# 2. PROC_SIZE: Image resolution for keypoint extraction and matching (in pixels).
+#    - INCREASING (e.g. 1000): Greatly improves keypoint density and precision
+#      for tiny/distant features, but increases computation time.
+#    - DECREASING (e.g. 512): Speeds up processing but blurs fine textures,
+#      leading to fewer matches and higher failure rates.
+PROC_SIZE=1000
+
+# 3. RATIO: Lowe's ratio test threshold for descriptor matching (Range: 0.0 to 1.0).
+#    - INCREASING (e.g. 0.95): Eases the constraint. Allows less distinct features
+#      to match, maximizing raw keypoint count but introducing more noise (false matches).
+#    - DECREASING (e.g. 0.75): Tightens the constraint. Ensures only highly distinct,
+#      unambiguous matches are accepted, preventing errors but discarding valid points
+#      in low-texture regions.
+RATIO=0.75
+
+# 4. MIN_INLIERS: Minimum number of RANSAC inliers required to accept the triplet.
+#    - INCREASING (e.g. 10): Guarantees high mathematical reliability of the fitted
+#      epipolar geometry (prevents degenerate/collinear fits), but will fail more frames.
+#    - DECREASING (e.g. 5): Accepts difficult sequences with few trackable landmarks,
+#      but increases the risk of accepting a mathematically incorrect Fundamental matrix.
+MIN_INLIERS=8
+
+# 5. RANSAC_THRESH: Geometric epipolar projection error tolerance (pixels in PROC_SIZE space).
+#    - INCREASING (e.g. 8.0): Eases the fit. Accommodates rolling shutter, lens distortion,
+#      or fast camera movements, but allows looser geometric alignments.
+#    - DECREASING (e.g. 2.0): Tightens the fit. Demands perfect mathematical alignment.
+#      Ensures pristine epipolar precision but rejects sequences with slight warp.
+RANSAC_THRESH=1.0
+
+# 6. MIN_MOTION_PC & MIN_MOTION_HP: Keypoint-level minimum motion thresholds for RANSAC.
+#    - Kept at 0.0 by default to allow all static background landmarks (buildings, road)
+#      to be matched, providing a highly dense and stable geometry fit for the F-matrix.
 MIN_MOTION_PC=0.0
-MIN_MOTION_HP=0.0
-MIN_TEXTURE_STD=0.0
-MIN_NCC=0.8
+MIN_MOTION_HP=1.0
 
-# Dedicated Target tracking motion constraints
-TARGET_MIN_MOTION_PC=1.0
-TARGET_MIN_MOTION_HP=3.0
+# 7. MIN_TEXTURE_STD: Standard deviation filter for local patch texture.
+#    - INCREASING (e.g. 5.0): Restricts keypoints to highly textured regions (high contrast edges),
+#      avoiding flat areas.
+#    - DECREASING (e.g. 0.0): Allows matching in smooth, low-contrast landscapes (fields, roads, fog).
+MIN_TEXTURE_STD=0.0
+
+# 8. MIN_NCC: Normalized Cross-Correlation patch similarity filter (Range: -1.0 to 1.0).
+#    - INCREASING (e.g. 0.90): Extremely strict. Demands near-identical visual appearance.
+#      Completely eliminates false descriptor matches (e.g., matching a car headlight to a buggy).
+#      Excellent for high-quality datasets.
+#    - DECREASING (e.g. 0.70): Tolerates slight perspective/lighting shifts between frames,
+#      but increases the risk of accepting visual mismatches.
+MIN_NCC=0.7
+
+# =========================================================================
+# DEDICATED TARGET TRACKING MOTION CONSTRAINTS
+# Motion requirements applied strictly to the chosen training target path (256x256 space)
+# =========================================================================
+
+# 9. TARGET_MIN_MOTION_PC & TARGET_MIN_MOTION_HP: Target-level minimum motion distance.
+#    - INCREASING (e.g. PC=1.0, HP=5.0): Guarantees the selected tracking target is highly
+#      dynamic, showing significant motion across frames (ideal for training active tracker models).
+#    - DECREASING (e.g. 0.0): Allows selecting near-stationary targets (useful for hovering drones).
+TARGET_MIN_MOTION_PC=0.0
+TARGET_MIN_MOTION_HP=5.0
 
 echo "=========================================================="
 echo "Starting Dataset Generator in Visualization Mode"
