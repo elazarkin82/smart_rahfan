@@ -28,17 +28,21 @@ fi
 # =========================================================================
 # FEATURE MATCHING CONFIGURATION (Change FEATURE_TYPE to "surf", "sift", or "asift")
 # =========================================================================
-FEATURE_TYPE="sift"
-PROC_SIZE=1000          # Higher resolution for feature matching (preserves details, default: 800)
+FEATURE_TYPE="surf"
+PROC_SIZE=800          # Higher resolution for feature matching (preserves details, default: 800)
 
 # Hyper-Permissive thresholds to maximize raw keypoint detections in difficult views
 RATIO=0.95
-MIN_INLIERS=8
+MIN_INLIERS=10
 RANSAC_THRESH=2.0
 MIN_MOTION_PC=0.0
-MIN_MOTION_HP=3.0
+MIN_MOTION_HP=0.0
 MIN_TEXTURE_STD=0.0
-MIN_NCC=0.9
+MIN_NCC=0.8
+
+# Dedicated Target tracking motion constraints
+TARGET_MIN_MOTION_PC=1.0
+TARGET_MIN_MOTION_HP=3.0
 
 echo "=========================================================="
 echo "Starting Dataset Generator in Visualization Mode"
@@ -50,10 +54,12 @@ echo " - Processing Resolution (--proc_size): ${PROC_SIZE} px"
 echo " - Lowe's Ratio (--ratio): ${RATIO}"
 echo " - Min RANSAC Inliers (--min_inliers): ${MIN_INLIERS}"
 echo " - RANSAC Error Thresh (--ransac_thresh): ${RANSAC_THRESH}"
-echo " - Min Motion Prev->Curr (--min_motion_pc): ${MIN_MOTION_PC} px"
-echo " - Min Motion Hist->Prev (--min_motion_hp): ${MIN_MOTION_HP} px"
+echo " - Min Motion (Keypoints) Prev->Curr (--min_motion_pc): ${MIN_MOTION_PC} px"
+echo " - Min Motion (Keypoints) Hist->Prev (--min_motion_hp): ${MIN_MOTION_HP} px"
 echo " - Min Contrast/Texture (--min_texture_std): ${MIN_TEXTURE_STD}"
 echo " - Min NCC Template Match (--min_ncc): ${MIN_NCC}"
+echo " - Required Target Motion Prev->Curr (--target_min_motion_pc): ${TARGET_MIN_MOTION_PC} px"
+echo " - Required Target Motion Hist->Prev (--target_min_motion_hp): ${TARGET_MIN_MOTION_HP} px"
 echo "=========================================================="
 
 # Unified Python Execution Call (Widescreen 3x3 HUD mode active)
@@ -66,6 +72,8 @@ python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
     --ransac_thresh "${RANSAC_THRESH}" \
     --min_motion_pc "${MIN_MOTION_PC}" \
     --min_motion_hp "${MIN_MOTION_HP}" \
+    --target_min_motion_pc "${TARGET_MIN_MOTION_PC}" \
+    --target_min_motion_hp "${TARGET_MIN_MOTION_HP}" \
     --min_texture_std "${MIN_TEXTURE_STD}" \
     --min_ncc "${MIN_NCC}" \
     --mask_type gaussian \

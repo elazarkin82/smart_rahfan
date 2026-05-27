@@ -923,14 +923,26 @@ def main():
     parser.add_argument(
         "--min_motion_pc",
         type=float,
-        default=1.0,
-        help="Minimum motion velocity in pixels between prev and curr frames (default: 1.0)."
+        default=0.0,
+        help="Minimum motion velocity in pixels between prev and curr frames for keypoints (default: 0.0)."
     )
     parser.add_argument(
         "--min_motion_hp",
         type=float,
+        default=0.0,
+        help="Minimum motion velocity in pixels between hist and prev frames for keypoints (default: 0.0)."
+    )
+    parser.add_argument(
+        "--target_min_motion_pc",
+        type=float,
+        default=1.0,
+        help="Minimum required motion velocity in pixels for the chosen target between prev and curr (default: 1.0)."
+    )
+    parser.add_argument(
+        "--target_min_motion_hp",
+        type=float,
         default=3.0,
-        help="Minimum motion velocity in pixels between hist and prev frames (default: 3.0)."
+        help="Minimum required motion velocity in pixels for the chosen target between hist and prev (default: 3.0)."
     )
     parser.add_argument(
         "--min_texture_std",
@@ -1131,21 +1143,31 @@ def main():
                         
                 # Pick the mathematically best landmark trajectory (lowest epipolar line error)
                 # that is strictly located within the inner 2/3 center region to avoid lens distortion
+                # and satisfies our tracking target motion requirements
                 if match_res.get("status") == "success":
                     selected_path = None
                     for path in match_res["paths"]:
                         if is_path_in_inner_2_3(path):
-                            selected_path = path
-                            break
+                            # Calculate motion vectors for this specific path candidate in 256x256 space
+                            h_pt = path["hist"]
+                            p_pt = path["prev"]
+                            c_pt = path["curr"]
+                            
+                            dist_pc = np.sqrt((c_pt[0] - p_pt[0])**2 + (c_pt[1] - p_pt[1])**2) * 256.0
+                            dist_hp = np.sqrt((p_pt[0] - h_pt[0])**2 + (p_pt[1] - h_pt[1])**2) * 256.0
+                            
+                            if dist_pc >= args.target_min_motion_pc and dist_hp >= args.target_min_motion_hp:
+                                selected_path = path
+                                break
                             
                     if selected_path is not None:
                         hist_coords = selected_path["hist"]
                         prev_coords = selected_path["prev"]
                         curr_coords = selected_path["curr"]
                     else:
-                        # No inliers fell into the inner 2/3 region; treat as failure to maintain pristine quality
+                        # No inliers fell into the inner 2/3 region and had enough motion; treat as failure
                         match_res["status"] = "failed"
-                        match_res["reason"] = "no_inlier_in_inner_2_3"
+                        match_res["reason"] = "no_inlier_in_inner_2_3_or_motion_failed"
                         hist_coords = [0.5, 0.5]
                         prev_coords = [0.5, 0.5]
                         curr_coords = [0.5, 0.5]
