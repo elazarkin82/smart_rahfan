@@ -537,9 +537,10 @@ def draw_epipolar_line(img, line, color, thickness=1):
 
 def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, hist_norm, prev_norm, curr_norm, sift_info=None, proc_size=800, feature_type='asift'):
     """
-    Renders a stunning 3x3 widescreen grid dashboard containing full frames overlaid with highly transparent
-    colored attention masks, green target indicators, and inter-image keypoint matching lines.
-    Additionally displays two real-time epipolar diagnostic panels and a telemetry console (Row 3).
+    Renders a stunning 4x3 widescreen grid dashboard containing full frames overlaid with highly transparent
+    colored attention masks (50% opacity), green target indicators, and inter-image keypoint matching lines.
+    Additionally displays two real-time epipolar diagnostic panels, a telemetry console,
+    and a pure attention masks & expected heatmap row (Row 4).
     """
     # 1. Convert grayscale images (Channel 0) to BGR for colorful HUD overlays
     h_color = cv2.cvtColor(f_hist_256, cv2.COLOR_GRAY2BGR)
@@ -555,9 +556,9 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
     p_mask_bgr = np.zeros_like(p_color)
     p_mask_bgr[:, :, 0] = (prev_mask[:, :, 0] * 255.0).astype(np.uint8)  # Blue channel
     
-    # Highly transparent blend (alpha = 0.25, beta = 1.0)
-    cv2.addWeighted(h_mask_bgr, 0.25, h_color, 1.0, 0, h_color)
-    cv2.addWeighted(p_mask_bgr, 0.25, p_color, 1.0, 0, p_color)
+    # 50% opacity blend as requested by the user
+    cv2.addWeighted(h_mask_bgr, 0.50, h_color, 1.0, 0, h_color)
+    cv2.addWeighted(p_mask_bgr, 0.50, p_color, 1.0, 0, p_color)
     
     # 3. Draw target indicators
     hx, hy = int(hist_norm[0] * 256), int(hist_norm[1] * 256)
@@ -788,7 +789,29 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
     cv2.putText(telemetry_panel, "Status: ", (15, 240), font, scale, label_color, thickness, cv2.LINE_AA)
     cv2.putText(telemetry_panel, status_str, (95, 240), font, scale, status_color, 1, cv2.LINE_AA)
     
-    # 6. Draw HUD labels
+    # 6. Row 4: Pure Attention Masks & Expected Heatmap (256x256 each, column aligned)
+    hist_mask_val = hist_mask[:, :, 0] if len(hist_mask.shape) == 3 else hist_mask
+    prev_mask_val = prev_mask[:, :, 0] if len(prev_mask.shape) == 3 else prev_mask
+    
+    # Pure Hist attention mask - Red soft glow on black background
+    hist_mask_panel = np.zeros((256, 256, 3), dtype=np.uint8)
+    hist_mask_panel[:, :, 2] = (hist_mask_val * 255.0).astype(np.uint8)  # Red channel
+    
+    # Pure Prev attention mask - Blue soft glow on black background
+    prev_mask_panel = np.zeros((256, 256, 3), dtype=np.uint8)
+    prev_mask_panel[:, :, 0] = (prev_mask_val * 255.0).astype(np.uint8)  # Blue channel
+    
+    # Ground-truth expected output target heatmap, generated at 64x64 and scaled to 256x256 - Green soft glow on black background
+    expected_heatmap_64 = generate_gaussian_heatmap(curr_norm, size=64, sigma=4.0)
+    expected_heatmap_256 = cv2.resize(expected_heatmap_64, (256, 256), interpolation=cv2.INTER_LINEAR)
+    if len(expected_heatmap_256.shape) == 3:
+        expected_heatmap_val = expected_heatmap_256[:, :, 0]
+    else:
+        expected_heatmap_val = expected_heatmap_256
+    expected_heatmap_panel = np.zeros((256, 256, 3), dtype=np.uint8)
+    expected_heatmap_panel[:, :, 1] = (expected_heatmap_val * 255.0).astype(np.uint8)  # Green channel
+    
+    # Draw HUD labels
     draw_hud_label(h_color, "HIST CONTEXT + SOFT GLOW", (10, 240), (0, 0, 255))
     draw_hud_label(p_color, "PREV CONTEXT + SOFT GLOW", (10, 240), (255, 0, 0))
     draw_hud_label(c_color, "CURR CONTEXT (TARGET)", (10, 240), (0, 255, 0))
@@ -800,11 +823,16 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
     draw_hud_label(epipoles_on_prev, "EPIPOLAR LINES: HIST ON PREV", (10, 240), (255, 0, 255) if is_success else (0, 0, 255))
     draw_hud_label(epipoles_on_hist, "EPIPOLAR LINES: PREV ON HIST", (10, 240), (255, 0, 255) if is_success else (0, 0, 255))
     
-    # 7. Assemble Grid (Symmetric 3x3 Grid)
+    draw_hud_label(hist_mask_panel, "HIST ATTENTION MASK (RED)", (10, 240), (0, 0, 255))
+    draw_hud_label(prev_mask_panel, "PREV ATTENTION MASK (BLUE)", (10, 240), (255, 0, 0))
+    draw_hud_label(expected_heatmap_panel, "EXPECTED HEATMAP (GREEN)", (10, 240), (0, 255, 0))
+    
+    # 7. Assemble Grid (Symmetric 4x3 Grid)
     row1 = np.hstack([h_color, p_color, c_color])  # Shape: (256, 768, 3)
     row2 = s_color                                # Shape: (256, 768, 3)
-    row3 = np.hstack([epipoles_on_prev, epipoles_on_hist, telemetry_panel]) # Shape: (256, 768, 3)
-    dashboard = np.vstack([row1, row2, row3])     # Shape: (768, 768, 3)
+    row3 = np.hstack([epipoles_on_hist, epipoles_on_prev, telemetry_panel]) # Shape: (256, 768, 3)
+    row4 = np.hstack([hist_mask_panel, prev_mask_panel, expected_heatmap_panel]) # Shape: (256, 768, 3)
+    dashboard = np.vstack([row1, row2, row3, row4])     # Shape: (1024, 768, 3)
     
     # 8. Add Top HUD Dashboard header bar (768px wide)
     header_bar = np.zeros((35, 768, 3), dtype=np.uint8)

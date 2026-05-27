@@ -34,7 +34,7 @@ fi
 #    - "sift": Highly precise, robust to illumination and scale changes.
 #    - "asift": Affine SIFT - Fully simulates camera viewpoints (tilt/rotation).
 #               Most robust to out-of-plane perspective changes, but slower.
-FEATURE_TYPE="sift"
+FEATURE_TYPE="asift"
 
 # 2. PROC_SIZE: Image resolution for keypoint extraction and matching (in pixels).
 #    - INCREASING (e.g. 1000): Greatly improves keypoint density and precision
@@ -83,7 +83,7 @@ MIN_TEXTURE_STD=0.0
 #      Excellent for high-quality datasets.
 #    - DECREASING (e.g. 0.70): Tolerates slight perspective/lighting shifts between frames,
 #      but increases the risk of accepting visual mismatches.
-MIN_NCC=0.7
+MIN_NCC=0.9
 
 # =========================================================================
 # DEDICATED TARGET TRACKING MOTION CONSTRAINTS
@@ -95,7 +95,7 @@ MIN_NCC=0.7
 #      dynamic, showing significant motion across frames (ideal for training active tracker models).
 #    - DECREASING (e.g. 0.0): Allows selecting near-stationary targets (useful for hovering drones).
 TARGET_MIN_MOTION_PC=0.0
-TARGET_MIN_MOTION_HP=5.0
+TARGET_MIN_MOTION_HP=10.0
 
 echo "=========================================================="
 echo "Starting Dataset Generator in Visualization Mode"
