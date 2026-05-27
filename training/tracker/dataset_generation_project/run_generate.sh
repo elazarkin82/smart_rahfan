@@ -42,7 +42,7 @@ if [ -f "$CONFIG_FILE" ]; then
     PREV_RADIUS=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE'))['prev_radius'])")
     LABEL_RADIUS=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE'))['label_radius'])")
 else
-    echo "[WARNING] pipeline_config.json not found! Falling back to standard visualizer defaults."
+    echo "[WARNING] pipeline_config.json not found! Falling back to standard generator defaults."
     FEATURE_TYPE="sift"
     PROC_SIZE=1000
     RATIO=0.75
@@ -59,71 +59,10 @@ else
     LABEL_RADIUS=32
 fi
 
-# =========================================================================
-# FEATURE MATCHING CONFIGURATION & DETECTION QUALITY TUNING (DOCUMENTATION)
-# =========================================================================
-
-# 1. FEATURE_TYPE: Keypoint detector and descriptor extractor algorithm.
-#    - "surf": Extremely fast, excellent for sharp textures (corners and edges).
-#    - "sift": Highly precise, robust to illumination and scale changes.
-#    - "asift": Affine SIFT - Fully simulates camera viewpoints (tilt/rotation).
-#               Most robust to out-of-plane perspective changes, but slower.
-
-# 2. PROC_SIZE: Image resolution for keypoint extraction and matching (in pixels).
-#    - INCREASING (e.g. 1000): Greatly improves keypoint density and precision
-#      for tiny/distant features, but increases computation time.
-#    - DECREASING (e.g. 512): Speeds up processing but blurs fine textures,
-#      leading to fewer matches and higher failure rates.
-
-# 3. RATIO: Lowe's ratio test threshold for descriptor matching (Range: 0.0 to 1.0).
-#    - INCREASING (e.g. 0.95): Eases the constraint. Allows less distinct features
-#      to match, maximizing raw keypoint count but introducing more noise (false matches).
-#    - DECREASING (e.g. 0.75): Tightens the constraint. Ensures only highly distinct,
-#      unambiguous matches are accepted, preventing errors but discarding valid points
-#      in low-texture regions.
-
-# 4. MIN_INLIERS: Minimum number of RANSAC inliers required to accept the triplet.
-#    - INCREASING (e.g. 10): Guarantees high mathematical reliability of the fitted
-#      epipolar geometry (prevents degenerate/collinear fits), but will fail more frames.
-#    - DECREASING (e.g. 5): Accepts difficult sequences with few trackable landmarks,
-#      but increases the risk of accepting a mathematically incorrect Fundamental matrix.
-
-# 5. RANSAC_THRESH: Geometric epipolar projection error tolerance (pixels in PROC_SIZE space).
-#    - INCREASING (e.g. 8.0): Eases the fit. Accommodates rolling shutter, lens distortion,
-#      or fast camera movements, but allows looser geometric alignments.
-#    - DECREASING (e.g. 2.0): Tightens the fit. Demands perfect mathematical alignment.
-#      Ensures pristine epipolar precision but rejects sequences with slight warp.
-
-# 6. MIN_MOTION_PC & MIN_MOTION_HP: Keypoint-level minimum motion thresholds for RANSAC.
-#    - Kept at 0.0 by default to allow all static background landmarks (buildings, road)
-#      to be matched, providing a highly dense and stable geometry fit for the F-matrix.
-
-# 7. MIN_TEXTURE_STD: Standard deviation filter for local patch texture.
-#    - INCREASING (e.g. 5.0): Restricts keypoints to highly textured regions (high contrast edges),
-#      avoiding flat areas.
-#    - DECREASING (e.g. 0.0): Allows matching in smooth, low-contrast landscapes (fields, roads, fog).
-
-# 8. MIN_NCC: Normalized Cross-Correlation patch similarity filter (Range: -1.0 to 1.0).
-#    - INCREASING (e.g. 0.90): Extremely strict. Demands near-identical visual appearance.
-#      Completely eliminates false descriptor matches (e.g., matching a car headlight to a buggy).
-#      Excellent for high-quality datasets.
-#    - DECREASING (e.g. 0.70): Tolerates slight perspective/lighting shifts between frames,
-#      but increases the risk of accepting visual mismatches.
-
-# =========================================================================
-# DEDICATED TARGET TRACKING MOTION CONSTRAINTS
-# Motion requirements applied strictly to the chosen training target path (256x256 space)
-# =========================================================================
-
-# 9. TARGET_MIN_MOTION_PC & TARGET_MIN_MOTION_HP: Target-level minimum motion distance.
-#    - INCREASING (e.g. PC=1.0, HP=5.0): Guarantees the selected tracking target is highly
-#      dynamic, showing significant motion across frames (ideal for training active tracker models).
-#    - DECREASING (e.g. 0.0): Allows selecting near-stationary targets (useful for hovering drones).
-
 echo "=========================================================="
-echo "Starting Dataset Generator in Visualization Mode"
+echo "Starting Dataset Generator in Two-Stage Staging Mode"
 echo "Videos Source Directory: ${VIDEOS_DIR}"
-echo "Feature Extraction: ${FEATURE_TYPE} (ACTIVE)"
+echo "Feature Extraction: ${FEATURE_TYPE}"
 echo "----------------------------------------------------------"
 echo "Loaded Central configurations from pipeline_config.json:"
 echo " - Processing Resolution (--proc_size): ${PROC_SIZE} px"
@@ -138,7 +77,7 @@ echo " - Required Target Motion Prev->Curr (--target_min_motion_pc): ${TARGET_MI
 echo " - Required Target Motion Hist->Prev (--target_min_motion_hp): ${TARGET_MIN_MOTION_HP} px"
 echo "=========================================================="
 
-# Run python visualizer using the centrally loaded configurations (keeps original CLI API completely active)
+# Run python generator using the centrally loaded configurations (keeps original CLI API completely active)
 python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
     --output_dir "${SCRIPT_DIR}/video_dataset" \
     --feature_type "${FEATURE_TYPE}" \
@@ -159,5 +98,4 @@ python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
     --label_radius "${LABEL_RADIUS}" \
     --hover_prob 0.05 \
     --num_of_samples 16384 \
-    --batch_size 256 \
-    --visualize
+    --batch_size 256

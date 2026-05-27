@@ -1,0 +1,22 @@
+{
+  "feature_type": "sift",
+  "proc_size": 1000,
+  "ratio": 0.75,
+  "min_inliers": 8,
+  "ransac_thresh": 1.0,
+  "min_motion_pc": 0.0,
+  "min_motion_hp": 1.0,
+  "min_texture_std": 0.0,
+  "min_ncc": 0.9,
+  "target_min_motion_pc": 0.0,
+  "target_min_motion_hp": 10.0,
+  "hover_prob": 0.05,
+  "mask_type": "gaussian",
+  "mask_sigma": 15.0,
+  "hist_radius": 32,
+  "prev_radius": 32,
+  "label_radius": 32,
+  "batch_size": 256,
+  "temporal_step_seconds": 1.0,
+  "max_consecutive_failures": 10
+}

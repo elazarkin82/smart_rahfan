@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/bin/env python3
 import os
 import sys
 import random
@@ -6,6 +6,10 @@ import pickle
 import argparse
 import numpy as np
 import cv2
+import json
+import time
+import hashlib
+
 
 # =====================================================================
 # Heatmap and Attention Masking Helpers (Matching tracker_model3 exactly)
@@ -535,7 +539,7 @@ def draw_epipolar_line(img, line, color, thickness=1):
         x1 = int(round(-(c + b * h) / a))
     cv2.line(img, (x0, y0), (x1, y1), color, thickness, cv2.LINE_AA)
 
-def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, hist_norm, prev_norm, curr_norm, sift_info=None, proc_size=800, feature_type='asift'):
+def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, hist_norm, prev_norm, curr_norm, sift_info=None, proc_size=800, feature_type='asift', label_radius=32):
     """
     Renders a stunning 4x3 widescreen grid dashboard containing full frames overlaid with highly transparent
     colored attention masks (50% opacity), green target indicators, and inter-image keypoint matching lines.
@@ -802,7 +806,7 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
     prev_mask_panel[:, :, 0] = (prev_mask_val * 255.0).astype(np.uint8)  # Blue channel
     
     # Ground-truth expected output target heatmap, generated at 64x64 and scaled to 256x256 - Green soft glow on black background
-    expected_heatmap_64 = generate_gaussian_heatmap(curr_norm, size=64, sigma=4.0)
+    expected_heatmap_64 = generate_gaussian_heatmap(curr_norm, size=64, sigma=label_radius / 8.0)
     expected_heatmap_256 = cv2.resize(expected_heatmap_64, (256, 256), interpolation=cv2.INTER_LINEAR)
     if len(expected_heatmap_256.shape) == 3:
         expected_heatmap_val = expected_heatmap_256[:, :, 0]
@@ -855,8 +859,547 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
     return final_output
 
 # =====================================================================
-# Main Dataset Generation Loop
+# Pipelines: Interactive Visualization and Two-Stage Production
 # =====================================================================
+
+def visualize_pipeline(args, video_paths, asift_matcher):
+    print("\n=== ENTERING HUD PREVIEW MODE ===")
+    print("Rendering generated sequences in real-time. No files will be exported to disk.")
+    print("Controls: Press [SPACE] for next single step, [ENTER] to auto-run until success, [ESC/Q] to exit.\n")
+    sys.stdout.flush()
+    try:
+        cv2.namedWindow("Video Dataset Generator Debugger", cv2.WINDOW_AUTOSIZE)
+    except cv2.error as e:
+        print(f"Warning: Could not initialize visual window ({e}).")
+        print("If you are running in a headless environment, please run without '-v' / '--visualize'.")
+        sys.exit(1)
+        
+    # Pre-allocate and shuffle decisions to guarantee exact ratio and perfect random distribution (i.i.d.)
+    num_hover_target = int(args.batch_size * args.hover_prob)
+    num_trans_target = args.batch_size - num_hover_target
+    
+    batch_decisions = [True] * num_hover_target + [False] * num_trans_target
+    random.shuffle(batch_decisions)
+    
+    auto_run_until_success = False
+    attempt_count = 0
+    sample_count = 0
+    
+    while sample_count < args.num_of_samples:
+        attempt_count += 1
+        is_hover = batch_decisions[sample_count % args.batch_size]
+        
+        random_video = random.choice(video_paths)
+        cap = cv2.VideoCapture(random_video)
+        
+        # Robust corrupted video logging as requested by user
+        if not cap.isOpened():
+            print(f"[ERROR] Corrupted video file (moov atom not found / failed to open): {os.path.abspath(random_video)}")
+            sys.stdout.flush()
+            continue
+            
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < 200:
+            print(f"[ERROR] Corrupted or incomplete video file (too few frames / moov atom failure): {os.path.abspath(random_video)}")
+            sys.stdout.flush()
+            cap.release()
+            continue
+            
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0 or np.isnan(fps):
+            fps = 30.0
+            
+        gap_k = random.randint(int(0.9 * fps), int(1.1 * fps))
+        max_start = total_frames - int(fps * 1.5)
+        start_frame_idx = random.randint(0, max_start)
+        
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx)
+        ret, frame_hist_raw = cap.read()
+        if not ret or frame_hist_raw is None:
+            cap.release()
+            continue
+            
+        f_hist_full = to_grayscale(frame_hist_raw)
+        f_hist_256 = cv2.resize(f_hist_full, (256, 256), interpolation=cv2.INTER_AREA)
+        
+        if is_hover:
+            cap.release()
+            sift = cv2.SIFT_create()
+            kp, _ = sift.detectAndCompute(f_hist_256, None)
+            if not kp:
+                continue
+            target_kp = random.choice(kp)
+            target_coords = [target_kp.pt[0] / 256.0, target_kp.pt[1] / 256.0]
+            f_prev_256, prev_coords = simulate_hover_jitter(f_hist_256, target_coords)
+            f_curr_256, curr_coords = simulate_hover_jitter(f_hist_256, target_coords)
+            hist_coords = target_coords
+            sift_match_debug = None
+        else:
+            f_hist_proc = cv2.resize(f_hist_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+            
+            for _ in range(gap_k - 1):
+                cap.grab()
+            ret, frame_prev_raw = cap.read()
+            if not ret or frame_prev_raw is None:
+                cap.release()
+                continue
+            f_prev_full = to_grayscale(frame_prev_raw)
+            f_prev_256 = cv2.resize(f_prev_full, (256, 256), interpolation=cv2.INTER_AREA)
+            f_prev_proc = cv2.resize(f_prev_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+            
+            gap_d = 2
+            for _ in range(gap_d - 1):
+                cap.grab()
+            ret, frame_curr_raw = cap.read()
+            cap.release()
+            if not ret or frame_curr_raw is None:
+                continue
+            f_curr_full = to_grayscale(frame_curr_raw)
+            f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
+            f_curr_proc = cv2.resize(f_curr_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+            
+            match_res = match_features_triplet(
+                f_hist_proc, f_prev_proc, f_curr_proc,
+                ratio=args.ratio, min_inliers=args.min_inliers,
+                feature_type=args.feature_type, asift_matcher=asift_matcher,
+                ransac_thresh=args.ransac_thresh,
+                min_motion_pc=args.min_motion_pc,
+                min_motion_hp=args.min_motion_hp,
+                min_texture_std=args.min_texture_std,
+                proc_size=args.proc_size,
+                min_ncc=args.min_ncc
+            )
+            
+            if match_res.get("status") == "success":
+                selected_path = None
+                for path in match_res["paths"]:
+                    if is_path_in_inner_2_3(path):
+                        h_pt = path["hist"]
+                        p_pt = path["prev"]
+                        c_pt = path["curr"]
+                        dist_pc = np.sqrt((c_pt[0] - p_pt[0])**2 + (c_pt[1] - p_pt[1])**2) * 256.0
+                        dist_hp = np.sqrt((p_pt[0] - h_pt[0])**2 + (p_pt[1] - h_pt[1])**2) * 256.0
+                        if dist_pc >= args.target_min_motion_pc and dist_hp >= args.target_min_motion_hp:
+                            selected_path = path
+                            break
+                if selected_path is not None:
+                    hist_coords = selected_path["hist"]
+                    prev_coords = selected_path["prev"]
+                    curr_coords = selected_path["curr"]
+                else:
+                    match_res["status"] = "failed"
+                    match_res["reason"] = "no_inlier_in_inner_2_3_or_motion_failed"
+                    hist_coords = [0.5, 0.5]
+                    prev_coords = [0.5, 0.5]
+                    curr_coords = [0.5, 0.5]
+            else:
+                hist_coords = [0.5, 0.5]
+                prev_coords = [0.5, 0.5]
+                curr_coords = [0.5, 0.5]
+                
+            sift_match_debug = match_res
+            
+        hist_mask = generate_attention_mask(
+            hist_coords, size=256, mask_type=args.mask_type,
+            radius=args.hist_radius, sigma=args.mask_sigma
+        )
+        prev_mask = generate_attention_mask(
+            prev_coords, size=256, mask_type=args.mask_type,
+            radius=args.prev_radius, sigma=args.mask_sigma
+        )
+        
+        is_success = (sift_match_debug is not None and sift_match_debug.get("status") == "success") or is_hover
+        
+        dashboard = render_dashboard(
+            f_hist_256, f_prev_256, f_curr_256,
+            hist_mask, prev_mask,
+            hist_coords, prev_coords, curr_coords,
+            sift_info=sift_match_debug,
+            proc_size=args.proc_size,
+            feature_type=args.feature_type,
+            label_radius=args.label_radius
+        )
+        try:
+            cv2.imshow("Video Dataset Generator Debugger", dashboard)
+            if is_success and auto_run_until_success:
+                auto_run_until_success = False
+            delay = 100 if auto_run_until_success else 0
+            key = cv2.waitKey(delay) & 0xFF
+            
+            if key == 13 or key == 10:
+                auto_run_until_success = True
+            elif key == 32:
+                auto_run_until_success = False
+            elif key == 27 or key == ord('q'):
+                cv2.destroyAllWindows()
+                print("\nHUD Preview Mode exited by user.")
+                sys.exit(0)
+        except cv2.error as e:
+            print(f"\nGUI Error: Could not render visualization window ({e}).")
+            sys.exit(1)
+            
+        if is_success:
+            sample_count += 1
+            print(f"[Sample {sample_count} | Attempt {attempt_count}] Rendered success (Hover: {is_hover})")
+            sys.stdout.flush()
+            attempt_count = 0
+        else:
+            print(f"[Sample {sample_count + 1} | Attempt {attempt_count}] Match Failed ({args.feature_type}): {sift_match_debug.get('reason')} - rendering connections.")
+            sys.stdout.flush()
+
+
+def run_two_stage_pipeline(args, video_paths, asift_matcher):
+    print("\n==========================================================")
+    print("=== ENTERING TWO-STAGE HIGH-THROUGHPUT GENERATION PIPE ===")
+    print("==========================================================\n")
+    sys.stdout.flush()
+    
+    # -------------------------------------------------------------------------
+    # STAGE 1: Sequential Extraction & Multi-Target Path Gathering
+    # -------------------------------------------------------------------------
+    tmp_dir = os.path.join(args.output_dir, "tmp_raw_extracted")
+    os.makedirs(tmp_dir, exist_ok=True)
+    
+    # Map video total frames to predict total project time accurately
+    video_lengths = {}
+    video_fps_map = {}
+    
+    print("Pre-mapping video durations for hyper-accurate time prediction HUD...")
+    for path in video_paths:
+        cap = cv2.VideoCapture(path)
+        if cap.isOpened():
+            frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0 or np.isnan(fps):
+                fps = 30.0
+            video_lengths[path] = frames
+            video_fps_map[path] = fps
+        cap.release()
+    print(f"Mapped {len(video_lengths)} active videos.\n")
+    sys.stdout.flush()
+    
+    # Find already completed videos in tmp_raw_extracted
+    processed_pkls = os.listdir(tmp_dir)
+    processed_hashes = set()
+    for filename in processed_pkls:
+        if filename.startswith("processed_") and filename.endswith(".pkl"):
+            parts = filename[:-4].split("_")
+            if len(parts) >= 3:
+                processed_hashes.add(parts[-1])
+                
+    remaining_videos = []
+    for path in video_paths:
+        v_hash = hashlib.md5(path.encode()).hexdigest()[:8]
+        if v_hash not in processed_hashes:
+            remaining_videos.append(path)
+            
+    print(f"Resume HUD Status: {len(video_paths) - len(remaining_videos)}/{len(video_paths)} videos already completed.")
+    print(f"Remaining videos to process: {len(remaining_videos)}\n")
+    sys.stdout.flush()
+    
+    # Start loop over remaining videos
+    for idx, path in enumerate(remaining_videos):
+        video_name = os.path.basename(path)
+        v_hash = hashlib.md5(path.encode()).hexdigest()[:8]
+        pkl_filename = f"processed_{os.path.splitext(video_name)[0]}_{v_hash}.pkl"
+        pkl_path = os.path.join(tmp_dir, pkl_filename)
+        
+        print(f"\n[STAGING STAGE 1] Starting sequential extraction on Video {idx+1}/{len(remaining_videos)}: {video_name}")
+        sys.stdout.flush()
+        
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            print(f"[ERROR] Corrupted video file (failed to open): {os.path.abspath(path)}")
+            # Save empty placeholder so we skip this corrupted file in future runs
+            with open(pkl_path, "wb") as f:
+                pickle.dump([], f)
+            continue
+            
+        total_frames = video_lengths.get(path, 200)
+        fps = video_fps_map.get(path, 30.0)
+        
+        if total_frames < 200:
+            print(f"[ERROR] Corrupted or incomplete video file (too few frames): {os.path.abspath(path)}")
+            cap.release()
+            with open(pkl_path, "wb") as f:
+                pickle.dump([], f)
+            continue
+            
+        # Step size in frames (default step is 1 second)
+        frame_step = int(round(args.temporal_step_seconds * fps))
+        gap_k = int(round(fps))  # ~1 second gap between hist and prev
+        
+        video_samples = []
+        consecutive_failures = 0
+        current_frame_idx = 0
+        max_start = total_frames - int(fps * 1.5)
+        
+        t_start_video = time.time()
+        triplets_processed = 0
+        successful_frames = 0
+        
+        while current_frame_idx <= max_start:
+            # Seek and read hist frame
+            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx)
+            ret, frame_hist_raw = cap.read()
+            if not ret or frame_hist_raw is None:
+                break
+                
+            # Seek and read prev frame (after gap_k frames)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx + gap_k)
+            ret_p, frame_prev_raw = cap.read()
+            if not ret_p or frame_prev_raw is None:
+                break
+                
+            # Seek and read curr frame (after another 2 frames gap)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx + gap_k + 2)
+            ret_c, frame_curr_raw = cap.read()
+            if not ret_c or frame_curr_raw is None:
+                break
+                
+            triplets_processed += 1
+            
+            # Grayscale conversions
+            f_hist_full = to_grayscale(frame_hist_raw)
+            f_hist_256 = cv2.resize(f_hist_full, (256, 256), interpolation=cv2.INTER_AREA)
+            f_hist_proc = cv2.resize(f_hist_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+            
+            f_prev_full = to_grayscale(frame_prev_raw)
+            f_prev_256 = cv2.resize(f_prev_full, (256, 256), interpolation=cv2.INTER_AREA)
+            f_prev_proc = cv2.resize(f_prev_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+            
+            f_curr_full = to_grayscale(frame_curr_raw)
+            f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
+            f_curr_proc = cv2.resize(f_curr_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+            
+            # Match SIFT/ASIFT/SURF keypoints
+            match_res = match_features_triplet(
+                f_hist_proc, f_prev_proc, f_curr_proc, 
+                ratio=args.ratio, min_inliers=args.min_inliers,
+                feature_type=args.feature_type, asift_matcher=asift_matcher,
+                ransac_thresh=args.ransac_thresh,
+                min_motion_pc=args.min_motion_pc,
+                min_motion_hp=args.min_motion_hp,
+                min_texture_std=args.min_texture_std,
+                proc_size=args.proc_size,
+                min_ncc=args.min_ncc
+            )
+            
+            frame_yield = 0
+            
+            if match_res.get("status") == "success":
+                consecutive_failures = 0
+                
+                # Multiplexing: Extract ALL valid paths in this single frame read!
+                for path_candidate in match_res["paths"]:
+                    if is_path_in_inner_2_3(path_candidate):
+                        # Calculate motion vectors for this specific path candidate
+                        h_pt = path_candidate["hist"]
+                        p_pt = path_candidate["prev"]
+                        c_pt = path_candidate["curr"]
+                        
+                        dist_pc = np.sqrt((c_pt[0] - p_pt[0])**2 + (c_pt[1] - p_pt[1])**2) * 256.0
+                        dist_hp = np.sqrt((p_pt[0] - h_pt[0])**2 + (p_pt[1] - h_pt[1])**2) * 256.0
+                        
+                        if dist_pc >= args.target_min_motion_pc and dist_hp >= args.target_min_motion_hp:
+                            # Valid moving target path inside inner 2/3! Extract it!
+                            hist_mask = generate_attention_mask(
+                                h_pt, size=256, mask_type=args.mask_type,
+                                radius=args.hist_radius, sigma=args.mask_sigma
+                            )
+                            prev_mask = generate_attention_mask(
+                                p_pt, size=256, mask_type=args.mask_type,
+                                radius=args.prev_radius, sigma=args.mask_sigma
+                            )
+                            zeros_mask = np.zeros((256, 256, 1), dtype=np.float32)
+                            
+                            # Convert to target training formats (Channel 0 = Grayscale, Channel 1 = Mask)
+                            f_hist_norm = f_hist_256.astype(np.float32) / 255.0
+                            f_prev_norm = f_prev_256.astype(np.float32) / 255.0
+                            f_curr_norm = f_curr_256.astype(np.float32) / 255.0
+                            
+                            # Stack along last axis (channel axis) to produce shape (256, 256, 2)
+                            hist_frame = np.stack([f_hist_norm, hist_mask[:, :, 0]], axis=-1)
+                            prev_frame = np.stack([f_prev_norm, prev_mask[:, :, 0]], axis=-1)
+                            curr_frame = np.stack([f_curr_norm, zeros_mask[:, :, 0]], axis=-1)
+                            
+                            target_heatmap = generate_gaussian_heatmap(c_pt, size=64, sigma=args.label_radius / 8.0)
+                            
+                            # Store target sample dict
+                            sample_data = {
+                                "hist_frame": hist_frame,
+                                "prev_frame": prev_frame,
+                                "curr_frame": curr_frame,
+                                "target_heatmap": target_heatmap,
+                                "debug_coords": {
+                                    "hist": h_pt,
+                                    "prev": p_pt,
+                                    "curr": c_pt
+                                }
+                            }
+                            video_samples.append(sample_data)
+                            frame_yield += 1
+                            
+                if frame_yield > 0:
+                    successful_frames += 1
+            else:
+                consecutive_failures += 1
+                
+            # Advance to next temporal step (chronological sweep)
+            current_frame_idx += frame_step
+            
+            # Print live high-fidelity stdout HUD console
+            elapsed = time.time() - t_start_video
+            rate = triplets_processed / elapsed if elapsed > 0 else 0.0
+            
+            # Calculate remaining triplets in current video
+            remaining_triplets = max(0, (max_start - current_frame_idx) // frame_step)
+            eta_current_sec = remaining_triplets / rate if rate > 0 else 0.0
+            
+            # Calculate remaining triplets overall across all videos
+            remaining_overall_triplets = remaining_triplets
+            for remaining_path in remaining_videos[idx+1:]:
+                frames_rem = video_lengths.get(remaining_path, 200)
+                fps_rem = video_fps_map.get(remaining_path, 30.0)
+                max_start_rem = frames_rem - int(fps_rem * 1.5)
+                frame_step_rem = int(round(args.temporal_step_seconds * fps_rem))
+                remaining_overall_triplets += max(0, max_start_rem // frame_step_rem)
+                
+            eta_overall_sec = remaining_overall_triplets / rate if rate > 0 else 0.0
+            
+            # Format times
+            percent_complete = int((current_frame_idx / max_start) * 100) if max_start > 0 else 0
+            percent_complete = min(100, max(0, percent_complete))
+            
+            current_time_str = time.strftime('%M:%S', time.gmtime(int(current_frame_idx / fps)))
+            total_time_str = time.strftime('%M:%S', time.gmtime(int(total_frames / fps)))
+            
+            eta_curr_str = f"{int(eta_current_sec // 60)}m {int(eta_current_sec % 60)}s" if eta_current_sec > 0 else "N/A"
+            eta_over_str = f"{int(eta_overall_sec // 60)}m {int(eta_overall_sec % 60)}s" if eta_overall_sec > 0 else "N/A"
+            
+            sys.stdout.write(
+                f"\r[STAGING STAGE 1] Progress: {percent_complete}% ({current_time_str}/{total_time_str}) | "
+                f"Yield: {successful_frames} frames ({len(video_samples)} samples) | "
+                f"Rate: {rate:.1f} Hz | ETA Video: {eta_curr_str} | ETA Total: {eta_over_str}   "
+            )
+            sys.stdout.flush()
+            
+            # Safeguard: skip static/bad/untrackable video regions
+            if consecutive_failures >= args.max_consecutive_failures:
+                print(f"\n[WARNING] Too many consecutive failures ({consecutive_failures}/{args.max_consecutive_failures}) due to low-texture / static scene. Skipping remainder of video.")
+                break
+                
+        cap.release()
+        
+        # Serialize the chronological pre-processed video file to tmp directory
+        with open(pkl_path, "wb") as f:
+            pickle.dump(video_samples, f)
+            
+        print(f"\n[SUCCESS] Completed Video {idx+1}/{len(remaining_videos)}. Yielded {len(video_samples)} samples. Saved -> {pkl_path}\n")
+        sys.stdout.flush()
+        
+    # -------------------------------------------------------------------------
+    # STAGE 2: Balanced, Shuffled I.I.D. Training Compilation
+    # -------------------------------------------------------------------------
+    print("\n==========================================================")
+    print("=== STAGE 2: BALANCED I.I.D. TRAINING DATASET COMPILATION ===")
+    print("==========================================================\n")
+    sys.stdout.flush()
+    
+    # Reload all raw processed pickles from the temporary staging folder
+    raw_pkls = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if f.startswith("processed_") and f.endswith(".pkl")]
+    
+    all_extracted_samples = []
+    video_yields = {}
+    
+    print("Consolidating all temporary pre-processed pickles...")
+    for pkl_file in raw_pkls:
+        try:
+            with open(pkl_file, "rb") as f:
+                samples = pickle.load(f)
+                if samples:
+                    all_extracted_samples.extend(samples)
+                    video_yields[os.path.basename(pkl_file)] = len(samples)
+        except Exception as e:
+            print(f"Warning: Could not read temporary pkl file '{pkl_file}' ({e}). Skipping.")
+            
+    total_samples = len(all_extracted_samples)
+    print(f"Total compiled samples extracted from all videos: {total_samples}")
+    for v_name, v_yield in video_yields.items():
+        print(f" - {v_name}: {v_yield} samples")
+    print("")
+    sys.stdout.flush()
+    
+    if total_samples == 0:
+        print("[ERROR] No valid dataset samples were extracted in Stage 1. Please ensure videos are present and match settings.")
+        sys.exit(1)
+        
+    # Shuffle all collected samples in place to ensure identical independent distribution (i.i.d.)
+    print("Shuffling all collected samples to guarantee perfect i.i.d. training balance...")
+    random.shuffle(all_extracted_samples)
+    print("Shuffling complete.\n")
+    sys.stdout.flush()
+    
+    # Package into training batch files matching tracker_model3 expectation exactly
+    num_batches = int(np.ceil(total_samples / args.batch_size))
+    print(f"Packaging {total_samples} samples into {num_batches} batches of size {args.batch_size}...")
+    sys.stdout.flush()
+    
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    for b in range(num_batches):
+        batch_slice = all_extracted_samples[b * args.batch_size : (b + 1) * args.batch_size]
+        
+        # If the last batch is smaller, pad it or wrap around to keep exactly batch_size
+        if len(batch_slice) < args.batch_size:
+            pad_needed = args.batch_size - len(batch_slice)
+            batch_slice.extend(all_extracted_samples[:pad_needed])
+            
+        hist_frames_batch = []
+        prev_frames_batch = []
+        curr_frames_batch = []
+        target_heatmaps_batch = []
+        
+        hist_coords_batch = []
+        prev_coords_batch = []
+        curr_coords_batch = []
+        
+        for sample in batch_slice:
+            hist_frames_batch.append(sample["hist_frame"])
+            prev_frames_batch.append(sample["prev_frame"])
+            curr_frames_batch.append(sample["curr_frame"])
+            target_heatmaps_batch.append(sample["target_heatmap"])
+            
+            hist_coords_batch.append(sample["debug_coords"]["hist"])
+            prev_coords_batch.append(sample["debug_coords"]["prev"])
+            curr_coords_batch.append(sample["debug_coords"]["curr"])
+            
+        batch_data = {
+            "inputs": [
+                np.array(hist_frames_batch, dtype=np.float32),
+                np.array(prev_frames_batch, dtype=np.float32),
+                np.array(curr_frames_batch, dtype=np.float32)
+            ],
+            "targets": np.array(target_heatmaps_batch, dtype=np.float32),
+            "debug_coords": {
+                "hist": np.array(hist_coords_batch, dtype=np.float32),
+                "prev": np.array(prev_coords_batch, dtype=np.float32),
+                "curr": np.array(curr_coords_batch, dtype=np.float32)
+            }
+        }
+        
+        output_file = os.path.join(args.output_dir, f"video_dataset_{b}.pkl")
+        with open(output_file, "wb") as f:
+            pickle.dump(batch_data, f)
+            
+        print(f"Generated and saved final batch {b+1}/{num_batches} -> {output_file}")
+        sys.stdout.flush()
+        
+    print("\n==========================================================")
+    print("=== HIGH-THROUGHPUT TWO-STAGE DATASET GENERATION COMPLETE ===")
+    print("==========================================================\n")
+    sys.stdout.flush()
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -931,6 +1474,12 @@ def main():
         help="Radius of the previous circular mask in pixels (default: 50)."
     )
     parser.add_argument(
+        "--label_radius",
+        type=int,
+        default=32,
+        help="Radius of the target label expected heatmap in pixels (default: 32)."
+    )
+    parser.add_argument(
         "--feature_type",
         default="asift",
         choices=["asift", "sift", "surf"],
@@ -984,7 +1533,31 @@ def main():
         default=0.75,
         help="Minimum Normalized Cross-Correlation (NCC) patch similarity to accept matches (default: 0.75)."
     )
+    parser.add_argument(
+        "--temporal_step_seconds",
+        type=float,
+        default=1.0,
+        help="Constant time gap in seconds between chronological seeks in Stage 1 sequential mode (default: 1.0)."
+    )
+    parser.add_argument(
+        "--max_consecutive_failures",
+        type=int,
+        default=10,
+        help="Maximum consecutive match failures allowed in a single video before skipping it in Stage 1 (default: 10)."
+    )
     
+    # Load and apply pipeline_config.json defaults dynamically
+    config_path = os.path.join(os.path.dirname(__file__), "pipeline_config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+                valid_keys = {action.dest for action in parser._actions if action.dest != 'help'}
+                filtered_config = {k: v for k, v in config.items() if k in valid_keys}
+                parser.set_defaults(**filtered_config)
+        except Exception as e:
+            print(f"Warning: Could not load pipeline_config.json ({e}). Using CLI defaults.")
+            
     args = parser.parse_args()
     
     if not os.path.isdir(args.videos_dir):
@@ -999,326 +1572,17 @@ def main():
         
     print(f"Found {len(video_paths)} valid videos.")
     
-    if args.visualize:
-        print("\n=== ENTERING HUD PREVIEW MODE ===")
-        print("Rendering generated sequences in real-time. No files will be exported to disk.")
-        print("Controls: Press [SPACE] for next single step, [ENTER] to auto-run until success, [ESC/Q] to exit.\n")
-        sys.stdout.flush()
-        try:
-            cv2.namedWindow("Video Dataset Generator Debugger", cv2.WINDOW_AUTOSIZE)
-        except cv2.error as e:
-            print(f"Warning: Could not initialize visual window ({e}).")
-            print("If you are running in a headless environment, please run without '-v' / '--visualize'.")
-            sys.exit(1)
-    else:
-        os.makedirs(args.output_dir, exist_ok=True)
-        print(f"\nTarget output folder: '{args.output_dir}'")
-        
-    num_batches = int(np.ceil(args.num_of_samples / args.batch_size))
-    total_samples = num_batches * args.batch_size
-    
-    if not args.visualize:
-        print(f"Generating {total_samples} samples ({num_batches} batches of size {args.batch_size}).")
-        
-    sample_count = 0
-    
-    # State trackers for visual HUD auto-running and counting
-    auto_run_until_success = False
-    attempt_count = 0
-    
     # Initialize the ASIFT matcher if selected
     asift_matcher = None
     if args.feature_type == "asift":
         asift_matcher = ASIFTMatcher(feature_type="sift")
         
-    for b in range(num_batches):
-        if args.visualize and sample_count >= args.num_of_samples:
-            break
-            
-        hist_frames_batch = []
-        prev_frames_batch = []
-        curr_frames_batch = []
-        target_heatmaps_batch = []
-        
-        hist_coords_batch = []
-        prev_coords_batch = []
-        curr_coords_batch = []
-        
-        # Pre-allocate and shuffle decisions to guarantee exact ratio and perfect random distribution (i.i.d.)
-        num_hover_target = int(args.batch_size * args.hover_prob)
-        num_trans_target = args.batch_size - num_hover_target
-        
-        batch_decisions = [True] * num_hover_target + [False] * num_trans_target
-        random.shuffle(batch_decisions)
-        
-        while len(hist_frames_batch) < args.batch_size:
-            if args.visualize and sample_count >= args.num_of_samples:
-                break
-                
-            attempt_count += 1
-            is_hover = batch_decisions[len(hist_frames_batch)]
-            
-            random_video = random.choice(video_paths)
-            cap = cv2.VideoCapture(random_video)
-            
-            # Robust corrupted video logging as requested by user
-            if not cap.isOpened():
-                print(f"[ERROR] Corrupted video file (moov atom not found / failed to open): {os.path.abspath(random_video)}")
-                sys.stdout.flush()
-                continue
-                
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames < 200:
-                print(f"[ERROR] Corrupted or incomplete video file (too few frames / moov atom failure): {os.path.abspath(random_video)}")
-                sys.stdout.flush()
-                cap.release()
-                continue
-                
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps <= 0 or np.isnan(fps):
-                fps = 30.0
-                
-            # Time gap of approx. 1 second between hist and prev (0.9 to 1.1s randomized window for training generalizability)
-            gap_k = random.randint(int(0.9 * fps), int(1.1 * fps))
-            
-            # Define maximum starting index to prevent running out of frames (at least 1.5 seconds)
-            max_start = total_frames - int(fps * 1.5)
-            start_frame_idx = random.randint(0, max_start)
-            
-            # Seek to start frame
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx)
-            ret, frame_hist_raw = cap.read()
-            if not ret or frame_hist_raw is None:
-                cap.release()
-                continue
-                
-            # Grayscale conversions
-            f_hist_full = to_grayscale(frame_hist_raw)
-            f_hist_256 = cv2.resize(f_hist_full, (256, 256), interpolation=cv2.INTER_AREA)
-            
-            if is_hover:
-                # =========================================================
-                # Stationary Hover Scenario (SIFT on 1 frame + Jitter)
-                # =========================================================
-                cap.release()
-                
-                sift = cv2.SIFT_create()
-                kp, _ = sift.detectAndCompute(f_hist_256, None)
-                if not kp:
-                    continue
-                    
-                target_kp = random.choice(kp)
-                target_coords = [target_kp.pt[0] / 256.0, target_kp.pt[1] / 256.0]
-                
-                f_prev_256, prev_coords = simulate_hover_jitter(f_hist_256, target_coords)
-                f_curr_256, curr_coords = simulate_hover_jitter(f_hist_256, target_coords)
-                
-                hist_coords = target_coords
-                sift_match_debug = None
-                
-            else:
-                # =========================================================
-                # Real Drone / Driving Camera Translation (Consecutive Seek)
-                # =========================================================
-                # Real Drone / Driving Camera Translation (Consecutive Seek)
-                # gap_k is pre-computed dynamically above to represent approx. 1 second based on video FPS
-                # Create processing-resolution grayscale frame for hist frame
-                f_hist_proc = cv2.resize(f_hist_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
-                
-                for _ in range(gap_k - 1):
-                    cap.grab()
-                ret, frame_prev_raw = cap.read()
-                
-                if not ret or frame_prev_raw is None:
-                    cap.release()
-                    continue
-                    
-                f_prev_full = to_grayscale(frame_prev_raw)
-                f_prev_256 = cv2.resize(f_prev_full, (256, 256), interpolation=cv2.INTER_AREA)
-                f_prev_proc = cv2.resize(f_prev_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
-                
-                # Skip to current frame (very small step)
-                gap_d = 2
-                for _ in range(gap_d - 1):
-                    cap.grab()
-                ret, frame_curr_raw = cap.read()
-                cap.release()
-                
-                if not ret or frame_curr_raw is None:
-                    continue
-                    
-                f_curr_full = to_grayscale(frame_curr_raw)
-                f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
-                f_curr_proc = cv2.resize(f_curr_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
-                
-                # Match SIFT/ASIFT/SURF keypoints across the three branches (using customizable thresholds in proc_size space)
-                match_res = match_features_triplet(
-                    f_hist_proc, f_prev_proc, f_curr_proc, 
-                    ratio=args.ratio, min_inliers=args.min_inliers,
-                    feature_type=args.feature_type, asift_matcher=asift_matcher,
-                    ransac_thresh=args.ransac_thresh,
-                    min_motion_pc=args.min_motion_pc,
-                    min_motion_hp=args.min_motion_hp,
-                    min_texture_std=args.min_texture_std,
-                    proc_size=args.proc_size,
-                    min_ncc=args.min_ncc
-                )
-                
-                # If in production dataset generation, skip failed SIFT triplets
-                if not args.visualize:
-                    if match_res is None or match_res.get("status") == "failed":
-                        continue
-                        
-                # Pick the mathematically best landmark trajectory (lowest epipolar line error)
-                # that is strictly located within the inner 2/3 center region to avoid lens distortion
-                # and satisfies our tracking target motion requirements
-                if match_res.get("status") == "success":
-                    selected_path = None
-                    for path in match_res["paths"]:
-                        if is_path_in_inner_2_3(path):
-                            # Calculate motion vectors for this specific path candidate in 256x256 space
-                            h_pt = path["hist"]
-                            p_pt = path["prev"]
-                            c_pt = path["curr"]
-                            
-                            dist_pc = np.sqrt((c_pt[0] - p_pt[0])**2 + (c_pt[1] - p_pt[1])**2) * 256.0
-                            dist_hp = np.sqrt((p_pt[0] - h_pt[0])**2 + (p_pt[1] - h_pt[1])**2) * 256.0
-                            
-                            if dist_pc >= args.target_min_motion_pc and dist_hp >= args.target_min_motion_hp:
-                                selected_path = path
-                                break
-                            
-                    if selected_path is not None:
-                        hist_coords = selected_path["hist"]
-                        prev_coords = selected_path["prev"]
-                        curr_coords = selected_path["curr"]
-                    else:
-                        # No inliers fell into the inner 2/3 region and had enough motion; treat as failure
-                        match_res["status"] = "failed"
-                        match_res["reason"] = "no_inlier_in_inner_2_3_or_motion_failed"
-                        hist_coords = [0.5, 0.5]
-                        prev_coords = [0.5, 0.5]
-                        curr_coords = [0.5, 0.5]
-                else:
-                    # SIFT match failure context (only used in visualization mode)
-                    hist_coords = [0.5, 0.5]
-                    prev_coords = [0.5, 0.5]
-                    curr_coords = [0.5, 0.5]
-                    
-                sift_match_debug = match_res
-                
-            # =========================================================
-            # Common Sample Processing & Packaging
-            # =========================================================
-            
-            # Generate the 2D attention masks for Channel 1
-            hist_mask = generate_attention_mask(
-                hist_coords, size=256, mask_type=args.mask_type,
-                radius=args.hist_radius, sigma=args.mask_sigma
-            )
-            prev_mask = generate_attention_mask(
-                prev_coords, size=256, mask_type=args.mask_type,
-                radius=args.prev_radius, sigma=args.mask_sigma
-            )
-            zeros_mask = np.zeros((256, 256, 1), dtype=np.float32)
-            
-            is_success = (sift_match_debug is not None and sift_match_debug.get("status") == "success") or is_hover
-            
-            # If visualize mode, display HUD preview immediately (including matches and connections)
-            if args.visualize:
-                dashboard = render_dashboard(
-                    f_hist_256, f_prev_256, f_curr_256,
-                    hist_mask, prev_mask,
-                    hist_coords, prev_coords, curr_coords,
-                    sift_info=sift_match_debug,
-                    proc_size=args.proc_size,
-                    feature_type=args.feature_type
-                )
-                try:
-                    cv2.imshow("Video Dataset Generator Debugger", dashboard)
-                    
-                    # If auto-running and current attempt is success, stop auto-run and pause
-                    if is_success and auto_run_until_success:
-                        auto_run_until_success = False
-                        
-                    # Auto-run mode: short 100ms delay; Manual mode: wait indefinitely (0)
-                    delay = 100 if auto_run_until_success else 0
-                    key = cv2.waitKey(delay) & 0xFF
-                    
-                    if key == 13 or key == 10:    # Enter Key
-                        auto_run_until_success = True
-                    elif key == 32:               # Space Key
-                        auto_run_until_success = False
-                    elif key == 27 or key == ord('q'):  # Esc or Q to quit
-                        cv2.destroyAllWindows()
-                        print("\nHUD Preview Mode exited by user.")
-                        sys.exit(0)
-                except cv2.error as e:
-                    print(f"\nGUI Error: Could not render visualization window ({e}).")
-                    print("Please run without the '-v' / '--visualize' flag to export pickle files directly.")
-                    sys.exit(1)
-                    
-                # Print status with current attempt count
-                if is_success:
-                    sample_count += 1
-                    print(f"[Sample {sample_count} | Attempt {attempt_count}] Rendered success (Hover: {is_hover})")
-                    sys.stdout.flush()
-                    attempt_count = 0  # Reset for next sample
-                else:
-                    print(f"[Sample {sample_count + 1} | Attempt {attempt_count}] Match Failed ({args.feature_type}): {sift_match_debug.get('reason')} - rendering connections.")
-                    sys.stdout.flush()
-                continue
-                
-            # Convert to target training formats (Channel 0 = Grayscale, Channel 1 = Mask)
-            f_hist_norm = f_hist_256.astype(np.float32) / 255.0
-            f_prev_norm = f_prev_256.astype(np.float32) / 255.0
-            f_curr_norm = f_curr_256.astype(np.float32) / 255.0
-            
-            # Stack along last axis (channel axis) to produce shape (256, 256, 2)
-            hist_frame = np.stack([f_hist_norm, hist_mask[:, :, 0]], axis=-1)
-            prev_frame = np.stack([f_prev_norm, prev_mask[:, :, 0]], axis=-1)
-            curr_frame = np.stack([f_curr_norm, zeros_mask[:, :, 0]], axis=-1)
-            
-            target_heatmap = generate_gaussian_heatmap(curr_coords, size=64, sigma=4.0)
-            
-            hist_frames_batch.append(hist_frame)
-            prev_frames_batch.append(prev_frame)
-            curr_frames_batch.append(curr_frame)
-            target_heatmaps_batch.append(target_heatmap)
-            
-            hist_coords_batch.append(hist_coords)
-            prev_coords_batch.append(prev_coords)
-            curr_coords_batch.append(curr_coords)
-            
-            sample_count += 1
-            attempt_count = 0  # Reset for next sample in non-visual mode
-            
-        if args.visualize:
-            continue
-            
-        # Serialize batch to pickle matching tracker_model3 expectations exactly
-        batch_data = {
-            "inputs": [
-                np.array(hist_frames_batch, dtype=np.float32),
-                np.array(prev_frames_batch, dtype=np.float32),
-                np.array(curr_frames_batch, dtype=np.float32)
-            ],
-            "targets": np.array(target_heatmaps_batch, dtype=np.float32),
-            "debug_coords": {
-                "hist": np.array(hist_coords_batch, dtype=np.float32),
-                "prev": np.array(prev_coords_batch, dtype=np.float32),
-                "curr": np.array(curr_coords_batch, dtype=np.float32)
-            }
-        }
-        
-        output_file = os.path.join(args.output_dir, f"video_dataset_{b}.pkl")
-        with open(output_file, "wb") as f:
-            pickle.dump(batch_data, f)
-            
-        print(f"Generated and saved {sample_count}/{total_samples} samples -> {output_file}")
-        
-    if not args.visualize:
-        print("\nVideo dataset generation completed successfully.")
+    if args.visualize:
+        visualize_pipeline(args, video_paths, asift_matcher)
+    else:
+        run_two_stage_pipeline(args, video_paths, asift_matcher)
+
 
 if __name__ == "__main__":
     main()
+
