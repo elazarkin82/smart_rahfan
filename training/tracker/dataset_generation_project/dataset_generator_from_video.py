@@ -224,7 +224,7 @@ def compute_epipolar_distance(pt1, pt2, F):
     return abs(a * pt2[0] + b * pt2[1] + c) / denom
 
 def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, feature_type='asift', asift_matcher=None,
-                           ransac_thresh=5.0, min_motion_pc=1.0, min_motion_hp=3.0, min_texture_std=3.0, proc_size=800):
+                           ransac_thresh=5.0, min_motion_pc=1.0, min_motion_hp=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75):
     """
     Runs SIFT/ASIFT/SURF keypoint detection and matches features across three frames
     (hist -> prev and prev -> curr). Fits a Fundamental Matrix via RANSAC
@@ -318,6 +318,33 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
             else:
                 continue
                 
+            # 4. Filter D: Patch Normalized Cross-Correlation (NCC) to reject false SIFT matches
+            r_ncc = 10  # 21x21 patch size
+            hx, hy = int(pt_h[0]), int(pt_h[1])
+            cx, cy = int(pt_c[0]), int(pt_c[1])
+            
+            if (hy - r_ncc >= 0 and hy + r_ncc + 1 <= proc_size and hx - r_ncc >= 0 and hx + r_ncc + 1 <= proc_size and
+                py - r_ncc >= 0 and py + r_ncc + 1 <= proc_size and px - r_ncc >= 0 and px + r_ncc + 1 <= proc_size and
+                cy - r_ncc >= 0 and cy + r_ncc + 1 <= proc_size and cx - r_ncc >= 0 and cx + r_ncc + 1 <= proc_size):
+                
+                patch_h = f_hist[hy-r_ncc : hy+r_ncc+1, hx-r_ncc : hx+r_ncc+1]
+                patch_p = f_prev[py-r_ncc : py+r_ncc+1, px-r_ncc : px+r_ncc+1]
+                patch_c = f_curr[cy-r_ncc : cy+r_ncc+1, cx-r_ncc : cx+r_ncc+1]
+                
+                if np.std(patch_h) >= 1e-3 and np.std(patch_p) >= 1e-3 and np.std(patch_c) >= 1e-3:
+                    res_hp = cv2.matchTemplate(patch_h, patch_p, cv2.TM_CCOEFF_NORMED)
+                    ncc_hp = res_hp[0, 0]
+                    
+                    res_pc = cv2.matchTemplate(patch_p, patch_c, cv2.TM_CCOEFF_NORMED)
+                    ncc_pc = res_pc[0, 0]
+                    
+                    if ncc_hp < min_ncc or ncc_pc < min_ncc:
+                        continue
+                else:
+                    continue
+            else:
+                continue
+                
             pts_hist.append(pt_h)
             pts_prev.append(pt_p)
             pts_curr.append(pt_c)
@@ -343,7 +370,7 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
     F_12, mask_12 = cv2.findFundamentalMat(pts_hist, pts_prev, cv2.FM_RANSAC, ransac_thresh)
     F_23, mask_23 = cv2.findFundamentalMat(pts_prev, pts_curr, cv2.FM_RANSAC, ransac_thresh)
     
-    if F_12 is None or F_23 is None or mask_12 is None or mask_23 is None:
+    if F_12 is None or F_23 is None or mask_12 is None or mask_23 is None or F_12.shape != (3, 3) or F_23.shape != (3, 3):
         return {
             "status": "failed",
             "reason": "ransac_matrix_failure",
@@ -449,6 +476,18 @@ def simulate_hover_jitter(frame_256, coords):
     ]
     return warped_frame, warped_norm
 
+def is_path_in_inner_2_3(path):
+    """
+    Checks if a given path is entirely located within the inner 2/3 region
+    of the image space [0.167, 0.833] across all three frames.
+    This helps avoid lens distortion, which increases towards the frame boundaries.
+    """
+    for frame in ["hist", "prev", "curr"]:
+        x, y = path[frame]
+        if not (0.167 <= x <= 0.833 and 0.167 <= y <= 0.833):
+            return False
+    return True
+
 # =====================================================================
 # Dashboard Rendering and Visualization
 # =====================================================================
@@ -549,8 +588,9 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
         # Scale coordinates from proc_size back to 256x256 visualization space
         scale = 256.0 / proc_size
         
+        # Draw other matches (color_idx > 0) first (background)
         for color_idx, idx in enumerate(inliers):
-            if idx < len(triplets):
+            if color_idx > 0 and idx < len(triplets):
                 trip = triplets[idx]
                 pt_h = kp_hist[trip[0]].pt
                 pt_p = kp_prev[trip[1]].pt
@@ -560,24 +600,35 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
                 p2_p = (int(pt_p[0] * scale + 256), int(pt_p[1] * scale))  # Shifted right by 256 (prev frame)
                 p3_c = (int(pt_c[0] * scale + 512), int(pt_c[1] * scale))  # Shifted right by 512 (curr frame)
                 
-                # Dynamic visual representation
-                if color_idx == 0:
-                    # Best match: Pure Blue, thicker
-                    color = (255, 0, 0)
-                    thickness = 2
-                    radius = 5
-                else:
-                    # Other matches: Pure White
-                    color = (255, 255, 255)
-                    thickness = 1
-                    radius = 3
+                color = (255, 255, 255)
+                thickness = 1
+                radius = 3
                 
-                # Connection hist -> prev
                 cv2.line(s_color, p1_h, p2_p, color, thickness, cv2.LINE_AA)
-                # Connection prev -> curr
                 cv2.line(s_color, p2_p, p3_c, color, thickness, cv2.LINE_AA)
+                cv2.circle(s_color, p1_h, radius, color, -1)
+                cv2.circle(s_color, p2_p, radius, color, -1)
+                cv2.circle(s_color, p3_c, radius, color, -1)
                 
-                # Circle indicators on all keypoint nodes
+        # Draw selected optimal match (color_idx == 0) last (foreground)
+        if len(inliers) > 0:
+            idx = inliers[0]
+            if idx < len(triplets):
+                trip = triplets[idx]
+                pt_h = kp_hist[trip[0]].pt
+                pt_p = kp_prev[trip[1]].pt
+                pt_c = kp_curr[trip[2]].pt
+                
+                p1_h = (int(pt_h[0] * scale), int(pt_h[1] * scale))
+                p2_p = (int(pt_p[0] * scale + 256), int(pt_p[1] * scale))
+                p3_c = (int(pt_c[0] * scale + 512), int(pt_c[1] * scale))
+                
+                color = (255, 0, 0)
+                thickness = 2
+                radius = 5
+                
+                cv2.line(s_color, p1_h, p2_p, color, thickness, cv2.LINE_AA)
+                cv2.line(s_color, p2_p, p3_c, color, thickness, cv2.LINE_AA)
                 cv2.circle(s_color, p1_h, radius, color, -1)
                 cv2.circle(s_color, p2_p, radius, color, -1)
                 cv2.circle(s_color, p3_c, radius, color, -1)
@@ -626,7 +677,7 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
                 else:
                     F_256, _ = cv2.findFundamentalMat(pts_h_256, pts_p_256, cv2.FM_LMEDS)
                     
-                if F_256 is not None:
+                if F_256 is not None and F_256.shape == (3, 3):
                     # Compute epipolar lines in both images
                     lines_on_prev = cv2.computeCorrespondEpilines(pts_h_256.reshape(-1, 1, 2), 1, F_256)
                     lines_on_hist = cv2.computeCorrespondEpilines(pts_p_256.reshape(-1, 1, 2), 2, F_256)
@@ -634,7 +685,8 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
                     total_err = 0.0
                     err_count = 0
                     
-                    for i in range(len(pts_h_256)):
+                    # Draw other matches (i > 0) first (background)
+                    for i in range(1, len(pts_h_256)):
                         pt_h = pts_h_256[i]
                         pt_p = pts_p_256[i]
                         
@@ -649,21 +701,39 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
                             total_err += dist
                             err_count += 1
                             
-                        # High-contrast coloring: optimal is Pure Blue, others are Pure White
-                        if i == 0:
-                            color = (255, 0, 0)
-                            thickness = 2
-                            radius = 5
-                        else:
-                            color = (255, 255, 255)
-                            thickness = 1
-                            radius = 3
-                            
-                        # Draw line and dot on prev image
+                        color = (255, 255, 255)
+                        thickness = 1
+                        radius = 3
+                        
                         draw_epipolar_line(epipoles_on_prev, l_prev, color, thickness)
                         cv2.circle(epipoles_on_prev, (int(pt_p[0]), int(pt_p[1])), radius, color, -1)
                         
-                        # Draw line and dot on hist image
+                        draw_epipolar_line(epipoles_on_hist, l_hist, color, thickness)
+                        cv2.circle(epipoles_on_hist, (int(pt_h[0]), int(pt_h[1])), radius, color, -1)
+                        
+                    # Draw selected optimal match (i == 0) last (foreground)
+                    if len(pts_h_256) > 0:
+                        pt_h = pts_h_256[0]
+                        pt_p = pts_p_256[0]
+                        
+                        l_prev = lines_on_prev[0][0]
+                        l_hist = lines_on_hist[0][0]
+                        
+                        # Calculate orthogonal distance for error metric
+                        a, b, c = l_prev[0], l_prev[1], l_prev[2]
+                        denom = np.sqrt(a**2 + b**2)
+                        if denom > 1e-8:
+                            dist = abs(a * pt_p[0] + b * pt_p[1] + c) / denom
+                            total_err += dist
+                            err_count += 1
+                            
+                        color = (255, 0, 0)
+                        thickness = 2
+                        radius = 5
+                        
+                        draw_epipolar_line(epipoles_on_prev, l_prev, color, thickness)
+                        cv2.circle(epipoles_on_prev, (int(pt_p[0]), int(pt_p[1])), radius, color, -1)
+                        
                         draw_epipolar_line(epipoles_on_hist, l_hist, color, thickness)
                         cv2.circle(epipoles_on_hist, (int(pt_h[0]), int(pt_h[1])), radius, color, -1)
                         
@@ -868,6 +938,12 @@ def main():
         default=3.0,
         help="Minimum local patch standard deviation to accept keypoints in low-contrast areas (default: 3.0)."
     )
+    parser.add_argument(
+        "--min_ncc",
+        type=float,
+        default=0.75,
+        help="Minimum Normalized Cross-Correlation (NCC) patch similarity to accept matches (default: 0.75)."
+    )
     
     args = parser.parse_args()
     
@@ -1044,7 +1120,8 @@ def main():
                     min_motion_pc=args.min_motion_pc,
                     min_motion_hp=args.min_motion_hp,
                     min_texture_std=args.min_texture_std,
-                    proc_size=args.proc_size
+                    proc_size=args.proc_size,
+                    min_ncc=args.min_ncc
                 )
                 
                 # If in production dataset generation, skip failed SIFT triplets
@@ -1053,11 +1130,25 @@ def main():
                         continue
                         
                 # Pick the mathematically best landmark trajectory (lowest epipolar line error)
+                # that is strictly located within the inner 2/3 center region to avoid lens distortion
                 if match_res.get("status") == "success":
-                    selected_path = match_res["paths"][0]
-                    hist_coords = selected_path["hist"]
-                    prev_coords = selected_path["prev"]
-                    curr_coords = selected_path["curr"]
+                    selected_path = None
+                    for path in match_res["paths"]:
+                        if is_path_in_inner_2_3(path):
+                            selected_path = path
+                            break
+                            
+                    if selected_path is not None:
+                        hist_coords = selected_path["hist"]
+                        prev_coords = selected_path["prev"]
+                        curr_coords = selected_path["curr"]
+                    else:
+                        # No inliers fell into the inner 2/3 region; treat as failure to maintain pristine quality
+                        match_res["status"] = "failed"
+                        match_res["reason"] = "no_inlier_in_inner_2_3"
+                        hist_coords = [0.5, 0.5]
+                        prev_coords = [0.5, 0.5]
+                        curr_coords = [0.5, 0.5]
                 else:
                     # SIFT match failure context (only used in visualization mode)
                     hist_coords = [0.5, 0.5]

@@ -28,16 +28,17 @@ fi
 # =========================================================================
 # FEATURE MATCHING CONFIGURATION (Change FEATURE_TYPE to "surf", "sift", or "asift")
 # =========================================================================
-FEATURE_TYPE="surf"
-PROC_SIZE=800          # Higher resolution for feature matching (preserves details, default: 800)
+FEATURE_TYPE="sift"
+PROC_SIZE=1000          # Higher resolution for feature matching (preserves details, default: 800)
 
 # Hyper-Permissive thresholds to maximize raw keypoint detections in difficult views
 RATIO=0.95
-MIN_INLIERS=5
-RANSAC_THRESH=8.0
-MIN_MOTION_PC=2.0
-MIN_MOTION_HP=5.0
+MIN_INLIERS=8
+RANSAC_THRESH=2.0
+MIN_MOTION_PC=0.0
+MIN_MOTION_HP=3.0
 MIN_TEXTURE_STD=0.0
+MIN_NCC=0.9
 
 echo "=========================================================="
 echo "Starting Dataset Generator in Visualization Mode"
@@ -52,9 +53,10 @@ echo " - RANSAC Error Thresh (--ransac_thresh): ${RANSAC_THRESH}"
 echo " - Min Motion Prev->Curr (--min_motion_pc): ${MIN_MOTION_PC} px"
 echo " - Min Motion Hist->Prev (--min_motion_hp): ${MIN_MOTION_HP} px"
 echo " - Min Contrast/Texture (--min_texture_std): ${MIN_TEXTURE_STD}"
+echo " - Min NCC Template Match (--min_ncc): ${MIN_NCC}"
 echo "=========================================================="
 
-# Unified Python Execution Call (Widescreen 3x2 HUD mode active)
+# Unified Python Execution Call (Widescreen 3x3 HUD mode active)
 python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
     --output_dir "${SCRIPT_DIR}/video_dataset" \
     --feature_type "${FEATURE_TYPE}" \
@@ -65,6 +67,7 @@ python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
     --min_motion_pc "${MIN_MOTION_PC}" \
     --min_motion_hp "${MIN_MOTION_HP}" \
     --min_texture_std "${MIN_TEXTURE_STD}" \
+    --min_ncc "${MIN_NCC}" \
     --mask_type gaussian \
     --mask_sigma 15.0 \
     --hist_radius 128 \
