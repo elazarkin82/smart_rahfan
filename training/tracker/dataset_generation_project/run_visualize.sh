@@ -28,14 +28,15 @@ fi
 # =========================================================================
 # FEATURE MATCHING CONFIGURATION (Change FEATURE_TYPE to "surf", "sift", or "asift")
 # =========================================================================
-FEATURE_TYPE="asift"
+FEATURE_TYPE="sift"
+PROC_SIZE=800          # Higher resolution for feature matching (preserves details, default: 800)
 
 # Hyper-Permissive thresholds to maximize raw keypoint detections in difficult views
 RATIO=0.95
 MIN_INLIERS=5
 RANSAC_THRESH=8.0
-MIN_MOTION_PC=1.0
-MIN_MOTION_HP=1.0
+MIN_MOTION_PC=3.0
+MIN_MOTION_HP=3.0
 MIN_TEXTURE_STD=0.0
 
 echo "=========================================================="
@@ -43,7 +44,8 @@ echo "Starting Dataset Generator in Visualization Mode"
 echo "Videos Source Directory: ${VIDEOS_DIR}"
 echo "Feature Extraction: ${FEATURE_TYPE} (ACTIVE)"
 echo "----------------------------------------------------------"
-echo "Applied Permissive Thresholds:"
+echo "Applied Permissive Thresholds & Parameters:"
+echo " - Processing Resolution (--proc_size): ${PROC_SIZE} px"
 echo " - Lowe's Ratio (--ratio): ${RATIO}"
 echo " - Min RANSAC Inliers (--min_inliers): ${MIN_INLIERS}"
 echo " - RANSAC Error Thresh (--ransac_thresh): ${RANSAC_THRESH}"
@@ -56,6 +58,7 @@ echo "=========================================================="
 python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
     --output_dir "${SCRIPT_DIR}/video_dataset" \
     --feature_type "${FEATURE_TYPE}" \
+    --proc_size "${PROC_SIZE}" \
     --ratio "${RATIO}" \
     --min_inliers "${MIN_INLIERS}" \
     --ransac_thresh "${RANSAC_THRESH}" \

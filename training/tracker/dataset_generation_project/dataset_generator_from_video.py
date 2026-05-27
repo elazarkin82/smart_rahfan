@@ -224,7 +224,7 @@ def compute_epipolar_distance(pt1, pt2, F):
     return abs(a * pt2[0] + b * pt2[1] + c) / denom
 
 def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, feature_type='asift', asift_matcher=None,
-                           ransac_thresh=5.0, min_motion_pc=1.0, min_motion_hp=3.0, min_texture_std=3.0):
+                           ransac_thresh=5.0, min_motion_pc=1.0, min_motion_hp=3.0, min_texture_std=3.0, proc_size=800):
     """
     Runs SIFT/ASIFT/SURF keypoint detection and matches features across three frames
     (hist -> prev and prev -> curr). Fits a Fundamental Matrix via RANSAC
@@ -269,6 +269,14 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
             if m.distance < ratio * n.distance:
                 prev_to_curr[m.queryIdx] = m.trainIdx
                 
+    # Scale spatial motion/texture parameters to proc_size space dynamically
+    scale_factor = proc_size / 256.0
+    scaled_min_motion_pc = min_motion_pc * scale_factor
+    scaled_min_motion_hp = min_motion_hp * scale_factor
+    
+    # Scale patch size for texture filtering (default 5px in 256x256 becomes 15px in 800x800)
+    r = int(round(5 * scale_factor))
+    
     # Find matching keypoint triplets (hist -> prev -> curr)
     pts_hist, pts_prev, pts_curr = [], [], []
     kp_triplets = []
@@ -287,8 +295,8 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
             dist_pc = np.sqrt(v_pc[0]**2 + v_pc[1]**2)
             dist_hp = np.sqrt(v_hp[0]**2 + v_hp[1]**2)
             
-            # Eased static filters (using customizable args)
-            if dist_pc < min_motion_pc or dist_hp < min_motion_hp:
+            # Eased static filters (using dynamically scaled thresholds)
+            if dist_pc < scaled_min_motion_pc or dist_hp < scaled_min_motion_hp:
                 continue
                 
             # 2. Filter B: Directional Coherence (Cosine Similarity)
@@ -301,8 +309,8 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
                 
             # 3. Filter C: Local Texture/Variance Filter
             px, py = int(pt_p[0]), int(pt_p[1])
-            if py - 5 >= 0 and py + 6 <= 256 and px - 5 >= 0 and px + 6 <= 256:
-                patch = f_prev[py-5 : py+6, px-5 : px+6]
+            if py - r >= 0 and py + r + 1 <= proc_size and px - r >= 0 and px + r + 1 <= proc_size:
+                patch = f_prev[py-r : py+r+1, px-r : px+r+1]
                 patch_std = np.std(patch)
                 # Eased texture filter
                 if patch_std < min_texture_std:
@@ -391,9 +399,9 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
         c_pt = pts_curr[idx]
         
         path = {
-            "hist": [np.clip(h_pt[0] / 256.0, 0.0, 1.0), np.clip(h_pt[1] / 256.0, 0.0, 1.0)],
-            "prev": [np.clip(p_pt[0] / 256.0, 0.0, 1.0), np.clip(p_pt[1] / 256.0, 0.0, 1.0)],
-            "curr": [np.clip(c_pt[0] / 256.0, 0.0, 1.0), np.clip(c_pt[1] / 256.0, 0.0, 1.0)]
+            "hist": [np.clip(h_pt[0] / proc_size, 0.0, 1.0), np.clip(h_pt[1] / proc_size, 0.0, 1.0)],
+            "prev": [np.clip(p_pt[0] / proc_size, 0.0, 1.0), np.clip(p_pt[1] / proc_size, 0.0, 1.0)],
+            "curr": [np.clip(c_pt[0] / proc_size, 0.0, 1.0), np.clip(c_pt[1] / proc_size, 0.0, 1.0)]
         }
         verified_paths.append(path)
         
@@ -467,7 +475,7 @@ def draw_hud_label(img, label, org, color=(0, 255, 0)):
     
     cv2.putText(img, label, org, font, scale, color, thickness, cv2.LINE_AA)
 
-def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, hist_norm, prev_norm, curr_norm, sift_info=None):
+def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, hist_norm, prev_norm, curr_norm, sift_info=None, proc_size=800):
     """
     Renders a stunning 4-panel dashboard containing full frames overlaid with highly transparent
     colored attention masks, green target indicators, and inter-image keypoint matching lines.
@@ -519,6 +527,9 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
         # Color of connection lines: Cyan for success, Bright Orange for failure
         line_color = (255, 255, 0) if is_success else (0, 128, 255)
         
+        # Scale coordinates from proc_size back to 256x256 visualization space
+        scale = 256.0 / proc_size
+        
         for idx in inliers:
             if idx < len(triplets):
                 trip = triplets[idx]
@@ -526,9 +537,9 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
                 pt_p = kp_prev[trip[1]].pt
                 pt_c = kp_curr[trip[2]].pt
                 
-                p1_h = (int(pt_h[0]), int(pt_h[1]))
-                p2_p = (int(pt_p[0] + 256), int(pt_p[1]))  # Shifted right by 256 (prev frame)
-                p3_c = (int(pt_c[0] + 512), int(pt_c[1]))  # Shifted right by 512 (curr frame)
+                p1_h = (int(pt_h[0] * scale), int(pt_h[1] * scale))
+                p2_p = (int(pt_p[0] * scale + 256), int(pt_p[1] * scale))  # Shifted right by 256 (prev frame)
+                p3_c = (int(pt_c[0] * scale + 512), int(pt_c[1] * scale))  # Shifted right by 512 (curr frame)
                 
                 # Connection hist -> prev
                 cv2.line(s_color, p1_h, p2_p, line_color, 1, cv2.LINE_AA)
@@ -662,6 +673,12 @@ def main():
         default="asift",
         choices=["asift", "sift", "surf"],
         help="Feature matching algorithm. ASIFT is recommended for perspective dilation (default: asift)."
+    )
+    parser.add_argument(
+        "--proc_size",
+        type=int,
+        default=800,
+        help="Image resolution for feature extraction, keypoint matching, and RANSAC verification (default: 800)."
     )
     parser.add_argument(
         "--ransac_thresh",
@@ -825,6 +842,9 @@ def main():
                 # =========================================================
                 # Real Drone / Driving Camera Translation (Consecutive Seek)
                 # gap_k is pre-computed dynamically above to represent approx. 1 second based on video FPS
+                # Create processing-resolution grayscale frame for hist frame
+                f_hist_proc = cv2.resize(f_hist_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+                
                 for _ in range(gap_k - 1):
                     cap.grab()
                 ret, frame_prev_raw = cap.read()
@@ -835,6 +855,7 @@ def main():
                     
                 f_prev_full = to_grayscale(frame_prev_raw)
                 f_prev_256 = cv2.resize(f_prev_full, (256, 256), interpolation=cv2.INTER_AREA)
+                f_prev_proc = cv2.resize(f_prev_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
                 
                 # Skip to current frame (very small step)
                 gap_d = 2
@@ -848,16 +869,18 @@ def main():
                     
                 f_curr_full = to_grayscale(frame_curr_raw)
                 f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
+                f_curr_proc = cv2.resize(f_curr_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
                 
-                # Match SIFT/ASIFT/SURF keypoints across the three branches (using customizable thresholds)
+                # Match SIFT/ASIFT/SURF keypoints across the three branches (using customizable thresholds in proc_size space)
                 match_res = match_features_triplet(
-                    f_hist_256, f_prev_256, f_curr_256, 
+                    f_hist_proc, f_prev_proc, f_curr_proc, 
                     ratio=args.ratio, min_inliers=args.min_inliers,
                     feature_type=args.feature_type, asift_matcher=asift_matcher,
                     ransac_thresh=args.ransac_thresh,
                     min_motion_pc=args.min_motion_pc,
                     min_motion_hp=args.min_motion_hp,
-                    min_texture_std=args.min_texture_std
+                    min_texture_std=args.min_texture_std,
+                    proc_size=args.proc_size
                 )
                 
                 # If in production dataset generation, skip failed SIFT triplets
@@ -902,7 +925,8 @@ def main():
                     f_hist_256, f_prev_256, f_curr_256,
                     hist_mask, prev_mask,
                     hist_coords, prev_coords, curr_coords,
-                    sift_info=sift_match_debug
+                    sift_info=sift_match_debug,
+                    proc_size=args.proc_size
                 )
                 try:
                     cv2.imshow("Video Dataset Generator Debugger", dashboard)
