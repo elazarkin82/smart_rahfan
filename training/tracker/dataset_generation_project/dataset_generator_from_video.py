@@ -562,16 +562,13 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
                 
                 # Dynamic visual representation
                 if color_idx == 0:
-                    # Best match: Neon Fuchsia (Magenta), thicker
-                    color = (255, 0, 255)
+                    # Best match: Pure Blue, thicker
+                    color = (255, 0, 0)
                     thickness = 2
                     radius = 5
                 else:
-                    # Rainbow HSV color
-                    hue = int((color_idx * 180 / max(2, len(inliers))) % 180)
-                    hsv_color = np.uint8([[[hue, 255, 255]]])
-                    bgr_color = cv2.cvtColor(hsv_color, cv2.COLOR_HSV2BGR)[0][0]
-                    color = (int(bgr_color[0]), int(bgr_color[1]), int(bgr_color[2]))
+                    # Other matches: Pure White
+                    color = (255, 255, 255)
                     thickness = 1
                     radius = 3
                 
@@ -652,16 +649,13 @@ def render_dashboard(f_hist_256, f_prev_256, f_curr_256, hist_mask, prev_mask, h
                             total_err += dist
                             err_count += 1
                             
-                        # High-contrast coloring: optimal is Neon Fuchsia, others are Rainbow
+                        # High-contrast coloring: optimal is Pure Blue, others are Pure White
                         if i == 0:
-                            color = (255, 0, 255)
+                            color = (255, 0, 0)
                             thickness = 2
                             radius = 5
                         else:
-                            hue = int((i * 180 / len(pts_h_256)) % 180)
-                            hsv_color = np.uint8([[[hue, 255, 255]]])
-                            bgr_color = cv2.cvtColor(hsv_color, cv2.COLOR_HSV2BGR)[0][0]
-                            color = (int(bgr_color[0]), int(bgr_color[1]), int(bgr_color[2]))
+                            color = (255, 255, 255)
                             thickness = 1
                             radius = 3
                             
