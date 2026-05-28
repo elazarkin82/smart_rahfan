@@ -56,8 +56,57 @@ class KerasFCNVisualizer3(DatasetVisualizer):
         
         # 5. Customize window properties
         self.root.title("Recursive Target Tracker - Keras FCN 3 Heatmap Visual Inspector")
-        self.root.geometry("1140x420")  # Accommodate 4 horizontal panels
+        self.root.geometry("1140x900")  # Expanded height to fit 2 rows comfortably
         
+    def create_frame_slot_with_coord(self, parent, label_text):
+        container = tk.Frame(parent, bg="#121212", padx=10)
+        container.pack(side="left")
+        
+        # Title above image
+        lbl = tk.Label(
+            container, 
+            text=label_text, 
+            font=("Inter", 11, "bold"), 
+            bg="#121212", 
+            fg="#00e6ff" if "Ground Truth" in label_text else ("#33ff33" if "Model Prediction" in label_text else "#e0e0e0")
+        )
+        lbl.pack(pady=5)
+        
+        # Canvas/Panel for image
+        panel = tk.Label(container, bg="#1a1a1a", bd=1, relief="solid", width=256, height=256)
+        panel.pack()
+        
+        # Coordinate label below image (using mono font for neat alignment)
+        coord_lbl = tk.Label(
+            container, 
+            text="Norm: [N/A, N/A]\nPixel: [N/A, N/A]", 
+            font=("Consolas", 10), 
+            bg="#121212", 
+            fg="#888888",
+            justify="center",
+            pady=5
+        )
+        coord_lbl.pack()
+        
+        return panel, coord_lbl
+
+    def create_heatmap_slot(self, parent, label_text, title_color):
+        container = tk.Frame(parent, bg="#121212", padx=20)
+        container.pack(side="left")
+        
+        lbl = tk.Label(
+            container, 
+            text=label_text, 
+            font=("Inter", 11, "bold"), 
+            bg="#121212", 
+            fg=title_color
+        )
+        lbl.pack(pady=5)
+        
+        panel = tk.Label(container, bg="#1a1a1a", bd=1, relief="solid", width=256, height=256)
+        panel.pack()
+        return panel
+
     def setup_ui(self):
         # 1. Main Header
         header = tk.Label(
@@ -69,17 +118,26 @@ class KerasFCNVisualizer3(DatasetVisualizer):
         )
         header.pack(pady=15)
         
-        # 2. Frames Container (Horizontal Layout)
+        # 2. Frames Container (Row 1 Layout)
         self.frames_frame = tk.Frame(self.root, bg="#121212")
         self.frames_frame.pack(pady=10)
         
-        # 3. Individual Frame Slots (4 slots)
-        self.hist_panel = self.create_frame_slot(self.frames_frame, "Historical Frame (Channel 0)")
-        self.prev_panel = self.create_frame_slot(self.frames_frame, "Previous Frame (Channel 0)")
-        self.curr_panel = self.create_frame_slot(self.frames_frame, "Current Frame (Ground Truth)")
-        self.pred_panel = self.create_frame_slot(self.frames_frame, "Current Frame (Model Prediction)")
+        # 3. Individual Frame Slots (4 slots with coordinate labels)
+        self.hist_panel, self.hist_coord_lbl = self.create_frame_slot_with_coord(self.frames_frame, "Historical Frame (Channel 0)")
+        self.prev_panel, self.prev_coord_lbl = self.create_frame_slot_with_coord(self.frames_frame, "Previous Frame (Channel 0)")
+        self.curr_panel, self.curr_coord_lbl = self.create_frame_slot_with_coord(self.frames_frame, "Current Frame (Ground Truth)")
+        self.pred_panel, self.pred_coord_lbl = self.create_frame_slot_with_coord(self.frames_frame, "Current Frame (Model Prediction)")
         
-        # 4. Footer Status Bar
+        # 4. Heatmap Frames Container (Row 2 Layout)
+        self.heatmap_frames_frame = tk.Frame(self.root, bg="#121212")
+        self.heatmap_frames_frame.pack(pady=15)
+        
+        # 5. Individual Heatmap Slots (3 slots)
+        self.exp_heatmap_panel = self.create_heatmap_slot(self.heatmap_frames_frame, "Expected Heatmap (GT - Red Glow)", "#ff3333")
+        self.pred_heatmap_panel = self.create_heatmap_slot(self.heatmap_frames_frame, "Predicted Heatmap (Model - Green Glow)", "#33ff33")
+        self.overlay_heatmap_panel = self.create_heatmap_slot(self.heatmap_frames_frame, "Heatmap Overlay (Overlap - Yellow Glow)", "#ffff33")
+        
+        # 6. Footer Status Bar
         self.status_bar = tk.Label(
             self.root, 
             text=f"Press [Space] for Next Sample  |  Press [Esc] to Exit  |  Dataset: {self.dataset_dir}",
@@ -174,9 +232,66 @@ class KerasFCNVisualizer3(DatasetVisualizer):
             self.curr_panel.config(image=self.tk_img_curr)
             self.pred_panel.config(image=self.tk_img_pred)
             
+            # Update Coordinate Labels
+            self.hist_coord_lbl.config(
+                text=f"Norm: [{hist_coord[0]:.4f}, {hist_coord[1]:.4f}]\nPixel: [{int(hist_coord[0] * 256.0)}, {int(hist_coord[1] * 256.0)}]",
+                fg="#ff5555"
+            )
+            self.prev_coord_lbl.config(
+                text=f"Norm: [{prev_coord[0]:.4f}, {prev_coord[1]:.4f}]\nPixel: [{int(prev_coord[0] * 256.0)}, {int(prev_coord[1] * 256.0)}]",
+                fg="#ffaa33"
+            )
+            self.curr_coord_lbl.config(
+                text=f"Norm: [{curr_coord[0]:.4f}, {curr_coord[1]:.4f}]\nPixel: [{int(curr_coord[0] * 256.0)}, {int(curr_coord[1] * 256.0)}]",
+                fg="#00e6ff"
+            )
+            
+            # Compute tracking distance error in pixels (scaled to 256x256 frame)
+            error_px = np.sqrt((pred_coord[0] - curr_coord[0])**2 + (pred_coord[1] - curr_coord[1])**2) * 256.0
+            self.pred_coord_lbl.config(
+                text=f"Norm: [{pred_coord[0]:.4f}, {pred_coord[1]:.4f}]\nPixel: [{int(pred_coord[0] * 256.0)}, {int(pred_coord[1] * 256.0)}]",
+                fg="#33ff33"
+            )
+            
+            # --- ROW 2: HEATMAP PROCESS & RENDER ---
+            # 1. Retrieve the target heatmap from batch targets
+            target_heatmap = self.current_batch_data["targets"][self.current_sample_idx]  # shape: (64, 64, 1)
+            
+            # 2. Extract and scale Expected (GT) and Predicted (Model) matrices to [0, 255]
+            h_gt = (target_heatmap[:, :, 0] * 255.0).astype(np.uint8)
+            h_pred = (pred_heatmap[:, :, 0] * 255.0).astype(np.uint8)
+            
+            # 3. Resize to 256x256 using bilinear interpolation for smooth gradients
+            h_gt_256 = cv2.resize(h_gt, (256, 256), interpolation=cv2.INTER_LINEAR)
+            h_pred_256 = cv2.resize(h_pred, (256, 256), interpolation=cv2.INTER_LINEAR)
+            
+            # 4. Construct RGB glow arrays:
+            # Expected (Red Glow): R = GT, G = 0, B = 0
+            exp_rgb = np.zeros((256, 256, 3), dtype=np.uint8)
+            exp_rgb[:, :, 0] = h_gt_256
+            
+            # Predicted (Green Glow): R = 0, G = Model, B = 0
+            pred_rgb = np.zeros((256, 256, 3), dtype=np.uint8)
+            pred_rgb[:, :, 1] = h_pred_256
+            
+            # Overlay (Yellow Overlap): R = GT, G = Model, B = 0
+            overlay_rgb = np.zeros((256, 256, 3), dtype=np.uint8)
+            overlay_rgb[:, :, 0] = h_gt_256
+            overlay_rgb[:, :, 1] = h_pred_256
+            
+            # 5. Convert to Tkinter PhotoImage structures
+            self.tk_img_exp_hm = ImageTk.PhotoImage(Image.fromarray(exp_rgb))
+            self.tk_img_pred_hm = ImageTk.PhotoImage(Image.fromarray(pred_rgb))
+            self.tk_img_overlay_hm = ImageTk.PhotoImage(Image.fromarray(overlay_rgb))
+            
+            # 6. Apply images to GUI labels
+            self.exp_heatmap_panel.config(image=self.tk_img_exp_hm)
+            self.pred_heatmap_panel.config(image=self.tk_img_pred_hm)
+            self.overlay_heatmap_panel.config(image=self.tk_img_overlay_hm)
+            
             pickle_name = self.pickle_files[self.current_pickle_idx]
             self.status_bar.config(
-                text=f"Batch: {pickle_name} | Sample: {self.current_sample_idx + 1}/{self.current_batch_size}  |  Press [Space] for Next  |  Press [Esc] to Exit",
+                text=f"Batch: {pickle_name} | Sample: {self.current_sample_idx + 1}/{self.current_batch_size} | L2 Error: {error_px:.2f} px | Press [Space] for Next | Press [Esc] to Exit",
                 fg="#aaaaaa"
             )
             
