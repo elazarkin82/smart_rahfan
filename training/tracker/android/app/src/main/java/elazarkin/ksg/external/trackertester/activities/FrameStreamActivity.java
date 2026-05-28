@@ -1,9 +1,11 @@
-package elazarkin.ksg.external.trackertester;
+package elazarkin.ksg.external.trackertester.activities;
 
 import android.os.Bundle;
 import android.view.View;
 import android.widget.Button;
 import androidx.appcompat.app.AppCompatActivity;
+
+import elazarkin.ksg.external.trackertester.R;
 
 public class FrameStreamActivity extends AppCompatActivity {
 

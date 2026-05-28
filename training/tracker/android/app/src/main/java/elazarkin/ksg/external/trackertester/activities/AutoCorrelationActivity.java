@@ -1,7 +1,6 @@
-package elazarkin.ksg.external.trackertester;
+package elazarkin.ksg.external.trackertester.activities;
 
 import android.Manifest;
-import android.content.pm.PackageManager;
 import android.content.res.AssetFileDescriptor;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -19,14 +18,12 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.camera.core.CameraSelector;
-import androidx.camera.core.Preview;
-import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
 
-import com.google.common.util.concurrent.ListenableFuture;
+import elazarkin.ksg.external.trackertester.MainActivity;
+import elazarkin.ksg.external.trackertester.R;
+import elazarkin.ksg.external.trackertester.base.camera.CameraHelper;
 
 import org.tensorflow.lite.Interpreter;
 
@@ -61,7 +58,7 @@ public class AutoCorrelationActivity extends AppCompatActivity {
     private ImageView cropCurrView;
 
     // Camera State
-    private ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
+    private CameraHelper cameraHelper;
     private Bitmap capturedBitmap = null;
     private boolean isCaptured = false;
 
@@ -109,12 +106,22 @@ public class AutoCorrelationActivity extends AppCompatActivity {
         // 4. Set Up Touch Listeners for Snapshot and Selection
         setupTouchInteractions();
 
-        // 5. Request Camera Permissions
-        if (allPermissionsGranted()) {
-            startCamera();
+        // 5. Initialize Camera Helper
+        cameraHelper = new CameraHelper(this, viewFinder);
+        if (cameraHelper.hasCameraPermission()) {
+            cameraHelper.startCamera(new CameraHelper.OnCameraReadyCallback() {
+                @Override
+                public void onCameraReady() {
+                    lblStatus.setText("Status: Camera active. Point and capture!");
+                }
+
+                @Override
+                public void onCameraError(Exception e) {
+                    lblStatus.setText("Status: Failed to start camera preview.");
+                }
+            });
         } else {
-            ActivityCompat.requestPermissions(
-                    this, new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST_CODE);
+            cameraHelper.requestCameraPermission(this, CAMERA_PERMISSION_REQUEST_CODE);
         }
     }
 
@@ -183,7 +190,7 @@ public class AutoCorrelationActivity extends AppCompatActivity {
 
     private void takeSnapshot() {
         lblStatus.setText("Status: Grabbing frame...");
-        Bitmap bitmap = viewFinder.getBitmap();
+        Bitmap bitmap = cameraHelper.captureFrame();
         if (bitmap != null) {
             capturedBitmap = bitmap;
             isCaptured = true;
@@ -418,44 +425,22 @@ public class AutoCorrelationActivity extends AppCompatActivity {
         lblStatus.setText("Status: Camera active. Point and capture!");
     }
 
-    private void startCamera() {
-        cameraProviderFuture = ProcessCameraProvider.getInstance(this);
-        cameraProviderFuture.addListener(() -> {
-            try {
-                ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
-                bindPreview(cameraProvider);
-            } catch (Exception e) {
-                e.printStackTrace();
-                Toast.makeText(this, "Failed to start CameraX: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-            }
-        }, ContextCompat.getMainExecutor(this));
-    }
-
-    private void bindPreview(@NonNull ProcessCameraProvider cameraProvider) {
-        Preview preview = new Preview.Builder().build();
-        preview.setSurfaceProvider(viewFinder.getSurfaceProvider());
-
-        CameraSelector cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA;
-        
-        try {
-            cameraProvider.unbindAll();
-            cameraProvider.bindToLifecycle(this, cameraSelector, preview);
-        } catch (Exception e) {
-            e.printStackTrace();
-            Toast.makeText(this, "Camera bind failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private boolean allPermissionsGranted() {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
-    }
-
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == CAMERA_PERMISSION_REQUEST_CODE) {
-            if (allPermissionsGranted()) {
-                startCamera();
+            if (cameraHelper.hasCameraPermission()) {
+                cameraHelper.startCamera(new CameraHelper.OnCameraReadyCallback() {
+                    @Override
+                    public void onCameraReady() {
+                        lblStatus.setText("Status: Camera active. Point and capture!");
+                    }
+
+                    @Override
+                    public void onCameraError(Exception e) {
+                        lblStatus.setText("Status: Failed to start camera preview.");
+                    }
+                });
             } else {
                 Toast.makeText(this, "Camera permission is required to capture images for tests.", Toast.LENGTH_LONG).show();
                 finish();
@@ -467,6 +452,9 @@ public class AutoCorrelationActivity extends AppCompatActivity {
     protected void onDestroy() {
         if (tflite != null) {
             tflite.close();
+        }
+        if (cameraHelper != null) {
+            cameraHelper.shutdown();
         }
         super.onDestroy();
     }

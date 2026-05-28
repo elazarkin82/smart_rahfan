@@ -6,6 +6,10 @@ import android.content.Intent;
 import android.os.Bundle;
 import android.view.View;
 
+import elazarkin.ksg.external.trackertester.activities.AutoCorrelationActivity;
+import elazarkin.ksg.external.trackertester.activities.FrameStreamActivity;
+import elazarkin.ksg.external.trackertester.activities.ManualDisplacementActivity;
+import elazarkin.ksg.external.trackertester.activities.RecursiveTrackingActivity;
 import elazarkin.ksg.external.trackertester.databinding.ActivityMainBinding;
 
 public class MainActivity extends AppCompatActivity {

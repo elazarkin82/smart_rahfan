@@ -25,22 +25,22 @@
         </activity>
         
         <activity
-            android:name=".AutoCorrelationActivity"
+            android:name=".activities.AutoCorrelationActivity"
             android:label="Auto Correlation Test"
             android:exported="false" />
             
         <activity
-            android:name=".ManualDisplacementActivity"
+            android:name=".activities.ManualDisplacementActivity"
             android:label="Manual Displacement Test"
             android:exported="false" />
             
         <activity
-            android:name=".RecursiveTrackingActivity"
+            android:name=".activities.RecursiveTrackingActivity"
             android:label="Recursive Tracking Test"
             android:exported="false" />
             
         <activity
-            android:name=".FrameStreamActivity"
+            android:name=".activities.FrameStreamActivity"
             android:label="Frame Stream Test"
             android:exported="false" />
             
