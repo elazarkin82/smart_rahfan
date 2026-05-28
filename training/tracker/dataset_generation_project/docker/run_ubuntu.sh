@@ -16,4 +16,4 @@ VOLUMES="\
 	-v /home/elazarkin/storage/private:/home/elazarkin/storage/private:ro \
 "
 
-sudo docker run --rm --cpus=16 -e CUDA_VISIBLE_DEVICES=-1 --net=host --env="DISPLAY" ${VOLUMES} -it dataset-generator-cv2-ubuntu24:latest bash -c "${ADD_USER_COMMAND} && bash"
+sudo docker run --rm --cpus=8 -m 20g -e CUDA_VISIBLE_DEVICES=-1 --net=host --env="DISPLAY" ${VOLUMES} -it dataset-generator-cv2-ubuntu24:latest bash -c "${ADD_USER_COMMAND} && bash"

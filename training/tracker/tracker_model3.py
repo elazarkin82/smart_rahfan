@@ -245,17 +245,23 @@ class TargetTracker3:
         if not os.path.exists(dataset_dir):
             raise FileNotFoundError(f"Dataset directory '{dataset_dir}' does not exist.")
             
-        pickle_files = [f for f in os.listdir(dataset_dir) if f.startswith("dataset_") and f.endswith(".pkl")]
+        # 1. Non-recursively find all files with .pkl or .pickle extensions
+        pickle_files = []
+        for f in os.listdir(dataset_dir):
+            file_path = os.path.join(dataset_dir, f)
+            if os.path.isfile(file_path):
+                ext = os.path.splitext(f)[1].lower()
+                if ext in ('.pkl', '.pickle'):
+                    pickle_files.append(f)
+                    
         if not pickle_files:
-            raise FileNotFoundError(f"No pickle files found in '{dataset_dir}'.")
+            raise FileNotFoundError(
+                f"No .pkl or .pickle files found directly in '{dataset_dir}'. "
+                f"Note: Subdirectories were intentionally ignored."
+            )
             
-        def extract_num(filename):
-            try:
-                return int(filename.split("_")[1].split(".")[0])
-            except Exception:
-                return 999999
-                
-        pickle_files.sort(key=extract_num)
+        # 2. Sort lexicographically to ensure stable and deterministic split
+        pickle_files.sort()
         
         val_files = [os.path.join(dataset_dir, f) for f in pickle_files[:eval_pkl_num]]
         train_files = [os.path.join(dataset_dir, f) for f in pickle_files[eval_pkl_num:]]
@@ -266,9 +272,14 @@ class TargetTracker3:
             print("Warning: No training pickles remaining. Using validation files for training.")
             train_files = val_files
             
-        def make_generator(paths):
+        # 3. Dynamic generator that supports per-epoch shuffling of training files
+        def make_generator(paths, shuffle=False):
             def generator():
-                for path in paths:
+                local_paths = list(paths)
+                if shuffle:
+                    import random
+                    random.shuffle(local_paths)
+                for path in local_paths:
                     with open(path, "rb") as f:
                         data = pickle.load(f)
                     inputs = data["inputs"]
@@ -286,32 +297,67 @@ class TargetTracker3:
         )
         
         val_dataset = tf.data.Dataset.from_generator(
-            make_generator(val_files),
+            make_generator(val_files, shuffle=False),
             output_signature=output_signature
         ).prefetch(tf.data.AUTOTUNE)
+        val_dataset.steps = len(val_files)
         
         train_dataset = tf.data.Dataset.from_generator(
-            make_generator(train_files),
+            make_generator(train_files, shuffle=True),
             output_signature=output_signature
         ).prefetch(tf.data.AUTOTUNE)
+        train_dataset.steps = len(train_files)
         
         return train_dataset, val_dataset
+
+    def log(self, message, log_file=None):
+        """
+        Prints a clean message to the console using tqdm.write to avoid breaking
+        active progress bars, and appends it to a log file if specified.
+        """
+        from tqdm import tqdm
+        tqdm.write(message)
+        
+        if log_file:
+            try:
+                parent_dir = os.path.dirname(log_file)
+                if parent_dir and not os.path.exists(parent_dir):
+                    os.makedirs(parent_dir, exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(message + "\n")
+            except Exception as e:
+                tqdm.write(f"Warning: Failed to write to log file '{log_file}': {e}")
 
     def evaluate(self, dataset, loss_fn):
         if self.model is None:
             raise ValueError("Model is not initialized.")
             
         val_loss_avg = tf.keras.metrics.Mean()
-        for inputs, targets in dataset:
+        steps = getattr(dataset, "steps", None)
+        
+        from tqdm import tqdm
+        progress_bar = tqdm(dataset, total=steps, desc="Evaluating", leave=False)
+        
+        for inputs, targets in progress_bar:
             predictions = self.model(inputs, training=False)
             loss_value = loss_fn(targets, predictions)
             val_loss_avg.update_state(loss_value)
             
         return float(val_loss_avg.result())
 
-    def train_epoch(self, dataset, optimizer, loss_fn):
+    def train_epoch(self, dataset, optimizer, loss_fn, epoch, num_epochs):
         epoch_loss_avg = tf.keras.metrics.Mean()
-        for inputs, targets in dataset:
+        steps = getattr(dataset, "steps", None)
+        
+        from tqdm import tqdm
+        progress_bar = tqdm(
+            dataset, 
+            total=steps, 
+            desc=f"Epoch {epoch:03d}/{num_epochs:03d}", 
+            leave=False
+        )
+        
+        for inputs, targets in progress_bar:
             with tf.GradientTape() as tape:
                 predictions = self.model(inputs, training=True)
                 loss_value = loss_fn(targets, predictions)
@@ -320,10 +366,11 @@ class TargetTracker3:
             optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
             
             epoch_loss_avg.update_state(loss_value)
+            progress_bar.set_postfix(loss=float(loss_value))
             
         return float(epoch_loss_avg.result())
 
-    def train(self, train_dataset, val_dataset, lr, num_of_epochs, loss_name="mse", output_path=None, best_train_loss_output=None):
+    def train(self, train_dataset, val_dataset, lr, num_of_epochs, loss_name="mse", output_path=None, best_train_loss_output=None, log_file=None):
         if loss_name == "mse":
             loss_fn = losses.MeanSquaredError()
         elif loss_name == "huber":
@@ -343,11 +390,11 @@ class TargetTracker3:
         optimizer = optimizers.Adam(learning_rate=lr)
         
         epsilon = 1e-12
-        print("Calculating initial score on validation dataset...")
+        self.log("Calculating initial score on validation dataset...", log_file)
         initial_val_loss = self.evaluate(val_dataset, loss_fn)
         best_score = 1.0 / (initial_val_loss + epsilon)
         best_train_loss = float('inf')
-        print(f"Initial Validation Loss: {initial_val_loss:.6f} | Initial Best Score: {best_score:.4f}")
+        self.log(f"Initial Validation Loss: {initial_val_loss:.6f} | Initial Best Score: {best_score:.4f}", log_file)
         
         history = {
             "train_loss": [],
@@ -356,14 +403,14 @@ class TargetTracker3:
         }
         
         for epoch in range(1, num_of_epochs + 1):
-            epoch_loss = self.train_epoch(train_dataset, optimizer, loss_fn)
+            epoch_loss = self.train_epoch(train_dataset, optimizer, loss_fn, epoch, num_of_epochs)
             history["train_loss"].append(epoch_loss)
             
             # Save model if training loss improved (if best_train_loss_output is configured)
             if best_train_loss_output is not None and epoch_loss < best_train_loss:
                 old_train_loss = best_train_loss
                 best_train_loss = epoch_loss
-                print(f"   [TRAIN IMPROVEMENT] Training loss improved from {old_train_loss:.6f} to {best_train_loss:.6f}! Saving clean model to {best_train_loss_output}...")
+                self.log(f"   [TRAIN IMPROVEMENT] Training loss improved from {old_train_loss:.6f} to {best_train_loss:.6f}! Saving clean model to {best_train_loss_output}...", log_file)
                 
                 # Auto-create parent directories if they do not exist
                 parent_dir = os.path.dirname(best_train_loss_output)
@@ -382,7 +429,7 @@ class TargetTracker3:
             history["val_loss"].append(val_loss)
             history["val_score"].append(epoch_score)
             
-            print(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} | Val Loss: {val_loss:.6f} | Score: {epoch_score:.4f}")
+            self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} | Val Loss: {val_loss:.6f} | Score: {epoch_score:.4f}", log_file)
             
             if epoch_score > best_score:
                 old_score = best_score
@@ -393,7 +440,7 @@ class TargetTracker3:
                 else:
                     save_path = f"tracker3_model_score_{best_score:.4f}.keras"
                 
-                print(f"   [IMPROVEMENT] Score improved from {old_score:.4f} to {best_score:.4f}! Saving clean model to {save_path}...")
+                self.log(f"   [IMPROVEMENT] Score improved from {old_score:.4f} to {best_score:.4f}! Saving clean model to {save_path}...", log_file)
                 
                 # Auto-create parent directories if they do not exist
                 parent_dir = os.path.dirname(save_path)
@@ -406,7 +453,7 @@ class TargetTracker3:
                 temp_model.set_weights(self.model.get_weights())
                 temp_model.save(save_path)
                 
-        print("Training completed successfully.")
+        self.log("Training completed successfully.", log_file)
         return history
 
 # =====================================================================
@@ -472,6 +519,12 @@ def main(args_list=None):
         default=None, 
         help="Path to save the best model based on training loss (strips training configs)"
     )
+    train_parser.add_argument(
+        "--log_file", 
+        type=str, 
+        default=None, 
+        help="Path to file where clean training logs will be written"
+    )
     
     args = parser.parse_args(args_list)
     
@@ -501,7 +554,8 @@ def main(args_list=None):
             num_of_epochs=args.num_of_epochs,
             loss_name=args.loss,
             output_path=args.output,
-            best_train_loss_output=args.best_train_loss_output
+            best_train_loss_output=args.best_train_loss_output,
+            log_file=args.log_file
         )
 
 if __name__ == "__main__":

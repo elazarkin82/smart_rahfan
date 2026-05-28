@@ -98,4 +98,4 @@ python3 "${SCRIPT_DIR}/dataset_generator_from_video.py" "${VIDEOS_DIR}" \
     --label_radius "${LABEL_RADIUS}" \
     --hover_prob 0.05 \
     --num_of_samples 16384 \
-    --batch_size 256
+    --batch_size 16

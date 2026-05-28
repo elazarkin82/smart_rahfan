@@ -1,6 +1,7 @@
 #!/bin/env python3
 import os
 import sys
+import gc
 import random
 import pickle
 import argparse
@@ -228,7 +229,8 @@ def compute_epipolar_distance(pt1, pt2, F):
     return abs(a * pt2[0] + b * pt2[1] + c) / denom
 
 def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, feature_type='asift', asift_matcher=None,
-                           ransac_thresh=5.0, min_motion_pc=1.0, min_motion_hp=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75):
+                           ransac_thresh=5.0, min_motion_pc=1.0, min_motion_hp=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75,
+                           keep_debug_info=False):
     """
     Runs SIFT/ASIFT/SURF keypoint detection and matches features across three frames
     (hist -> prev and prev -> curr). Fits a Fundamental Matrix via RANSAC
@@ -246,9 +248,9 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
             "status": "failed",
             "reason": "empty_descriptors",
             "paths": [],
-            "kp_hist": kp_hist if kp_hist else [],
-            "kp_prev": kp_prev if kp_prev else [],
-            "kp_curr": kp_curr if kp_curr else [],
+            "kp_hist": kp_hist if (kp_hist and keep_debug_info) else [],
+            "kp_prev": kp_prev if (kp_prev and keep_debug_info) else [],
+            "kp_curr": kp_curr if (kp_curr and keep_debug_info) else [],
             "triplets": [],
             "inliers": []
         }
@@ -354,6 +356,12 @@ def match_features_triplet(f_hist, f_prev, f_curr, ratio=0.85, min_inliers=6, fe
             pts_curr.append(pt_c)
             kp_triplets.append((idx_hist, idx_prev, idx_curr))
             
+    # Clear SIFT keypoints if not needed to save massive memory
+    if not keep_debug_info:
+        kp_hist = []
+        kp_prev = []
+        kp_curr = []
+
     if len(pts_hist) < min_inliers:
         return {
             "status": "failed",
@@ -1078,12 +1086,12 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
     print(f"Mapped {len(video_lengths)} active videos.\n")
     sys.stdout.flush()
     
-    # Find already completed videos in tmp_raw_extracted
-    processed_pkls = os.listdir(tmp_dir)
+    # Find already completed videos in tmp_raw_extracted using JSON tracking files
+    processed_files = os.listdir(tmp_dir)
     processed_hashes = set()
-    for filename in processed_pkls:
-        if filename.startswith("processed_") and filename.endswith(".pkl"):
-            parts = filename[:-4].split("_")
+    for filename in processed_files:
+        if filename.startswith("processed_") and filename.endswith(".json"):
+            parts = filename[:-5].split("_")
             if len(parts) >= 3:
                 processed_hashes.add(parts[-1])
                 
@@ -1101,8 +1109,8 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
     for idx, path in enumerate(remaining_videos):
         video_name = os.path.basename(path)
         v_hash = hashlib.md5(path.encode()).hexdigest()[:8]
-        pkl_filename = f"processed_{os.path.splitext(video_name)[0]}_{v_hash}.pkl"
-        pkl_path = os.path.join(tmp_dir, pkl_filename)
+        metadata_filename = f"processed_{os.path.splitext(video_name)[0]}_{v_hash}.json"
+        metadata_path = os.path.join(tmp_dir, metadata_filename)
         
         print(f"\n[STAGING STAGE 1] Starting sequential extraction on Video {idx+1}/{len(remaining_videos)}: {video_name}")
         sys.stdout.flush()
@@ -1110,9 +1118,9 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
             print(f"[ERROR] Corrupted video file (failed to open): {os.path.abspath(path)}")
-            # Save empty placeholder so we skip this corrupted file in future runs
-            with open(pkl_path, "wb") as f:
-                pickle.dump([], f)
+            # Save empty placeholder JSON so we skip this corrupted file in future runs
+            with open(metadata_path, "w") as f:
+                json.dump({"video_path": path, "sample_count": 0, "status": "corrupted"}, f)
             continue
             
         total_frames = video_lengths.get(path, 200)
@@ -1121,15 +1129,15 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
         if total_frames < 200:
             print(f"[ERROR] Corrupted or incomplete video file (too few frames): {os.path.abspath(path)}")
             cap.release()
-            with open(pkl_path, "wb") as f:
-                pickle.dump([], f)
+            with open(metadata_path, "w") as f:
+                json.dump({"video_path": path, "sample_count": 0, "status": "too_few_frames"}, f)
             continue
             
         # Step size in frames (default step is 1 second)
         frame_step = int(round(args.temporal_step_seconds * fps))
         gap_k = int(round(fps))  # ~1 second gap between hist and prev
         
-        video_samples = []
+        video_sample_count = 0
         consecutive_failures = 0
         current_frame_idx = 0
         max_start = total_frames - int(fps * 1.5)
@@ -1139,6 +1147,13 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
         successful_frames = 0
         
         while current_frame_idx <= max_start:
+            # Initialize loop variables to None for safe deletion
+            f_hist_full = f_hist_256 = f_hist_proc = None
+            f_prev_full = f_prev_256 = f_prev_proc = None
+            f_curr_full = f_curr_256 = f_curr_proc = None
+            frame_hist_raw = frame_prev_raw = frame_curr_raw = None
+            match_res = None
+            
             # Seek and read hist frame
             cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx)
             ret, frame_hist_raw = cap.read()
@@ -1182,7 +1197,8 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
                 min_motion_hp=args.min_motion_hp,
                 min_texture_std=args.min_texture_std,
                 proc_size=args.proc_size,
-                min_ncc=args.min_ncc
+                min_ncc=args.min_ncc,
+                keep_debug_info=False
             )
             
             frame_yield = 0
@@ -1237,7 +1253,12 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
                                     "curr": c_pt
                                 }
                             }
-                            video_samples.append(sample_data)
+                            # Save individual sample directly to disk to prevent RAM accumulation
+                            sample_filename = f"sample_{v_hash}_{video_sample_count}.pkl"
+                            sample_path = os.path.join(tmp_dir, sample_filename)
+                            with open(sample_path, "wb") as f_out:
+                                pickle.dump(sample_data, f_out)
+                            video_sample_count += 1
                             frame_yield += 1
                             
                 if frame_yield > 0:
@@ -1279,10 +1300,18 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
             
             sys.stdout.write(
                 f"\r[STAGING STAGE 1] Progress: {percent_complete}% ({current_time_str}/{total_time_str}) | "
-                f"Yield: {successful_frames} frames ({len(video_samples)} samples) | "
+                f"Yield: {successful_frames} frames ({video_sample_count} samples) | "
                 f"Rate: {rate:.1f} Hz | ETA Video: {eta_curr_str} | ETA Total: {eta_over_str}   "
             )
             sys.stdout.flush()
+            
+            # Explicit memory cleanup of heavy matrices in loop
+            del f_hist_full, f_hist_256, f_hist_proc
+            del f_prev_full, f_prev_256, f_prev_proc
+            del f_curr_full, f_curr_256, f_curr_proc
+            del frame_hist_raw, frame_prev_raw, frame_curr_raw
+            del match_res
+            gc.collect()
             
             # Safeguard: skip static/bad/untrackable video regions
             if consecutive_failures >= args.max_consecutive_failures:
@@ -1291,12 +1320,20 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
                 
         cap.release()
         
-        # Serialize the chronological pre-processed video file to tmp directory
-        with open(pkl_path, "wb") as f:
-            pickle.dump(video_samples, f)
+        # Write JSON tracking metadata indicating successful completion of the video
+        with open(metadata_path, "w") as f:
+            json.dump({
+                "video_path": path,
+                "sample_count": video_sample_count,
+                "status": "success",
+                "v_hash": v_hash
+            }, f)
             
-        print(f"\n[SUCCESS] Completed Video {idx+1}/{len(remaining_videos)}. Yielded {len(video_samples)} samples. Saved -> {pkl_path}\n")
+        print(f"\n[SUCCESS] Completed Video {idx+1}/{len(remaining_videos)}. Yielded {video_sample_count} samples. Saved completion tracking -> {metadata_path}\n")
         sys.stdout.flush()
+        
+        # Explicit garbage collection after each video
+        gc.collect()
         
     # -------------------------------------------------------------------------
     # STAGE 2: Balanced, Shuffled I.I.D. Training Compilation
@@ -1306,24 +1343,24 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
     print("==========================================================\n")
     sys.stdout.flush()
     
-    # Reload all raw processed pickles from the temporary staging folder
-    raw_pkls = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if f.startswith("processed_") and f.endswith(".pkl")]
+    # Find all JSON completion metadata files from the temporary staging folder
+    raw_jsons = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if f.startswith("processed_") and f.endswith(".json")]
     
-    all_extracted_samples = []
     video_yields = {}
     
-    print("Consolidating all temporary pre-processed pickles...")
-    for pkl_file in raw_pkls:
+    # Gather the filenames of all individual sample pickles
+    sample_files = [f for f in os.listdir(tmp_dir) if f.startswith("sample_") and f.endswith(".pkl")]
+    total_samples = len(sample_files)
+    
+    print("Consolidating all temporary pre-processed sample records...")
+    for json_file in raw_jsons:
         try:
-            with open(pkl_file, "rb") as f:
-                samples = pickle.load(f)
-                if samples:
-                    all_extracted_samples.extend(samples)
-                    video_yields[os.path.basename(pkl_file)] = len(samples)
+            with open(json_file, "r") as f:
+                meta = json.load(f)
+                video_yields[os.path.basename(json_file)] = meta.get("sample_count", 0)
         except Exception as e:
-            print(f"Warning: Could not read temporary pkl file '{pkl_file}' ({e}). Skipping.")
+            print(f"Warning: Could not read temporary json file '{json_file}' ({e}). Skipping.")
             
-    total_samples = len(all_extracted_samples)
     print(f"Total compiled samples extracted from all videos: {total_samples}")
     for v_name, v_yield in video_yields.items():
         print(f" - {v_name}: {v_yield} samples")
@@ -1334,9 +1371,9 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
         print("[ERROR] No valid dataset samples were extracted in Stage 1. Please ensure videos are present and match settings.")
         sys.exit(1)
         
-    # Shuffle all collected samples in place to ensure identical independent distribution (i.i.d.)
-    print("Shuffling all collected samples to guarantee perfect i.i.d. training balance...")
-    random.shuffle(all_extracted_samples)
+    # Shuffle all collected sample filenames globally to guarantee perfect i.i.d. training balance
+    print("Shuffling all collected sample filenames to guarantee perfect i.i.d. training balance...")
+    random.shuffle(sample_files)
     print("Shuffling complete.\n")
     sys.stdout.flush()
     
@@ -1348,13 +1385,14 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
     os.makedirs(args.output_dir, exist_ok=True)
     
     for b in range(num_batches):
-        batch_slice = all_extracted_samples[b * args.batch_size : (b + 1) * args.batch_size]
+        batch_slice = sample_files[b * args.batch_size : (b + 1) * args.batch_size]
         
         # If the last batch is smaller, pad it or wrap around to keep exactly batch_size
         if len(batch_slice) < args.batch_size:
             pad_needed = args.batch_size - len(batch_slice)
-            batch_slice.extend(all_extracted_samples[:pad_needed])
-            
+            for i in range(pad_needed):
+                batch_slice.append(sample_files[i % len(sample_files)])
+                
         hist_frames_batch = []
         prev_frames_batch = []
         curr_frames_batch = []
@@ -1364,16 +1402,24 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
         prev_coords_batch = []
         curr_coords_batch = []
         
-        for sample in batch_slice:
-            hist_frames_batch.append(sample["hist_frame"])
-            prev_frames_batch.append(sample["prev_frame"])
-            curr_frames_batch.append(sample["curr_frame"])
-            target_heatmaps_batch.append(sample["target_heatmap"])
-            
-            hist_coords_batch.append(sample["debug_coords"]["hist"])
-            prev_coords_batch.append(sample["debug_coords"]["prev"])
-            curr_coords_batch.append(sample["debug_coords"]["curr"])
-            
+        for sample_filename in batch_slice:
+            sample_path = os.path.join(tmp_dir, sample_filename)
+            try:
+                with open(sample_path, "rb") as f_in:
+                    sample = pickle.load(f_in)
+                    
+                hist_frames_batch.append(sample["hist_frame"])
+                prev_frames_batch.append(sample["prev_frame"])
+                curr_frames_batch.append(sample["curr_frame"])
+                target_heatmaps_batch.append(sample["target_heatmap"])
+                
+                hist_coords_batch.append(sample["debug_coords"]["hist"])
+                prev_coords_batch.append(sample["debug_coords"]["prev"])
+                curr_coords_batch.append(sample["debug_coords"]["curr"])
+            except Exception as e:
+                print(f"[ERROR] Failed to load sample file '{sample_path}': {e}")
+                sys.exit(1)
+                
         batch_data = {
             "inputs": [
                 np.array(hist_frames_batch, dtype=np.float32),
@@ -1394,6 +1440,11 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
             
         print(f"Generated and saved final batch {b+1}/{num_batches} -> {output_file}")
         sys.stdout.flush()
+        
+        # Explicit memory cleanup of batch lists and gc trigger
+        del batch_data, hist_frames_batch, prev_frames_batch, curr_frames_batch, target_heatmaps_batch
+        del hist_coords_batch, prev_coords_batch, curr_coords_batch
+        gc.collect()
         
     print("\n==========================================================")
     print("=== HIGH-THROUGHPUT TWO-STAGE DATASET GENERATION COMPLETE ===")
