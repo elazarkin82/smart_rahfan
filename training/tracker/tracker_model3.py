@@ -116,7 +116,7 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     Uses safe clipping and avoids division-by-zero gradients.
     """
     # Clip predictions to prevent log(0) and division by zero gradients
-    eps = 1e-12
+    eps = 1e-7
     y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
     
     # Calculate binary cross entropy terms safely
