@@ -1,0 +1,14 @@
+{
+  "proc_size": 1000,
+  "ratio": 0.85,
+  "min_inliers": 6,
+  "ransac_thresh": 5.0,
+  "min_texture_std": 3.0,
+  "min_ncc": 0.75,
+  "target_min_motion": 3.0,
+  "mask_sigma": 30.0,
+  "label_radius": 32.0,
+  "batch_size": 256,
+  "temporal_step_seconds": 1.0,
+  "max_consecutive_failures": 10
+}

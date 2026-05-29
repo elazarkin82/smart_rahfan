@@ -1,0 +1,55 @@
+# =====================================================================
+# Execution Examples for TargetTracker3-Lite (Symmetric 2-Frame Tracker)
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# 1. Symmetric 2-Frame Dataset Generation
+# ---------------------------------------------------------------------
+
+# A. Generate dataset manually utilizing CLI with custom paths and parameters:
+python3 training/tracker/tracker_ver3_lite/dataset_generation_project/dataset_generator_from_video.py \
+    /path/to/your/videos \
+    --output_dir training/tracker/tracker_ver3_lite/dataset_generation_project/video_dataset \
+    --proc_size 1000 \
+    --ratio 0.85 \
+    --min_inliers 6 \
+    --ransac_thresh 5.0 \
+    --target_min_motion 3.0 \
+    --mask_sigma 30.0 \
+    --label_radius 32.0 \
+    --batch_size 256 \
+    --temporal_step_seconds 1.0 \
+    --num_of_samples 16384
+
+# B. Alternatively, execute via the pre-configured centralization script loading defaults from pipeline_config.json:
+bash training/tracker/tracker_ver3_lite/dataset_generation_project/run_generate.sh
+
+
+# ---------------------------------------------------------------------
+# 2. Target Tracker Lite FCN Model Training
+# ---------------------------------------------------------------------
+
+# A. Train directly via CLI with Dice + BCE (dice_bce) loss:
+python3 training/tracker/tracker_ver3_lite/tracker_model.py train \
+    --dataset_dir training/tracker/tracker_ver3_lite/dataset_generation_project/video_dataset \
+    --lr 0.0001 \
+    --num_of_epochs 10 \
+    --loss dice_bce \
+    --eval_pkl_num 4 \
+    --output training/tracker/tracker_ver3_lite/outputs/tracker.keras \
+    --best_train_loss_output training/tracker/tracker_ver3_lite/outputs/tracker_best_train_loss.keras \
+    --log_file training/tracker/tracker_ver3_lite/train.log
+
+# B. Alternatively, run the training using the training shell script:
+bash training/tracker/tracker_ver3_lite/run_tracker_training.sh
+
+
+# ---------------------------------------------------------------------
+# 3. Keras FCN Heatmap Visual Inspector (GUI)
+# ---------------------------------------------------------------------
+
+# Run Tkinter GUI to manually inspect 2-frame pickles, run live inference,
+# and render expected/predicted spatial probability heatmaps side by side:
+python3 training/tracker/tracker_ver3_lite/keras_visualization_test.py \
+    --dataset_dir training/tracker/tracker_ver3_lite/dataset_generation_project/video_dataset/ \
+    --model_path training/tracker/tracker_ver3_lite/outputs/tracker.keras
