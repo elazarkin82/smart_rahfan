@@ -10,5 +10,6 @@
   "label_radius": 32.0,
   "batch_size": 256,
   "temporal_step_seconds": 1.0,
+  "frame_gap_seconds": 1.0,
   "max_consecutive_failures": 10
 }

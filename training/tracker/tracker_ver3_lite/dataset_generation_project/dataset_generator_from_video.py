@@ -132,6 +132,20 @@ def find_video_files(directory):
                 video_paths.append(os.path.join(root, f))
     return video_paths
 
+def is_path_in_inner_5_6(path):
+    """
+    Checks if both hist and curr normalized coordinates are within the inner 5/6 of the frame:
+    [1/12, 11/12] which is approximately [0.0833, 0.9167] in normalized coordinates.
+    """
+    h_x, h_y = path["hist"]
+    c_x, c_y = path["curr"]
+    
+    low = 1.0 / 12.0
+    high = 11.0 / 12.0
+    
+    return (low <= h_x <= high) and (low <= h_y <= high) and (low <= c_x <= high) and (low <= c_y <= high)
+
+
 # =====================================================================
 # Attention Masking and Target Continuous Heatmap Generators
 # =====================================================================
@@ -172,7 +186,7 @@ def generate_exponential_heatmap(coords, size=64, sigma=4.0):
 # Multi-Detector Feature Matching Framework
 # =====================================================================
 
-def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=None, ratio=0.85, min_inliers=6, ransac_thresh=5.0, min_motion=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75):
+def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=None, ratio=0.85, min_inliers=6, ransac_thresh=5.0, min_motion=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75, keep_debug_info=False):
     """
     Performs keypoint extraction and matching for a single specific detector type.
     Handles L2 vs Hamming metric correctly. Returns verified inlier paths.
@@ -232,9 +246,10 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
 
     pts_hist = []
     pts_curr = []
+    kp_triplets = []
 
     # 3. Apply Multi-Stage Geometric & Texture Filters
-    for m in valid_matches:
+    for idx_match, m in enumerate(valid_matches):
         pt_h = kp_hist[m.queryIdx].pt
         pt_c = kp_curr[m.trainIdx].pt
 
@@ -274,6 +289,7 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
 
         pts_hist.append(pt_h)
         pts_curr.append(pt_c)
+        kp_triplets.append((m.queryIdx, m.trainIdx))
 
     if len(pts_hist) < min_inliers:
         return []
@@ -288,6 +304,8 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
 
     mask_flat = mask.ravel()
     inlier_paths = []
+    inlier_indices = []
+    
     for idx, is_inlier in enumerate(mask_flat):
         if is_inlier:
             # Map coordinates back into normalized [0, 1] grid relative to proc_size
@@ -297,14 +315,38 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
                 "hist": h_norm,
                 "curr": c_norm
             })
+            inlier_indices.append(idx)
 
+    if keep_debug_info:
+        # Wrap everything needed to render matches in GUI Mode
+        return {
+            "status": "success",
+            "paths": inlier_paths,
+            "kp_hist": kp_hist,
+            "kp_curr": kp_curr,
+            "triplets": kp_triplets,
+            "inliers": inlier_indices
+        }
+        
     return inlier_paths
 
-def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thresh=5.0, min_motion=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75, asift_matcher=None):
+def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thresh=5.0, min_motion=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75, asift_matcher=None, keep_debug_info=False):
     """
     Executes and aggregates feature matches across multiple detectors (ASIFT, SURF, AKAZE).
     Keeps each matching metric distinct, and then pools verified moving paths together.
     """
+    # If debug info is requested (GUI preview HUD), return detailed matching structures of the first successful type
+    if keep_debug_info:
+        for f_type in ['asift', 'surf', 'akaze']:
+            res = detect_and_match_single_type(
+                f_hist, f_curr, f_type, asift_matcher,
+                ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc,
+                keep_debug_info=True
+            )
+            if isinstance(res, dict) and res.get("status") == "success":
+                return res
+        return {"status": "failed", "paths": [], "kp_hist": [], "kp_curr": [], "triplets": [], "inliers": []}
+
     aggregated_paths = []
     
     # 1. ASIFT matching
@@ -312,23 +354,26 @@ def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thr
         f_hist, f_curr, 'asift', asift_matcher,
         ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc
     )
-    aggregated_paths.extend(paths_asift)
+    if isinstance(paths_asift, list):
+        aggregated_paths.extend(paths_asift)
 
-    # 2. SURF matching (graceful fallback inside function)
+    # 2. SURF matching
     paths_surf = detect_and_match_single_type(
         f_hist, f_curr, 'surf', None,
         ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc
     )
-    aggregated_paths.extend(paths_surf)
+    if isinstance(paths_surf, list):
+        aggregated_paths.extend(paths_surf)
 
     # 3. AKAZE matching
     paths_akaze = detect_and_match_single_type(
         f_hist, f_curr, 'akaze', None,
         ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc
     )
-    aggregated_paths.extend(paths_akaze)
+    if isinstance(paths_akaze, list):
+        aggregated_paths.extend(paths_akaze)
 
-    # Dedup paths that are extremely close in coordinates
+    # Dedup paths
     unique_paths = []
     eps = 1e-4
     for p in aggregated_paths:
@@ -345,15 +390,453 @@ def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thr
     return unique_paths
 
 # =====================================================================
-# Sequence Generation Stage
+# Hover / Jitter Simulation & Helper Drawing Blocks
 # =====================================================================
 
-def is_path_in_inner_2_3(path):
-    hx, hy = path["hist"]
-    cx, cy = path["curr"]
-    margin = 1.0 / 6.0
-    return (margin <= hx <= 1.0 - margin and margin <= hy <= 1.0 - margin and
-            margin <= cx <= 1.0 - margin and margin <= cy <= 1.0 - margin)
+def simulate_hover_jitter(frame_256, coords):
+    """
+    Simulates drone hovering and local camera jitter (gimbal vibrations, wind)
+    by applying small random rotation and translation matrices to a static frame.
+    """
+    theta = np.random.uniform(-3.0, 3.0)  # Random rotation +/- 3 degrees
+    dx = np.random.uniform(-5.0, 5.0)    # Random translation +/- 5 pixels
+    dy = np.random.uniform(-5.0, 5.0)
+    
+    M = cv2.getRotationMatrix2D((128.0, 128.0), theta, 1.0)
+    M[0, 2] += dx
+    M[1, 2] += dy
+    
+    warped_frame = cv2.warpAffine(frame_256, M, (256, 256), borderMode=cv2.BORDER_REPLICATE)
+    
+    x_px = coords[0] * 256.0
+    y_px = coords[1] * 256.0
+    pt = np.array([x_px, y_px, 1.0], dtype=np.float32)
+    warped_pt = np.dot(M, pt)
+    
+    warped_norm = [
+        np.clip(warped_pt[0] / 256.0, 0.0, 1.0),
+        np.clip(warped_pt[1] / 256.0, 0.0, 1.0)
+    ]
+    return warped_frame, warped_norm
+
+def draw_hud_label(img, label, org, color=(0, 255, 0)):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.38
+    thickness = 1
+    (w, h), baseline = cv2.getTextSize(label, font, scale, thickness)
+    
+    y1 = max(0, org[1] - h - 4)
+    y2 = min(img.shape[0], org[1] + baseline)
+    x1 = max(0, org[0] - 4)
+    x2 = min(img.shape[1], org[0] + w + 4)
+    
+    sub_img = img[y1:y2, x1:x2]
+    if sub_img.shape[0] > 0 and sub_img.shape[1] > 0:
+        rect = np.zeros_like(sub_img)
+        rect[:] = 15
+        cv2.addWeighted(sub_img, 0.3, rect, 0.7, 0, sub_img)
+    
+    cv2.putText(img, label, org, font, scale, color, thickness, cv2.LINE_AA)
+
+def draw_epipolar_line(img, line, color, thickness=1):
+    a, b, c = line[0], line[1], line[2]
+    h, w = img.shape[:2]
+    if abs(b) > abs(a):
+        x0 = 0
+        y0 = int(round(-c / b))
+        x1 = w
+        y1 = int(round(-(c + a * w) / b))
+    else:
+        y0 = 0
+        x0 = int(round(-c / a))
+        y1 = h
+        x1 = int(round(-(c + b * h) / a))
+    cv2.line(img, (x0, y0), (x1, y1), color, thickness, cv2.LINE_AA)
+
+# =====================================================================
+# Dashboard Rendering for Symmetrical 2-Frame Pipeline
+# =====================================================================
+
+def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, sift_info=None, proc_size=800, label_radius=32):
+    """
+    Renders a highly symmetric 4x2 grid dashboard (total width 512px, total height 1024px)
+    tailored strictly for Two-Frame Tracking (hist and curr).
+    """
+    h_color = cv2.cvtColor(f_hist_256, cv2.COLOR_GRAY2BGR)
+    c_color = cv2.cvtColor(f_curr_256, cv2.COLOR_GRAY2BGR)
+    
+    # 1. Soft red glow for template attention mask
+    h_mask_bgr = np.zeros_like(h_color)
+    h_mask_bgr[:, :, 2] = (hist_mask[:, :, 0] * 255.0).astype(np.uint8)
+    cv2.addWeighted(h_mask_bgr, 0.50, h_color, 1.0, 0, h_color)
+    
+    # 2. Draw target indicators
+    hx, hy = int(hist_norm[0] * 256), int(hist_norm[1] * 256)
+    cv2.circle(h_color, (hx, hy), 4, (0, 0, 255), -1)  # Red dot for hist anchor
+    
+    cx, cy = int(curr_norm[0] * 256), int(curr_norm[1] * 256)
+    cv2.circle(c_color, (cx, cy), 8, (0, 255, 0), 2)   # Green target ring for curr
+    cv2.circle(c_color, (cx, cy), 2, (0, 255, 0), -1)
+    
+    is_success = (sift_info is not None and sift_info.get("status") == "success")
+    if is_success:
+        status_color = (0, 255, 0)
+    elif sift_info is None:
+        status_color = (0, 255, 255)
+    else:
+        status_color = (0, 0, 255)
+    sift_panel = np.hstack([f_hist_256, f_curr_256])
+    s_color = cv2.cvtColor(sift_panel, cv2.COLOR_GRAY2BGR)
+    
+    inlier_count = 0
+    avg_err = 0.0
+    
+    if sift_info is not None and len(sift_info.get("inliers", [])) > 0:
+        kp_hist = sift_info["kp_hist"]
+        kp_curr = sift_info["kp_curr"]
+        triplets = sift_info["triplets"]
+        inliers = sift_info["inliers"]
+        scale = 256.0 / proc_size
+        
+        # Background inlier lines
+        for color_idx, idx in enumerate(inliers):
+            if color_idx > 0 and idx < len(triplets):
+                trip = triplets[idx]
+                pt_h = kp_hist[trip[0]].pt
+                pt_c = kp_curr[trip[1]].pt
+                
+                p1_h = (int(pt_h[0] * scale), int(pt_h[1] * scale))
+                p2_c = (int(pt_c[0] * scale + 256), int(pt_c[1] * scale))
+                
+                color = (255, 255, 255)
+                cv2.line(s_color, p1_h, p2_c, color, 1, cv2.LINE_AA)
+                cv2.circle(s_color, p1_h, 3, color, -1)
+                cv2.circle(s_color, p2_c, 3, color, -1)
+                
+        # Foreground optimal matching line
+        if len(inliers) > 0:
+            idx = inliers[0]
+            if idx < len(triplets):
+                trip = triplets[idx]
+                pt_h = kp_hist[trip[0]].pt
+                pt_c = kp_curr[trip[1]].pt
+                
+                p1_h = (int(pt_h[0] * scale), int(pt_h[1] * scale))
+                p2_c = (int(pt_c[0] * scale + 256), int(pt_c[1] * scale))
+                
+                color = (255, 0, 0)
+                cv2.line(s_color, p1_h, p2_c, color, 2, cv2.LINE_AA)
+                cv2.circle(s_color, p1_h, 5, color, -1)
+                cv2.circle(s_color, p2_c, 5, color, -1)
+                
+        inlier_count = len(inliers)
+    else:
+        if sift_info is None:
+            cv2.putText(s_color, "HOVER MODE", (150, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(s_color, "Gimbal Jitter Active", (170, 155), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 200, 200), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(s_color, "NO MATCHES FOUND", (140, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+            
+    # 4. Epipolar line on current frame & Telemetry panel
+    epipoles_on_curr = cv2.cvtColor(f_curr_256, cv2.COLOR_GRAY2BGR)
+    telemetry_panel = np.zeros((256, 256, 3), dtype=np.uint8) + 20
+    
+    if sift_info is not None and len(sift_info.get("inliers", [])) >= 5:
+        kp_hist = sift_info["kp_hist"]
+        kp_curr = sift_info["kp_curr"]
+        triplets = sift_info["triplets"]
+        inliers = sift_info["inliers"]
+        scale = 256.0 / proc_size
+        
+        pts_h_256 = []
+        pts_c_256 = []
+        
+        for idx in inliers:
+            if idx < len(triplets):
+                trip = triplets[idx]
+                pt_h = kp_hist[trip[0]].pt
+                pt_c = kp_curr[trip[1]].pt
+                pts_h_256.append([pt_h[0] * scale, pt_h[1] * scale])
+                pts_c_256.append([pt_c[0] * scale, pt_c[1] * scale])
+                
+        pts_h_256 = np.float32(pts_h_256)
+        pts_c_256 = np.float32(pts_c_256)
+        
+        if len(pts_h_256) >= 8:
+            F_256, _ = cv2.findFundamentalMat(pts_h_256, pts_c_256, cv2.FM_RANSAC, 5.0)
+        else:
+            F_256, _ = cv2.findFundamentalMat(pts_h_256, pts_c_256, cv2.FM_LMEDS)
+            
+        if F_256 is not None and F_256.shape == (3, 3):
+            lines_on_curr = cv2.computeCorrespondEpilines(pts_h_256.reshape(-1, 1, 2), 1, F_256)
+            
+            total_err = 0.0
+            err_count = 0
+            
+            for i in range(len(pts_h_256)):
+                pt_c = pts_c_256[i]
+                l_curr = lines_on_curr[i][0]
+                
+                a, b, c = l_curr[0], l_curr[1], l_curr[2]
+                denom = np.sqrt(a**2 + b**2)
+                if denom > 1e-8:
+                    dist = abs(a * pt_c[0] + b * pt_c[1] + c) / denom
+                    total_err += dist
+                    err_count += 1
+                    
+                color = (255, 255, 255) if i > 0 else (255, 0, 0)
+                thickness = 1 if i > 0 else 2
+                radius = 3 if i > 0 else 5
+                
+                draw_epipolar_line(epipoles_on_curr, l_curr, color, thickness)
+                cv2.circle(epipoles_on_curr, (int(pt_c[0]), int(pt_c[1])), radius, color, -1)
+                
+            if err_count > 0:
+                avg_err = total_err / err_count
+                
+    # Draw telemetry HUD console borders
+    cv2.rectangle(telemetry_panel, (0, 0), (255, 255), status_color, 2)
+    
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale_txt = 0.38
+    thickness = 1
+    text_color = (220, 220, 220)
+    label_color = (0, 255, 255)
+    
+    cv2.putText(telemetry_panel, "--- TELEMETRY HUD ---", (45, 25), font, 0.45, status_color, 1, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Proc Size: ", (15, 60), font, scale_txt, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"{proc_size}x{proc_size}", (95, 60), font, scale_txt, text_color, thickness, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Inliers: ", (15, 90), font, scale_txt, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"{inlier_count}", (95, 90), font, scale_txt, text_color, thickness, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Avg Epi Err:", (15, 120), font, scale_txt, label_color, thickness, cv2.LINE_AA)
+    avg_err_str = f"{avg_err:.4f} px" if avg_err > 0.0 else "N/A"
+    cv2.putText(telemetry_panel, avg_err_str, (95, 120), font, scale_txt, text_color, thickness, cv2.LINE_AA)
+    
+    hx_256 = hist_norm[0] * 256.0
+    hy_256 = hist_norm[1] * 256.0
+    cx_256 = curr_norm[0] * 256.0
+    cy_256 = curr_norm[1] * 256.0
+    
+    cv2.putText(telemetry_panel, "Hist Coord:", (15, 155), font, scale_txt, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"({hx_256:.1f}, {hy_256:.1f})", (105, 155), font, scale_txt, text_color, thickness, cv2.LINE_AA)
+    
+    cv2.putText(telemetry_panel, "Curr Coord:", (15, 185), font, scale_txt, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"({cx_256:.1f}, {cy_256:.1f})", (105, 185), font, scale_txt, text_color, thickness, cv2.LINE_AA)
+    
+    status_str = "SUCCESS" if is_success else ("HOVER" if sift_info is None else "FAILED")
+    cv2.putText(telemetry_panel, "Status: ", (15, 220), font, scale_txt, label_color, thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, status_str, (95, 220), font, scale_txt, status_color, 1, cv2.LINE_AA)
+    
+    # 5. Row 4: Pure attention mask & expected target heatmap
+    hist_mask_panel = np.zeros((256, 256, 3), dtype=np.uint8)
+    hist_mask_panel[:, :, 2] = (hist_mask[:, :, 0] * 255.0).astype(np.uint8)
+    
+    expected_heatmap_64 = generate_exponential_heatmap(curr_norm, size=64, sigma=label_radius / 8.0)
+    expected_heatmap_256 = cv2.resize(expected_heatmap_64, (256, 256), interpolation=cv2.INTER_LINEAR)
+    expected_heatmap_panel = np.zeros((256, 256, 3), dtype=np.uint8)
+    expected_heatmap_panel[:, :, 1] = (expected_heatmap_256 * 255.0).astype(np.uint8)
+    
+    # Draw Labels
+    draw_hud_label(h_color, "HIST CONTEXT + SOFT MASK", (10, 240), (0, 0, 255))
+    draw_hud_label(c_color, "CURR CONTEXT (TARGET)", (10, 240), (0, 255, 0))
+    
+    sift_label = "GEOMETRIC CONNECTIONS (HIST -> CURR)" if is_success else "GEOMETRIC FAILURE CONNECTIONS"
+    sift_label_color = (255, 255, 0) if is_success else (0, 128, 255)
+    draw_hud_label(s_color, sift_label, (10, 240), sift_label_color)
+    
+    draw_hud_label(epipoles_on_curr, "EPIPOLAR LINES: HIST ON CURR", (10, 240), (255, 0, 255) if is_success else (0, 0, 255))
+    draw_hud_label(hist_mask_panel, "HIST ATTENTION MASK (RED)", (10, 240), (0, 0, 255))
+    draw_hud_label(expected_heatmap_panel, "EXPECTED HEATMAP (GREEN)", (10, 240), (0, 255, 0))
+    
+    # Assemble final grid
+    row1 = np.hstack([h_color, c_color])
+    row2 = s_color
+    row3 = np.hstack([epipoles_on_curr, telemetry_panel])
+    row4 = np.hstack([hist_mask_panel, expected_heatmap_panel])
+    
+    dashboard = np.vstack([row1, row2, row3, row4])
+    
+    # Header
+    header_bar = np.zeros((35, 512, 3), dtype=np.uint8)
+    title_text = "VIDEO DATASET GENERATOR - PREVIEW HUD (2-FRAME LITE)"
+    title_color = (0, 255, 255) if (is_success or sift_info is None) else (0, 0, 255)
+    
+    cv2.putText(header_bar, title_text, (10, 22), font, 0.40, title_color, 1, cv2.LINE_AA)
+    cv2.putText(header_bar, "[SPACE]: Next | [ENTER]: Auto-run | [ESC/Q]: Exit", (250, 22), font, 0.30, (200, 200, 200), 1, cv2.LINE_AA)
+    
+    final_output = np.vstack([header_bar, dashboard])
+    return final_output
+
+# =====================================================================
+# Real-Time Visualization Preview Pipeline (ASIFT + SURF + AKAZE)
+# =====================================================================
+
+def visualize_pipeline(args, video_paths, asift_matcher):
+    print("\n=== ENTERING HUD PREVIEW MODE (2-FRAME LITE) ===")
+    print("Rendering generated sequences in real-time. No files will be exported to disk.")
+    print("Controls: Press [SPACE] for next single step, [ENTER] to auto-run until success, [ESC/Q] to exit.\n")
+    sys.stdout.flush()
+    
+    try:
+        cv2.namedWindow("Video Dataset Generator Debugger", cv2.WINDOW_AUTOSIZE)
+    except cv2.error as e:
+        print(f"Warning: Could not initialize visual window ({e}).")
+        print("If you are running in a headless environment, please run without '-v' / '--visualize'.")
+        sys.exit(1)
+        
+    num_hover_target = int(args.batch_size * args.hover_prob)
+    num_trans_target = args.batch_size - num_hover_target
+    
+    batch_decisions = [True] * num_hover_target + [False] * num_trans_target
+    random.shuffle(batch_decisions)
+    
+    auto_run_until_success = False
+    attempt_count = 0
+    sample_count = 0
+    
+    while sample_count < args.num_of_samples:
+        attempt_count += 1
+        is_hover = batch_decisions[sample_count % args.batch_size]
+        
+        random_video = random.choice(video_paths)
+        cap = cv2.VideoCapture(random_video)
+        
+        if not cap.isOpened():
+            print(f"[ERROR] Corrupted video file: {os.path.abspath(random_video)}")
+            sys.stdout.flush()
+            continue
+            
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < 200:
+            print(f"[ERROR] Too few frames: {os.path.abspath(random_video)}")
+            sys.stdout.flush()
+            cap.release()
+            continue
+            
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0 or np.isnan(fps):
+            fps = 30.0
+            
+        gap_frames = int(round(args.frame_gap_seconds * fps))
+        max_start = total_frames - int(fps * 1.5)
+        start_frame_idx = random.randint(0, max_start)
+        
+        # Read hist frame
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx)
+        ret, frame_hist_raw = cap.read()
+        if not ret or frame_hist_raw is None:
+            cap.release()
+            continue
+            
+        f_hist_full = to_grayscale(frame_hist_raw)
+        f_hist_256 = cv2.resize(f_hist_full, (256, 256), interpolation=cv2.INTER_AREA)
+        
+        if is_hover:
+            cap.release()
+            sift = cv2.SIFT_create()
+            kp, _ = sift.detectAndCompute(f_hist_256, None)
+            if not kp:
+                continue
+            target_kp = random.choice(kp)
+            target_coords = [target_kp.pt[0] / 256.0, target_kp.pt[1] / 256.0]
+            f_curr_256, curr_coords = simulate_hover_jitter(f_hist_256, target_coords)
+            hist_coords = target_coords
+            sift_match_debug = None
+        else:
+            # Read curr frame
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx + gap_frames)
+            ret_c, frame_curr_raw = cap.read()
+            cap.release()
+            if not ret_c or frame_curr_raw is None:
+                continue
+                
+            f_curr_full = to_grayscale(frame_curr_raw)
+            f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
+            
+            f_hist_proc = cv2.resize(f_hist_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+            f_curr_proc = cv2.resize(f_curr_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+            
+            # Match doublets and retain debug structures for GUI
+            match_res = match_features_doublet(
+                f_hist_proc, f_curr_proc,
+                ratio=args.ratio, min_inliers=args.min_inliers,
+                ransac_thresh=args.ransac_thresh,
+                min_motion=args.target_min_motion,
+                min_texture_std=args.min_texture_std,
+                proc_size=args.proc_size,
+                min_ncc=args.min_ncc,
+                asift_matcher=asift_matcher,
+                keep_debug_info=True
+            )
+            
+            if isinstance(match_res, dict) and match_res.get("status") == "success":
+                selected_path = None
+                for path in match_res["paths"]:
+                    if is_path_in_inner_5_6(path):
+                        selected_path = path
+                        break
+                if selected_path is not None:
+                    hist_coords = selected_path["hist"]
+                    curr_coords = selected_path["curr"]
+                else:
+                    match_res["status"] = "failed"
+                    match_res["reason"] = "no_inlier_in_inner_5_6"
+                    hist_coords = [0.5, 0.5]
+                    curr_coords = [0.5, 0.5]
+            else:
+                hist_coords = [0.5, 0.5]
+                curr_coords = [0.5, 0.5]
+                
+            sift_match_debug = match_res
+            
+        hist_mask = generate_exponential_mask(
+            hist_coords, size=256, sigma=args.mask_sigma
+        )
+        
+        is_success = (sift_match_debug is not None and sift_match_debug.get("status") == "success") or is_hover
+        
+        dashboard = render_dashboard(
+            f_hist_256, f_curr_256,
+            hist_mask, hist_coords, curr_coords,
+            sift_info=sift_match_debug,
+            proc_size=args.proc_size,
+            label_radius=args.label_radius
+        )
+        
+        try:
+            cv2.imshow("Video Dataset Generator Debugger", dashboard)
+            if is_success and auto_run_until_success:
+                auto_run_until_success = False
+            delay = 100 if auto_run_until_success else 0
+            key = cv2.waitKey(delay) & 0xFF
+            
+            if key == 13 or key == 10:
+                auto_run_until_success = True
+            elif key == 32:
+                auto_run_until_success = False
+            elif key == 27 or key == ord('q'):
+                cv2.destroyAllWindows()
+                print("\nHUD Preview Mode exited by user.")
+                sys.exit(0)
+        except cv2.error as e:
+            print(f"\nGUI Error: Could not render visualization window ({e}).")
+            sys.exit(1)
+            
+        if is_success:
+            sample_count += 1
+            print(f"[Sample {sample_count} | Attempt {attempt_count}] success (Hover: {is_hover})")
+            sys.stdout.flush()
+            attempt_count = 0
+        else:
+            print(f"[Sample {sample_count + 1} | Attempt {attempt_count}] Match Failed: {sift_match_debug.get('reason')} - rendering connections.")
+            sys.stdout.flush()
+
+# =====================================================================
+# Production Two-Stage High-Throughput Pipeline
+# =====================================================================
 
 def run_two_stage_pipeline(args, video_paths, asift_matcher):
     print("\n===========================================================")
@@ -361,9 +844,6 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
     print("===========================================================\n")
     sys.stdout.flush()
     
-    # -------------------------------------------------------------------------
-    # STAGE 1: Sequential Extraction of Symmetric 2-Frame Doublets
-    # -------------------------------------------------------------------------
     tmp_dir = os.path.join(args.output_dir, "tmp_raw_extracted")
     os.makedirs(tmp_dir, exist_ok=True)
     
@@ -384,7 +864,7 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
     print(f"[+] Mapped {len(video_lengths)} active videos.\n")
     sys.stdout.flush()
     
-    # Filtering out already completed files for clean resume
+    # Filter completed videos
     processed_files = os.listdir(tmp_dir)
     processed_hashes = set()
     for filename in processed_files:
@@ -425,9 +905,8 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
                 json.dump({"video_path": path, "sample_count": 0, "status": "too_few_frames"}, f)
             continue
             
-        # Frame step corresponds to ~1.0 seconds seek sweeps
         frame_step = int(round(args.temporal_step_seconds * fps))
-        gap_frames = int(round(fps)) # 1.0 second offset between hist and curr
+        gap_frames = int(round(args.frame_gap_seconds * fps))
         
         video_sample_count = 0
         consecutive_failures = 0
@@ -439,13 +918,11 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
         successful_frames = 0
         
         while current_frame_idx <= max_start:
-            # Seek and read hist frame
             cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx)
             ret, frame_hist_raw = cap.read()
             if not ret or frame_hist_raw is None:
                 break
                 
-            # Seek and read curr frame (1.0 second after)
             cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx + gap_frames)
             ret_c, frame_curr_raw = cap.read()
             if not ret_c or frame_curr_raw is None:
@@ -461,7 +938,6 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
             f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
             f_curr_proc = cv2.resize(f_curr_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
             
-            # Match doublets across ASIFT, SURF, and AKAZE
             inlier_paths = match_features_doublet(
                 f_hist_proc, f_curr_proc,
                 ratio=args.ratio, min_inliers=args.min_inliers,
@@ -478,11 +954,10 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
                 consecutive_failures = 0
                 
                 for path_candidate in inlier_paths:
-                    if is_path_in_inner_2_3(path_candidate):
+                    if is_path_in_inner_5_6(path_candidate):
                         h_pt = path_candidate["hist"]
                         c_pt = path_candidate["curr"]
                         
-                        # Generate Continuous Sharp Exponential Cone Mask
                         hist_mask = generate_exponential_mask(
                             h_pt, size=256, sigma=args.mask_sigma
                         )
@@ -490,13 +965,9 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
                         f_hist_norm = f_hist_256.astype(np.float32) / 255.0
                         f_curr_norm = f_curr_256.astype(np.float32) / 255.0
                         
-                        # Pack inputs symmetrically: 
-                        # hist_frame = (256, 256, 2) [Image, Mask]
-                        # curr_frame = (256, 256, 1) [Image only]
                         hist_frame = np.stack([f_hist_norm, hist_mask[:, :, 0]], axis=-1)
                         curr_frame = np.expand_dims(f_curr_norm, axis=-1)
                         
-                        # Generate Continuous Sharp Exponential Target Heatmap
                         target_heatmap = generate_exponential_heatmap(c_pt, size=64, sigma=args.label_radius / 8.0)
                         
                         sample_data = {
@@ -524,7 +995,6 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
                 
             current_frame_idx += frame_step
             
-            # Print live high-fidelity HUD console
             elapsed = time.time() - t_start_video
             rate = doublets_processed / elapsed if elapsed > 0 else 0.0
             
@@ -545,7 +1015,6 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
             )
             sys.stdout.flush()
             
-            # Memory cleaning
             del f_hist_full, f_hist_256, f_hist_proc
             del f_curr_full, f_curr_256, f_curr_proc
             del frame_hist_raw, frame_curr_raw
@@ -553,7 +1022,7 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
             gc.collect()
             
             if consecutive_failures >= args.max_consecutive_failures:
-                print(f"\n[WARNING] Consecutive failures threshold reached ({consecutive_failures}). Skipping video.")
+                print(f"\n[WARNING] Consecutive failures reached ({consecutive_failures}). Skipping video.")
                 break
                 
         cap.release()
@@ -570,9 +1039,7 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
         sys.stdout.flush()
         gc.collect()
         
-    # -------------------------------------------------------------------------
-    # STAGE 2: Shuffled i.i.d. Batch Packaging
-    # -------------------------------------------------------------------------
+    # STAGE 2
     print("\n===========================================================")
     print("=== STAGE 2: SHUFFLED I.I.D. TRAINING DATASET COMPILATION ===")
     print("===========================================================\n")
@@ -670,6 +1137,11 @@ def main():
         help="Output directory path (default: video_dataset)."
     )
     parser.add_argument(
+        "-v", "--visualize",
+        action="store_true",
+        help="Enables interactive preview mode rendering SIFT matches in real-time."
+    )
+    parser.add_argument(
         "--num_of_samples",
         type=int,
         default=16384,
@@ -692,6 +1164,12 @@ def main():
         type=int,
         default=6,
         help="Minimum verified RANSAC inliers to accept a pair (default: 6)."
+    )
+    parser.add_argument(
+        "--hover_prob",
+        type=float,
+        default=0.05,
+        help="Probability of selecting stationary hovering with gimbal camera shake (default: 0.05)."
     )
     parser.add_argument(
         "--mask_sigma",
@@ -742,6 +1220,12 @@ def main():
         help="Temporal sweep step in seconds between chronological seeks (default: 1.0)."
     )
     parser.add_argument(
+        "--frame_gap_seconds",
+        type=float,
+        default=1.0,
+        help="Temporal gap in seconds between hist and curr frames (default: 1.0)."
+    )
+    parser.add_argument(
         "--max_consecutive_failures",
         type=int,
         default=10,
@@ -775,7 +1259,11 @@ def main():
     print(f"[+] Found {len(video_paths)} valid videos.")
     
     asift_matcher = ASIFTMatcher()
-    run_two_stage_pipeline(args, video_paths, asift_matcher)
+    
+    if args.visualize:
+        visualize_pipeline(args, video_paths, asift_matcher)
+    else:
+        run_two_stage_pipeline(args, video_paths, asift_matcher)
 
 if __name__ == "__main__":
     main()
