@@ -13,7 +13,7 @@ import hashlib
 
 
 # =====================================================================
-# Heatmap and Attention Masking Helpers (Matching tracker_model3 exactly)
+# Heatmap and Attention Masking Helpers (Matching tracker_model exactly)
 # =====================================================================
 
 def generate_attention_mask(coords, size=256, mask_type='gaussian', radius=128, sigma=15.0):
@@ -1377,7 +1377,7 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
     print("Shuffling complete.\n")
     sys.stdout.flush()
     
-    # Package into training batch files matching tracker_model3 expectation exactly
+    # Package into training batch files matching tracker_model expectation exactly
     num_batches = int(np.ceil(total_samples / args.batch_size))
     print(f"Packaging {total_samples} samples into {num_batches} batches of size {args.batch_size}...")
     sys.stdout.flush()
@@ -1454,7 +1454,7 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generates training datasets for tracker_model3 directly from real driving/drone videos using ASIFT RANSAC."
+        description="Generates training datasets for tracker_model directly from real driving/drone videos using ASIFT RANSAC."
     )
     parser.add_argument(
         "videos_dir",

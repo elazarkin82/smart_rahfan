@@ -8,9 +8,9 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageTk
 
-class KerasFCNVisualizer3:
+class KerasFCNVisualizer:
     """
-    Tkinter Visual Inspector tailored for TargetTracker3.
+    Tkinter Visual Inspector tailored for TargetTracker.
     Loads pre-generated 2-channel pickles, runs live inference to predict a 64x64 heatmap,
     extracts the sub-pixel coordinate using a CPU-based Center of Mass calculation,
     and overlays target markers dynamically across a 4-panel GUI layout.
@@ -49,7 +49,7 @@ class KerasFCNVisualizer3:
         
         # 4. Configure window properties
         self.root = root
-        self.root.title("Recursive Target Tracker - Keras FCN 3 Heatmap Visual Inspector")
+        self.root.title("Recursive Target Tracker - Keras FCN Heatmap Visual Inspector")
         self.root.geometry("1140x900")  # Expanded height to fit 2 rows comfortably
         self.root.configure(bg="#121212")  # Sleek dark mode background
         self.root.resizable(False, False)
@@ -142,7 +142,7 @@ class KerasFCNVisualizer3:
         # 1. Main Header
         header = tk.Label(
             self.root, 
-            text="Recursive Target Tracker - Keras FCN 3 Heatmap Inference Visualizer", 
+            text="Recursive Target Tracker - Keras FCN Heatmap Inference Visualizer", 
             font=("Outfit", 16, "bold"), 
             bg="#121212", 
             fg="#ffffff"
@@ -182,7 +182,7 @@ class KerasFCNVisualizer3:
         self.status_bar.pack(side="bottom", fill="x")
         
     def load_next_sample(self):
-        self.status_bar.config(text="Loading dataset sample and running FCN 3 inference...", fg="#ffcc00")
+        self.status_bar.config(text="Loading dataset sample and running FCN inference...", fg="#ffcc00")
         self.root.update_idletasks()
         
         try:
@@ -338,7 +338,7 @@ class KerasFCNVisualizer3:
         self.root.destroy()
 
 def main():
-    parser = argparse.ArgumentParser(description="TargetTracker3 Keras FCN Heatmap Visualizer GUI")
+    parser = argparse.ArgumentParser(description="TargetTracker Keras FCN Heatmap Visualizer GUI")
     parser.add_argument(
         "--dataset_dir", 
         default="dataset_generation_project/video_dataset/",
@@ -347,7 +347,7 @@ def main():
     parser.add_argument(
         "--model_path", 
         required=True, 
-        help="Path to the trained tracker3 Keras model (.keras) to load for inference"
+        help="Path to the trained tracker Keras model (.keras) to load for inference"
     )
     args = parser.parse_args()
     
@@ -369,7 +369,7 @@ def main():
         sys.exit(1)
         
     root = tk.Tk()
-    app = KerasFCNVisualizer3(root, dataset_dir, args.model_path)
+    app = KerasFCNVisualizer(root, dataset_dir, args.model_path)
     root.mainloop()
 
 if __name__ == "__main__":

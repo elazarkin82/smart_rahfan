@@ -1,3 +1,3 @@
-from .tracker_model3 import TargetTracker3
+from .tracker_model import TargetTracker
 
-__all__ = ['TargetTracker3']
+__all__ = ['TargetTracker']

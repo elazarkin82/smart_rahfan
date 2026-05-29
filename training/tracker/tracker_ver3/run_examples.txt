@@ -1,5 +1,5 @@
 # =====================================================================
-# Execution Examples for the Fully Convolutional Context-Preserving Tracker (TargetTracker3)
+# Execution Examples for the Fully Convolutional Context-Preserving Tracker (TargetTracker)
 # =====================================================================
 
 # ---------------------------------------------------------------------
@@ -19,22 +19,22 @@ bash training/tracker/tracker_ver3/dataset_generation_project/run_generate.sh
 
 
 # ---------------------------------------------------------------------
-# 2. Target Tracker FCN Model3 Training
+# 2. Target Tracker FCN Model Training
 # ---------------------------------------------------------------------
 
 # A. Train directly via CLI utilizing Dice + Binary Cross Entropy (dice_bce) Loss:
-python3 training/tracker/tracker_ver3/tracker_model3.py train \
+python3 training/tracker/tracker_ver3/tracker_model.py train \
     --dataset_dir video_dataset \
     --lr 0.001 \
     --num_of_epochs 100 \
     --loss dice_bce \
     --eval_pkl_num 4 \
-    --output outputs/tracker3.keras \
-    --best_train_loss_output outputs/tracker3_best_train_loss.keras \
+    --output outputs/tracker.keras \
+    --best_train_loss_output outputs/tracker_best_train_loss.keras \
     --log_file train.log
 
 # B. Alternatively, execute training using the pre-configured training shell script:
-bash training/tracker/tracker_ver3/run_tracker3_training.sh
+bash training/tracker/tracker_ver3/run_tracker_training.sh
 
 
 # ---------------------------------------------------------------------
@@ -43,6 +43,6 @@ bash training/tracker/tracker_ver3/run_tracker3_training.sh
 
 # Run Tkinter GUI to inspect 2-channel pickles, run live inference,
 # and render expected/predicted spatial probability heatmaps side by side:
-python3 training/tracker/tracker_ver3/keras_visualization_test3.py \
+python3 training/tracker/tracker_ver3/keras_visualization_test.py \
     --dataset_dir video_dataset/ \
-    --model_path outputs/tracker3.keras
+    --model_path outputs/tracker.keras

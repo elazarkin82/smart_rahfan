@@ -1,6 +1,6 @@
-# Fully Convolutional Context-Preserving Tracker with Multi-Channel Masking (TargetTracker3)
+# Fully Convolutional Context-Preserving Tracker with Multi-Channel Masking (TargetTracker)
 
-This directory contains the third-generation **Fully Convolutional Network (FCN) Siamese Tracker** (`tracker_model3.py`).
+This directory contains the **Fully Convolutional Network (FCN) Siamese Tracker** (`tracker_model.py`).
 
 By shifting from hard circular image cropping to a **multi-channel context-preserving input architecture**, this model retains the **entire peripheral background** across all frames. Rather than erasing pixels outside the target zone, the previous locations are fed to the model through a separate **attention mask channel**. 
 
@@ -79,7 +79,7 @@ graph TD
 ## 🛠️ Key Architectural Paradigms
 
 ### 1. Multi-Channel Siamese Feature Extraction
-Unlike traditional trackers that feed single-channel images, `TargetTracker3`'s Siamese CNN takes **2-channel inputs**:
+Unlike traditional trackers that feed single-channel images, `TargetTracker`'s Siamese CNN takes **2-channel inputs**:
 * **Channel 0**: The full, unmasked grayscale image. This preserves all context, allowing low-level and high-level filters to track global background movement.
 * **Channel 1**: An attention mask pinpointing the target location in historical and previous frames. For the search frame (`curr`), this mask channel is filled with **zeros** since the target position is unknown.
 
@@ -89,7 +89,7 @@ To prevent artificial high-frequency edges (which binary circular masks suffer f
 * **Gaussian Soft Mask (`generate_gaussian_mask`)**: Smooth Gaussian heatmap with tunable standard deviation ($\sigma$). This smoothly guides the model's focus to the region of interest without creating harsh artificial borders.
 
 ### 3. Separation of Concerns (Dataset Generation)
-Dataset generation logic is fully decoupled from the model script, leaving `tracker_model3.py` entirely focused on model definition, custom loss functions, and high-performance training loops.
+Dataset generation logic is fully decoupled from the model script, leaving `tracker_model.py` entirely focused on model definition, custom loss functions, and high-performance training loops.
 
 ---
 
@@ -109,10 +109,10 @@ To train the model, ensure your external dataset generator outputs `.pkl` batche
 
 Run training using:
 ```bash
-python3 training/tracker/tracker_ver3/tracker_model3.py train \
+python3 training/tracker/tracker_ver3/tracker_model.py train \
     --dataset_dir /path/to/2channel_dataset \
     --lr 0.001 \
     --num_of_epochs 100 \
     --loss dice_bce \
-    --output model3_tracker.keras
+    --output model_tracker.keras
 ```

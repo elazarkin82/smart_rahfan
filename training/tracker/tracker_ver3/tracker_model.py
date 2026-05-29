@@ -128,12 +128,12 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     return tf.reduce_mean(loss)
 
 # =====================================================================
-# Fully Convolutional Target Tracker Class (V3 - Multi-Channel Input)
+# Fully Convolutional Target Tracker Class (Multi-Channel Input)
 # =====================================================================
 
-class TargetTracker3:
+class TargetTracker:
     """
-    A Fully Convolutional recursive target tracker in Keras (V3).
+    A Fully Convolutional recursive target tracker in Keras.
     
     To retain global scene context (essential for learning side-motion/translation cues)
     while guiding model focus, this model:
@@ -220,7 +220,7 @@ class TargetTracker3:
         self.model = models.Model(
             inputs=[hist_input, prev_input, curr_input],
             outputs=output_heatmap,
-            name="TargetTrackerFCN3"
+            name="TargetTrackerFCN"
         )
         
         return self.model
@@ -418,7 +418,7 @@ class TargetTracker3:
                     os.makedirs(parent_dir, exist_ok=True)
                     
                 # In-memory weight transfer to completely strip compiled training configs
-                temp_tracker = TargetTracker3(input_shape=self.input_shape)
+                temp_tracker = TargetTracker(input_shape=self.input_shape)
                 temp_model = temp_tracker.create_model()
                 temp_model.set_weights(self.model.get_weights())
                 temp_model.save(best_train_loss_output)
@@ -438,7 +438,7 @@ class TargetTracker3:
                 if output_path is not None:
                     save_path = output_path
                 else:
-                    save_path = f"tracker3_model_score_{best_score:.4f}.keras"
+                    save_path = f"tracker_model_score_{best_score:.4f}.keras"
                 
                 self.log(f"   [IMPROVEMENT] Score improved from {old_score:.4f} to {best_score:.4f}! Saving clean model to {save_path}...", log_file)
                 
@@ -448,7 +448,7 @@ class TargetTracker3:
                     os.makedirs(parent_dir, exist_ok=True)
                     
                 # In-memory weight transfer to completely strip compiled training configs
-                temp_tracker = TargetTracker3(input_shape=self.input_shape)
+                temp_tracker = TargetTracker(input_shape=self.input_shape)
                 temp_model = temp_tracker.create_model()
                 temp_model.set_weights(self.model.get_weights())
                 temp_model.save(save_path)
@@ -464,7 +464,7 @@ def main(args_list=None):
     import argparse
     import os
     
-    parser = argparse.ArgumentParser(description="TargetTracker3 (FCN Multi-Channel) CLI Tool")
+    parser = argparse.ArgumentParser(description="TargetTracker (FCN Multi-Channel) CLI Tool")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available subcommands")
     
     # Subparser for generate_dataset (Kept as placeholder stub)
@@ -529,15 +529,15 @@ def main(args_list=None):
     args = parser.parse_args(args_list)
     
     if args.command == "generate_dataset":
-        tracker = TargetTracker3()
+        tracker = TargetTracker()
         tracker.generate_dataset()
     elif args.command == "train":
-        train_ds, val_ds = TargetTracker3.load_dataset_from_pickles(
+        train_ds, val_ds = TargetTracker.load_dataset_from_pickles(
             dataset_dir=args.dataset_dir, 
             eval_pkl_num=args.eval_pkl_num
         )
         
-        tracker = TargetTracker3()
+        tracker = TargetTracker()
         
         if args.init_keras_file and os.path.exists(args.init_keras_file):
             import tensorflow as tf
