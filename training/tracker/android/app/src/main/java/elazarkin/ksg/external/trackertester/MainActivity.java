@@ -77,6 +77,37 @@ public class MainActivity extends AppCompatActivity {
             float[] outBuffer
     );
 
+    public static native void cropAndMaskFrameV3(
+            android.graphics.Bitmap srcBitmap,
+            float targetX,
+            float targetY,
+            float cropScale,
+            float maskRadius,
+            boolean useGaussianMask,
+            float gaussianSigma,
+            boolean isSearchFrame,
+            float[] outBuffer
+    );
+
+    public static native void downsampleAndMaskFrameV3(
+            android.graphics.Bitmap srcBitmap,
+            float targetX,
+            float targetY,
+            float maskRadius,
+            boolean useGaussianMask,
+            float gaussianSigma,
+            boolean isSearchFrame,
+            float[] outBuffer
+    );
+
+    public static native void extractYPlaneToBuffer(
+            java.nio.ByteBuffer yBuffer,
+            int width,
+            int height,
+            int rowStride,
+            float[] outBuffer
+    );
+
     public static native float[] calculateCenterOfMass(
             float[] heatmap,
             float threshold

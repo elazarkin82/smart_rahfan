@@ -109,7 +109,7 @@ To train the model, ensure your external dataset generator outputs `.pkl` batche
 
 Run training using:
 ```bash
-python3 training/tracker/tracker_model3.py train \
+python3 training/tracker/tracker_ver3/tracker_model3.py train \
     --dataset_dir /path/to/2channel_dataset \
     --lr 0.001 \
     --num_of_epochs 100 \

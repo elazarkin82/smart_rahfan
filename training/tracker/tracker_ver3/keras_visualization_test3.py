@@ -8,11 +8,7 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageTk
 
-# Add parent directory to path to allow importing tracker module if run directly
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tracker.dataset_visual_test import DatasetVisualizer
-
-class KerasFCNVisualizer3(DatasetVisualizer):
+class KerasFCNVisualizer3:
     """
     Tkinter Visual Inspector tailored for TargetTracker3.
     Loads pre-generated 2-channel pickles, runs live inference to predict a 64x64 heatmap,
@@ -51,12 +47,47 @@ class KerasFCNVisualizer3(DatasetVisualizer):
         self.current_batch_data = None
         self.current_batch_size = 0
         
-        # 4. Call parent class initializer
-        super().__init__(root, dataset_dir)
-        
-        # 5. Customize window properties
+        # 4. Configure window properties
+        self.root = root
         self.root.title("Recursive Target Tracker - Keras FCN 3 Heatmap Visual Inspector")
         self.root.geometry("1140x900")  # Expanded height to fit 2 rows comfortably
+        self.root.configure(bg="#121212")  # Sleek dark mode background
+        self.root.resizable(False, False)
+        
+        # 5. Window closing handler
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        
+        # 6. Build UI layout
+        self.setup_ui()
+        
+        # 7. Bind keyboard events
+        self.root.bind("<space>", lambda e: self.load_next_sample())
+        self.root.bind("<Escape>", lambda e: self.on_close())
+        
+        # 8. Load first sample
+        self.load_next_sample()
+
+    def process_and_draw(self, frame_np, coords_np, circle_color):
+        """
+        Draws outer glowing circle and center dot at target coords and converts to PhotoImage.
+        """
+        # frame_np is shape (256, 256, 2), extract Channel 0
+        img_8u = (frame_np[:, :, 0] * 255.0).astype(np.uint8)
+        
+        # Convert to RGB to allow drawing a colored circle
+        img_rgb = cv2.cvtColor(img_8u, cv2.COLOR_GRAY2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        
+        # Draw target markers
+        draw = ImageDraw.Draw(pil_img)
+        r = 6  # Circle radius
+        x_px = int(coords_np[0] * 256.0)
+        y_px = int(coords_np[1] * 256.0)
+        
+        draw.ellipse([x_px - r, y_px - r, x_px + r, y_px + r], outline=circle_color, width=2)
+        draw.ellipse([x_px - 2, y_px - 2, x_px + 2, y_px + 2], fill=circle_color)
+        
+        return ImageTk.PhotoImage(pil_img)
         
     def create_frame_slot_with_coord(self, parent, label_text):
         container = tk.Frame(parent, bg="#121212", padx=10)

@@ -219,33 +219,39 @@ public class AutoCorrelationActivity extends AppCompatActivity {
         
         long startTime = SystemClock.elapsedRealtime();
 
-        // 1. Allocate input arrays for TargetTracker2 (flat 256*256 floats)
-        float[] histBuffer = new float[256 * 256];
-        float[] prevBuffer = new float[256 * 256];
-        float[] currBuffer = new float[256 * 256];
+        // 1. Allocate input arrays for TargetTracker3 (flat 256*256*2 floats for 2 channels)
+        float[] histBuffer = new float[256 * 256 * 2];
+        float[] prevBuffer = new float[256 * 256 * 2];
+        float[] currBuffer = new float[256 * 256 * 2];
 
         long preStart = SystemClock.elapsedRealtime();
-        // 2. Invoke JNI Preprocessing: Crop and mask using identical captured frame
-        // - hist_frame: scale 0.40f, circular mask 128px
-        MainActivity.cropAndMaskFrame(capturedBitmap, tx, ty, 0.40f, 128.0f, histBuffer);
-        // - prev_frame: scale 0.34f, circular mask 50px
-        MainActivity.cropAndMaskFrame(capturedBitmap, tx, ty, 0.34f, 50.0f, prevBuffer);
-        // - curr_frame: scale 0.28f, unmasked (radius = 0)
-        MainActivity.cropAndMaskFrame(capturedBitmap, tx, ty, 0.28f, 0.0f, currBuffer);
+        // 2. Invoke JNI Preprocessing: Downsample full image (no crop!)
+        // - hist_frame: Gaussian soft mask (sigma = 30.0f) centered at tx, ty
+        MainActivity.downsampleAndMaskFrameV3(capturedBitmap, tx, ty, 128.0f, true, 30.0f, false, histBuffer);
+        // - prev_frame: Gaussian soft mask (sigma = 30.0f) centered at tx, ty
+        MainActivity.downsampleAndMaskFrameV3(capturedBitmap, tx, ty, 50.0f, true, 30.0f, false, prevBuffer);
+        // - curr_frame: search frame (no crop, zeros attention mask)
+        MainActivity.downsampleAndMaskFrameV3(capturedBitmap, tx, ty, 0.0f, false, 0.0f, true, currBuffer);
         long preDuration = SystemClock.elapsedRealtime() - preStart;
 
         // 3. Prepare inputs/outputs for TFLite multiple inputs execution
-        // Reshape flat float arrays to [1][256][256][1] expected by model
-        float[][][][] histInput = new float[1][256][256][1];
-        float[][][][] prevInput = new float[1][256][256][1];
-        float[][][][] currInput = new float[1][256][256][1];
+        // Reshape flat float arrays to [1][256][256][2] expected by model
+        float[][][][] histInput = new float[1][256][256][2];
+        float[][][][] prevInput = new float[1][256][256][2];
+        float[][][][] currInput = new float[1][256][256][2];
 
         for (int i = 0; i < 256 * 256; i++) {
             int y = i / 256;
             int x = i % 256;
-            histInput[0][y][x][0] = histBuffer[i];
-            prevInput[0][y][x][0] = prevBuffer[i];
-            currInput[0][y][x][0] = currBuffer[i];
+            // Channel 0: Downsampled unmasked grayscale
+            histInput[0][y][x][0] = histBuffer[2 * i];
+            prevInput[0][y][x][0] = prevBuffer[2 * i];
+            currInput[0][y][x][0] = currBuffer[2 * i];
+            
+            // Channel 1: Attention mask
+            histInput[0][y][x][1] = histBuffer[2 * i + 1];
+            prevInput[0][y][x][1] = prevBuffer[2 * i + 1];
+            currInput[0][y][x][1] = currBuffer[2 * i + 1];
         }
 
         Object[] inputs = new Object[]{ histInput, prevInput, currInput };
@@ -273,21 +279,10 @@ public class AutoCorrelationActivity extends AppCompatActivity {
 
         long totalDuration = SystemClock.elapsedRealtime() - startTime;
 
-        float dx = predCoords[0]; // predicted X relative to current crop window [0, 1]
-        float dy = predCoords[1]; // predicted Y relative to current crop window [0, 1]
-
-        // 7. Translate predicted relative offset back to absolute image coordinates
-        // Current crop window scale is 0.28f, centered around (tx, ty)
-        float cropScale = 0.28f;
-        float x1 = tx - cropScale / 2.0f;
-        float y1 = ty - cropScale / 2.0f;
-        
-        // Match C++ JNI clamping logic for absolute coordinates
-        x1 = Math.max(0.0f, Math.min(x1, 1.0f - cropScale));
-        y1 = Math.max(0.0f, Math.min(y1, 1.0f - cropScale));
-        
-        float px = x1 + dx * cropScale;
-        float py = y1 + dy * cropScale;
+        // Direct Coordinate Mapping: Since we downsample the FULL frame (no crop),
+        // the Center of Mass normalized position is ALREADY the absolute normalized target position!
+        float px = predCoords[0];
+        float py = predCoords[1];
 
         // 8. Render Results on Screen
         renderOutputs(tx, ty, px, py, flatHeatmap, histBuffer, prevBuffer, currBuffer);
@@ -296,7 +291,7 @@ public class AutoCorrelationActivity extends AppCompatActivity {
         txtLatency.setText(String.format("Latency: JNI Pre:%dms | TFLite:%dms | JNI Post:%dms (Total:%dms)", 
                 preDuration, infDuration, postDuration, totalDuration));
         txtSelectedCoords.setText(String.format("Selected Coordinate: (%.3f, %.3f)", tx, ty));
-        txtPredictedCoords.setText(String.format("Predicted CoM: (%.3f, %.3f) [dx:%.3f, dy:%.3f]", px, py, dx, dy));
+        txtPredictedCoords.setText(String.format("Predicted CoM: (%.3f, %.3f)", px, py));
         
         // Calculate Euclidean offset error in pixels on the source image
         float errX = (px - tx) * capturedBitmap.getWidth();
@@ -368,9 +363,26 @@ public class AutoCorrelationActivity extends AppCompatActivity {
         Bitmap cropBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
         int[] colors = new int[256 * 256];
         for (int i = 0; i < 256 * 256; i++) {
-            int grayVal = (int)(floatBuffer[i] * 255.0f);
+            // Channel 0 is the unmasked grayscale image
+            int grayVal = (int)(floatBuffer[2 * i] * 255.0f);
             grayVal = Math.max(0, Math.min(grayVal, 255));
-            colors[i] = 0xFF000000 | (grayVal << 16) | (grayVal << 8) | grayVal;
+            
+            // Channel 1 is the attention mask
+            float maskVal = floatBuffer[2 * i + 1];
+            
+            // Premium feature: blend the unmasked image with a glowing red overlay for the attention mask
+            int r = grayVal;
+            int g = grayVal;
+            int b = grayVal;
+            
+            if (maskVal > 0.01f) {
+                float alpha = 0.35f * maskVal; // max 35% opacity
+                r = (int) (grayVal * (1.0f - alpha) + 255.0f * alpha);
+                g = (int) (grayVal * (1.0f - alpha));
+                b = (int) (grayVal * (1.0f - alpha));
+            }
+            
+            colors[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
         }
         cropBitmap.setPixels(colors, 0, 256, 0, 0, 256, 256);
         return cropBitmap;
