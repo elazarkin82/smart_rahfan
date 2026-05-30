@@ -191,6 +191,9 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
     Performs keypoint extraction and matching for a single specific detector type.
     Handles L2 vs Hamming metric correctly. Returns verified inlier paths.
     """
+    import time
+    t_start = time.perf_counter()
+    
     # 1. Detect keypoints & descriptors
     if feature_type == 'asift':
         if asift_matcher is None:
@@ -223,6 +226,9 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
         kp_curr, des_curr = detector.detectAndCompute(f_curr, None)
         bf = cv2.BFMatcher(cv2.NORM_L2)
 
+    t_detect = time.perf_counter()
+    detect_ms = (t_detect - t_start) * 1000.0
+
     if des_hist is None or des_curr is None or len(des_hist) < 2 or len(des_curr) < 2:
         return []
 
@@ -234,6 +240,9 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
             m, n = m_list
             if m.distance < ratio * n.distance:
                 valid_matches.append(m)
+
+    t_match = time.perf_counter()
+    match_ms = (t_match - t_detect) * 1000.0
 
     if len(valid_matches) < min_inliers:
         return []
@@ -293,6 +302,9 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
         kp_triplets.append((m.queryIdx, m.trainIdx))
         match_distances.append(m.distance)
 
+    t_filter = time.perf_counter()
+    filter_ms = (t_filter - t_match) * 1000.0
+
     if len(pts_hist) < min_inliers:
         return []
 
@@ -310,6 +322,7 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
                 "distance": float(match_distances[idx])
             })
             inlier_indices.append(idx)
+        ransac_ms = 0.0
     else:
         # 4. RANSAC Epipolar Filtering (Fundamental Matrix)
         pts_hist_np = np.float32(pts_hist)
@@ -334,6 +347,15 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
                     "distance": float(match_distances[idx])
                 })
                 inlier_indices.append(idx)
+        
+        t_ransac = time.perf_counter()
+        ransac_ms = (t_ransac - t_filter) * 1000.0
+
+    if keep_debug_info:
+        t_total = time.perf_counter()
+        total_ms = (t_total - t_start) * 1000.0
+        print(f"      [TIMING] [{feature_type}] Total: {total_ms:.1f}ms (Detect: {detect_ms:.1f}ms | Match: {match_ms:.1f}ms | Filters: {filter_ms:.1f}ms | RANSAC: {ransac_ms:.1f}ms)")
+        sys.stdout.flush()
 
     if keep_debug_info:
         # Wrap everything needed to render matches in GUI Mode
@@ -415,6 +437,9 @@ def match_features_triplet(f_hist, f_mid, f_curr, ratio=0.85, min_inliers=6, ran
     Executes transitive 3-frame matching (hist -> mid -> curr) and aggregates verified moving paths.
     Enforces midpoint directional and velocity coherence (V1 approx V2).
     """
+    import time
+    t_start = time.perf_counter()
+    
     # Relaxed motion threshold for doublet extraction to capture all candidate flows
     # Enforce a small threshold (e.g., 1.5 pixels at 256x256)
     relaxed_min_motion = 1.5
@@ -428,7 +453,14 @@ def match_features_triplet(f_hist, f_mid, f_curr, ratio=0.85, min_inliers=6, ran
             f_mid, f_curr, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=True, disable_ransac=True
         )
         
+        t_doublets = time.perf_counter()
+        doublets_ms = (t_doublets - t_start) * 1000.0
+        
         if res_1["status"] != "success" or res_2["status"] != "success":
+            t_end = time.perf_counter()
+            total_ms = (t_end - t_start) * 1000.0
+            print(f"   [TIMING] [triplet_total] Failed: {total_ms:.1f}ms (Doublets: {doublets_ms:.1f}ms)")
+            sys.stdout.flush()
             return {"status": "failed", "paths": [], "kp_hist": [], "kp_curr": [], "triplets": [], "inliers": []}
             
         paths_1 = res_1["paths"]
@@ -442,7 +474,15 @@ def match_features_triplet(f_hist, f_mid, f_curr, ratio=0.85, min_inliers=6, ran
             f_mid, f_curr, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=False, disable_ransac=True
         )
         
+        t_doublets = time.perf_counter()
+        doublets_ms = (t_doublets - t_start) * 1000.0
+        
         if not paths_1 or not paths_2:
+            if keep_debug_info:
+                t_end = time.perf_counter()
+                total_ms = (t_end - t_start) * 1000.0
+                print(f"   [TIMING] [triplet_total] Failed: {total_ms:.1f}ms (Doublets: {doublets_ms:.1f}ms)")
+                sys.stdout.flush()
             return []
 
     # Transitive Join of paths where midpoint coordinates represent the same physical keypoint
@@ -508,6 +548,13 @@ def match_features_triplet(f_hist, f_mid, f_curr, ratio=0.85, min_inliers=6, ran
                     "distance": p1.get("distance", 0.0) + p2.get("distance", 0.0)
                 })
                 break
+
+    if keep_debug_info:
+        t_end = time.perf_counter()
+        join_ms = (t_end - t_doublets) * 1000.0
+        total_ms = (t_end - t_start) * 1000.0
+        print(f"   [TIMING] [triplet_total] Total: {total_ms:.1f}ms (Doublets: {doublets_ms:.1f}ms | Join/Coherence: {join_ms:.1f}ms)")
+        sys.stdout.flush()
 
     if keep_debug_info:
         if len(joined_paths) < min_inliers:
@@ -730,6 +777,10 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
                     cv2.circle(s_color, p1_canvas, int(round(5 * f_scale)), (0, 0, 255), -1)
                     cv2.circle(s_color, p2_canvas, int(round(5 * f_scale)), (0, 255, 255), -1)
                     cv2.circle(s_color, p3_canvas, int(round(5 * f_scale)), (0, 255, 0), -1)
+                    
+                    # Draw active flow vector on flow_panel (Column 4)
+                    cv2.line(flow_panel, p1_h, p3_c, (0, 255, 255), max(1, int(round(2 * f_scale))), cv2.LINE_AA)
+                    cv2.circle(flow_panel, p1_h, int(round(4 * f_scale)), (0, 0, 255), -1)
                 else:
                     # Background matches: thin connections
                     cv2.line(s_color, p1_canvas, p2_canvas, (0, 0, 150), 1, cv2.LINE_AA)
@@ -737,6 +788,10 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
                     cv2.circle(s_color, p1_canvas, int(round(2 * f_scale)), (0, 0, 150), -1)
                     cv2.circle(s_color, p2_canvas, int(round(2 * f_scale)), (0, 150, 150), -1)
                     cv2.circle(s_color, p3_canvas, int(round(2 * f_scale)), (0, 150, 0), -1)
+                    
+                    # Draw background flow vector on flow_panel (Column 4)
+                    cv2.line(flow_panel, p1_h, p3_c, (0, 255, 0), 1, cv2.LINE_AA)
+                    cv2.circle(flow_panel, p1_h, int(round(2 * f_scale)), (0, 0, 255), -1)
             else:
                 p2_c_canvas = (px_c + h_size, py_c)
                 
@@ -829,10 +884,13 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
         pts_h_s = np.float32(pts_h_s)
         pts_c_s = np.float32(pts_c_s)
         
-        if len(pts_h_s) >= 8:
-            F_s, _ = cv2.findFundamentalMat(pts_h_s, pts_c_s, cv2.FM_RANSAC, 5.0 * (float(s_size) / 256.0))
+        if is_3frame:
+            F_s = None
         else:
-            F_s, _ = cv2.findFundamentalMat(pts_h_s, pts_c_s, cv2.FM_LMEDS)
+            if len(pts_h_s) >= 8:
+                F_s, _ = cv2.findFundamentalMat(pts_h_s, pts_c_s, cv2.FM_RANSAC, 5.0 * (float(s_size) / 256.0))
+            else:
+                F_s, _ = cv2.findFundamentalMat(pts_h_s, pts_c_s, cv2.FM_LMEDS)
             
         if F_s is not None and F_s.shape == (3, 3):
             lines_on_curr = cv2.computeCorrespondEpilines(pts_h_s.reshape(-1, 1, 2), 1, F_s)
@@ -860,6 +918,13 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
                 
             if err_count > 0:
                 avg_err = total_err / err_count
+        else:
+            # 3-frame mode or failed F-matrix: draw match circles directly without epipolar lines
+            for i in range(len(pts_h_s)):
+                pt_c = pts_c_s[i]
+                color = (0, 255, 0) if i > 0 else (255, 0, 0)
+                radius = 2 if i > 0 else 3
+                cv2.circle(epipoles_on_curr, (int(pt_c[0]), int(pt_c[1])), radius, color, -1)
                 
     cv2.rectangle(epipoles_on_curr, (0, 0), (s_size - 1, s_size - 1), (255, 0, 255) if is_success else (0, 0, 255), 1)
     
@@ -877,8 +942,11 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
         cv2.putText(telemetry_panel, f"Rank: {match_index+1}/{total_matches}", (int(10 * telemetry_scale), int(80 * telemetry_scale)), font, telemetry_font_scale, text_color, telemetry_thickness, cv2.LINE_AA)
         cv2.putText(telemetry_panel, f"Dist: {match_dist:.3f}", (int(10 * telemetry_scale), int(110 * telemetry_scale)), font, telemetry_font_scale, label_color, telemetry_thickness, cv2.LINE_AA)
     else:
-        avg_err_str = f"EpiErr: {avg_err:.2f}" if avg_err > 0.0 else "EpiErr: N/A"
-        cv2.putText(telemetry_panel, avg_err_str, (int(10 * telemetry_scale), int(80 * telemetry_scale)), font, telemetry_font_scale, text_color, telemetry_thickness, cv2.LINE_AA)
+        if is_3frame:
+            cv2.putText(telemetry_panel, "MidErr: N/A", (int(10 * telemetry_scale), int(80 * telemetry_scale)), font, telemetry_font_scale, text_color, telemetry_thickness, cv2.LINE_AA)
+        else:
+            avg_err_str = f"EpiErr: {avg_err:.2f}" if avg_err > 0.0 else "EpiErr: N/A"
+            cv2.putText(telemetry_panel, avg_err_str, (int(10 * telemetry_scale), int(80 * telemetry_scale)), font, telemetry_font_scale, text_color, telemetry_thickness, cv2.LINE_AA)
         
     # Mask Panel
     hist_mask_s = cv2.resize(hist_mask, (s_size, s_size), interpolation=cv2.INTER_LINEAR)
@@ -906,8 +974,8 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
     else:
         draw_hud_label(s_color, "CURR FRAME", (int(10 * f_scale) + h_size, int(25 * f_scale)), (0, 255, 255), scale=font_scale_h, thickness=thickness_h)
         
-    if not is_3frame:
-        draw_hud_label(flow_panel, "FLOW VECTORS: HIST TO CURR", (int(10 * f_scale), int((h_size - 19) * f_scale)), (0, 255, 255) if is_success else (0, 0, 255), scale=font_scale_h, thickness=thickness_h)
+    # Always draw the Flow Panel label
+    draw_hud_label(flow_panel, "FLOW VECTORS: HIST TO CURR", (int(10 * f_scale), int((h_size - 19) * f_scale)), (0, 255, 255) if is_success else (0, 0, 255), scale=font_scale_h, thickness=thickness_h)
     
     # 8. Spacer panels for Row 2 (s_size x s_size each)
     spacer_s = np.zeros((s_size, s_size, 3), dtype=np.uint8) + 15
@@ -963,6 +1031,7 @@ def visualize_pipeline(args, video_paths, asift_matcher):
     sample_count = 0
     
     while sample_count < args.num_of_samples:
+        t_frame_start = time.perf_counter()
         attempt_count += 1
         is_hover = batch_decisions[sample_count % args.batch_size]
         
@@ -1015,6 +1084,11 @@ def visualize_pipeline(args, video_paths, asift_matcher):
                 f_curr_256, curr_coords = simulate_hover_jitter(f_hist_256, target_coords)
             hist_coords = target_coords
             sift_match_debug = None
+            
+            t_prep = time.perf_counter()
+            prep_ms = (t_prep - t_frame_start) * 1000.0
+            match_ms = 0.0
+            t_match = t_prep
         else:
             # Read curr frame
             if args.filter_mode in ["midpoint", "both"]:
@@ -1051,6 +1125,9 @@ def visualize_pipeline(args, video_paths, asift_matcher):
             f_hist_proc = cv2.resize(f_hist_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
             f_curr_proc = cv2.resize(f_curr_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
             
+            t_prep = time.perf_counter()
+            prep_ms = (t_prep - t_frame_start) * 1000.0
+            
             # Match features and retain debug structures for GUI
             if args.filter_mode in ["midpoint", "both"]:
                 active_min_ncc = args.min_ncc if args.filter_mode == "both" else -1.0
@@ -1079,6 +1156,9 @@ def visualize_pipeline(args, video_paths, asift_matcher):
                     asift_matcher=asift_matcher,
                     keep_debug_info=True
                 )
+            
+            t_match = time.perf_counter()
+            match_ms = (t_match - t_prep) * 1000.0
             
             if isinstance(match_res, dict) and match_res.get("status") == "success":
                 valid_paths = [p for p in match_res["paths"] if is_path_in_inner_5_6(p)]
@@ -1132,6 +1212,13 @@ def visualize_pipeline(args, video_paths, asift_matcher):
             f_mid_256=f_mid_256,
             filter_mode=args.filter_mode
         )
+        
+        t_hud = time.perf_counter()
+        hud_ms = (t_hud - t_match) * 1000.0
+        total_frame_ms = (t_hud - t_frame_start) * 1000.0
+        
+        print(f"[TIMING] Frame {sample_count + 1} (Attempt {attempt_count}) - Prep: {prep_ms:.1f}ms | Match: {match_ms:.1f}ms | HUD: {hud_ms:.1f}ms | Total: {total_frame_ms:.1f}ms")
+        sys.stdout.flush()
         
         try:
             cv2.imshow("Video Dataset Generator Debugger", dashboard)

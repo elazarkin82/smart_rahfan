@@ -1,18 +1,18 @@
 {
-  "proc_size": 1000,
-  "ratio": 0.95,
-  "min_inliers": 6,
+  "proc_size": 480,
+  "ratio": 0.85,
+  "min_inliers": 4,
   "ransac_thresh": 2.0,
-  "min_texture_std": 2.0,
+  "min_texture_std": 1.2,
   "min_ncc": 0.85,
-  "target_min_motion": 5.0,
+  "target_min_motion": 3.0,
   "mask_sigma": 30.0,
   "label_radius": 32.0,
   "batch_size": 256,
-  "temporal_step_seconds": 1.0,
-  "frame_gap_seconds": 1.0,
+  "temporal_step_seconds": 2.0,
+  "frame_gap_seconds": 2.0,
   "max_consecutive_failures": 10,
-  "filter_mode": "midpoint",
-  "midpoint_angle_thresh": 0.95,
-  "midpoint_dist_tolerance": 5.0
+  "filter_mode": "both",
+  "midpoint_angle_thresh": 0.90,
+  "midpoint_dist_tolerance": 2.5
 }
