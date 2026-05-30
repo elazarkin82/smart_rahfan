@@ -392,6 +392,134 @@ def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thr
 
     return unique_paths
 
+def match_features_triplet(f_hist, f_mid, f_curr, ratio=0.85, min_inliers=6, ransac_thresh=5.0, min_motion=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75, asift_matcher=None, keep_debug_info=False, midpoint_angle_thresh=0.85, midpoint_dist_tolerance=3.0):
+    """
+    Executes transitive 3-frame matching (hist -> mid -> curr) and aggregates verified moving paths.
+    Enforces midpoint directional and velocity coherence (V1 approx V2).
+    """
+    # Relaxed motion threshold for doublet extraction to capture all candidate flows
+    # Enforce a small threshold (e.g., 1.5 pixels at 256x256)
+    relaxed_min_motion = 1.5
+    
+    if keep_debug_info:
+        # In HUD visualize mode, we extract detailed matches for a single feature type, but try them in order
+        res_1 = match_features_doublet(
+            f_hist, f_mid, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=True
+        )
+        res_2 = match_features_doublet(
+            f_mid, f_curr, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=True
+        )
+        
+        if res_1["status"] != "success" or res_2["status"] != "success":
+            return {"status": "failed", "paths": [], "kp_hist": [], "kp_curr": [], "triplets": [], "inliers": []}
+            
+        paths_1 = res_1["paths"]
+        paths_2 = res_2["paths"]
+    else:
+        # Production mode: returns lists of paths aggregated across ASIFT, SURF, and AKAZE
+        paths_1 = match_features_doublet(
+            f_hist, f_mid, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=False
+        )
+        paths_2 = match_features_doublet(
+            f_mid, f_curr, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=False
+        )
+        
+        if not paths_1 or not paths_2:
+            return []
+
+    # Transitive Join of paths where midpoint coordinates represent the same physical keypoint
+    joined_paths = []
+    
+    scale_factor = proc_size / 256.0
+    scaled_min_motion = min_motion * scale_factor
+    scaled_tolerance = midpoint_dist_tolerance * scale_factor
+    
+    for p1 in paths_1:
+        p1_mid = p1["curr"]
+        
+        for p2 in paths_2:
+            p2_mid = p2["hist"]
+            
+            # Compute Euclidean distance in pixels at proc_size
+            dx = (p1_mid[0] - p2_mid[0]) * proc_size
+            dy = (p1_mid[1] - p2_mid[1]) * proc_size
+            dist = np.sqrt(dx**2 + dy**2)
+            
+            if dist < 1.5:  # Tolerance threshold for matching same keypoint on Mid frame
+                # Enforce Coherence Constraints:
+                # V1 vector (hist -> mid) in pixels at proc_size
+                v1_x = (p1_mid[0] - p1["hist"][0]) * proc_size
+                v1_y = (p1_mid[1] - p1["hist"][1]) * proc_size
+                
+                # V2 vector (mid -> curr) in pixels at proc_size
+                v2_x = (p2["curr"][0] - p2_mid[0]) * proc_size
+                v2_y = (p2["curr"][1] - p2_mid[1]) * proc_size
+                
+                mag_1 = np.sqrt(v1_x**2 + v1_y**2)
+                mag_2 = np.sqrt(v2_x**2 + v2_y**2)
+                
+                # Enforce required motion on both half-intervals (soft checks)
+                if mag_1 < 1.0 or mag_2 < 1.0:
+                    continue
+                    
+                # Cosine similarity for direction similarity (Direction Consistency)
+                dot_prod = v1_x * v2_x + v1_y * v2_y
+                if mag_1 * mag_2 > 1e-8:
+                    cos_theta = dot_prod / (mag_1 * mag_2)
+                else:
+                    cos_theta = 0.0
+                    
+                if cos_theta < midpoint_angle_thresh:
+                    continue
+                    
+                # Velocity tolerance (Magnitude Consistency) - properly scaled
+                if abs(mag_1 - mag_2) > scaled_tolerance:
+                    continue
+                
+                # Enforce the full required motion on the total displacement (hist -> curr)
+                v_total_x = (p2["curr"][0] - p1["hist"][0]) * proc_size
+                v_total_y = (p2["curr"][1] - p1["hist"][1]) * proc_size
+                mag_total = np.sqrt(v_total_x**2 + v_total_y**2)
+                if mag_total < scaled_min_motion:
+                    continue
+                    
+                joined_paths.append({
+                    "hist": p1["hist"],
+                    "mid": p1_mid,
+                    "curr": p2["curr"],
+                    "distance": p1.get("distance", 0.0) + p2.get("distance", 0.0)
+                })
+                break
+
+    if keep_debug_info:
+        if len(joined_paths) < min_inliers:
+            return {"status": "failed", "paths": [], "kp_hist": [], "kp_curr": [], "triplets": [], "inliers": []}
+            
+        # Reconstruct clean debugging structures using the final joined paths to ensure 100% HUD alignment
+        kp_hist_reconstructed = []
+        kp_curr_reconstructed = []
+        triplets_reconstructed = []
+        
+        for idx, p in enumerate(joined_paths):
+            # Create synthetic keypoint coordinates at proc_size
+            mid_px = (p["mid"][0] * proc_size, p["mid"][1] * proc_size)
+            curr_px = (p["curr"][0] * proc_size, p["curr"][1] * proc_size)
+            
+            kp_hist_reconstructed.append(cv2.KeyPoint(mid_px[0], mid_px[1], 10.0))
+            kp_curr_reconstructed.append(cv2.KeyPoint(curr_px[0], curr_px[1], 10.0))
+            triplets_reconstructed.append((idx, idx))
+            
+        return {
+            "status": "success",
+            "paths": joined_paths,
+            "kp_hist": kp_hist_reconstructed,
+            "kp_curr": kp_curr_reconstructed,
+            "triplets": triplets_reconstructed,
+            "inliers": list(range(len(joined_paths)))
+        }
+        
+    return joined_paths if len(joined_paths) >= min_inliers else []
+
 # =====================================================================
 # Hover / Jitter Simulation & Helper Drawing Blocks
 # =====================================================================
@@ -458,11 +586,13 @@ def draw_epipolar_line(img, line, color, thickness=1):
 # Dashboard Rendering for Symmetrical 2-Frame Pipeline
 # =====================================================================
 
-def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, sift_info=None, proc_size=800, label_radius=32, match_index=0, total_matches=0, match_dist=0.0):
+def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, sift_info=None, proc_size=800, label_radius=32, match_index=0, total_matches=0, match_dist=0.0, f_mid_256=None, filter_mode="ncc"):
     """
-    Renders a dynamic, resolution-generic 2-row HUD dashboard tailored strictly for Two-Frame Siamese Tracking.
-    All dimensions (panels, font scales, text positions) are computed dynamically in real time based on proc_size.
+    Renders a dynamic, resolution-generic 2-row HUD dashboard tailored for Two-Frame/Three-Frame Siamese Tracking.
+    All dimensions (panels, font scales, text positions) are computed dynamically in real time based on physical screen resolution.
     """
+    is_3frame = (f_mid_256 is not None and filter_mode in ["midpoint", "both"])
+    
     # 1. Dynamic Screen Resolution Detection (cached on the function to prevent Tkinter window rebuild overhead)
     if not hasattr(render_dashboard, "W"):
         try:
@@ -482,7 +612,9 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
         limit_w_by_height = int((screen_h * 0.80 - 35) * 36 / 13)
         
         target_W = min(limit_w_by_width, limit_w_by_height)
-        W = int(round(target_W / 36.0)) * 36
+        
+        # Round W to a multiple of 180 (perfectly divisible by 4, 5, and 9)
+        W = int(round(target_W / 180.0)) * 180
         W = max(W, 720) # Clamp minimum width to 720px
         
         render_dashboard.W = W
@@ -490,7 +622,10 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
     W = render_dashboard.W
     
     # Calculate high-res (Row 1) and compact (Row 2) panel sizes
-    h_size = W // 4
+    if is_3frame:
+        h_size = W // 5
+    else:
+        h_size = W // 4
     s_size = W // 9
     
     # Proportional scaling factors for text and drawing elements
@@ -520,16 +655,22 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
     else:
         status_color = (0, 0, 255)
         
-    sift_panel = np.hstack([f_hist_h, f_curr_h])
-    s_color = cv2.cvtColor(sift_panel, cv2.COLOR_GRAY2BGR)
+    flow_panel = cv2.cvtColor(f_hist_h, cv2.COLOR_GRAY2BGR)
     
+    if is_3frame:
+        f_mid_h = cv2.resize(f_mid_256, (h_size, h_size), interpolation=cv2.INTER_LINEAR)
+        m_color = cv2.cvtColor(f_mid_h, cv2.COLOR_GRAY2BGR)
+        sift_panel = np.hstack([f_hist_h, f_mid_h, f_curr_h])
+        s_color = cv2.cvtColor(sift_panel, cv2.COLOR_GRAY2BGR)
+    else:
+        sift_panel = np.hstack([f_hist_h, f_curr_h])
+        s_color = cv2.cvtColor(sift_panel, cv2.COLOR_GRAY2BGR)
+        m_color = None
+        
     inlier_count = 0
     avg_err = 0.0
     
-    # Flow Vector Panel (starts as copy of f_hist_h)
-    flow_panel = cv2.cvtColor(f_hist_h, cv2.COLOR_GRAY2BGR)
-    
-    sift_label = "GEOMETRIC CONNECTIONS (HIST -> CURR)" if is_success else "GEOMETRIC FAILURE CONNECTIONS"
+    sift_label = "GEOMETRIC CONNECTIONS (HIST -> MID -> CURR)" if is_success else "GEOMETRIC FAILURE CONNECTIONS"
     sift_label_color = (255, 255, 0) if is_success else (0, 128, 255)
     
     # 3. Draw matching keypoint targets on main panels dynamically scaled to h_size
@@ -544,39 +685,71 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
             py_c = int(p["curr"][1] * h_size)
             
             p1_h = (px_h, py_h)
-            p2_c = (px_c + h_size, py_c)
-            p2_flow = (px_c, py_c)
+            p3_c = (px_c, py_c)
             
             is_active = (abs(p["hist"][0] - hist_norm[0]) < 1e-5 and abs(p["hist"][1] - hist_norm[1]) < 1e-5)
             
-            if is_active:
-                # Active target: draw larger indicators on Row 1 context images
-                cv2.circle(h_color, p1_h, int(round(5 * f_scale)), (0, 0, 255), -1)
-                cv2.circle(c_color, p2_flow, int(round(8 * f_scale)), (0, 255, 0), max(1, int(round(2 * f_scale))))
-                cv2.circle(c_color, p2_flow, int(round(2 * f_scale)), (0, 255, 0), -1)
+            if is_3frame:
+                px_m = int(p["mid"][0] * h_size)
+                py_m = int(p["mid"][1] * h_size)
+                p2_m = (px_m, py_m)
                 
-                # Active match: thick blue connection on Row 1 Match panel
-                cv2.line(s_color, p1_h, p2_c, (255, 0, 0), max(1, int(round(2 * f_scale))), cv2.LINE_AA)
-                cv2.circle(s_color, p1_h, int(round(5 * f_scale)), (255, 0, 0), -1)
-                cv2.circle(s_color, p2_c, int(round(5 * f_scale)), (255, 0, 0), -1)
+                # Coordinates on unified 3-frame s_color canvas:
+                p1_canvas = p1_h
+                p2_canvas = (px_m + h_size, py_m)
+                p3_canvas = (px_c + 2 * h_size, py_c)
                 
-                # Active flow vector: thick yellow vector on Row 1 Flow panel
-                cv2.line(flow_panel, p1_h, p2_flow, (0, 255, 255), max(1, int(round(2 * f_scale))), cv2.LINE_AA)
-                cv2.circle(flow_panel, p1_h, int(round(4 * f_scale)), (0, 0, 255), -1)
+                if is_active:
+                    # Draw indicators on individual context frames
+                    cv2.circle(h_color, p1_h, int(round(5 * f_scale)), (0, 0, 255), -1)
+                    cv2.circle(m_color, p2_m, int(round(5 * f_scale)), (0, 255, 255), -1)
+                    cv2.circle(c_color, p3_c, int(round(8 * f_scale)), (0, 255, 0), max(1, int(round(2 * f_scale))))
+                    cv2.circle(c_color, p3_c, int(round(2 * f_scale)), (0, 255, 0), -1)
+                    
+                    # Draw thick connecting trajectories: Hist->Mid (Red), Mid->Curr (Green)
+                    cv2.line(s_color, p1_canvas, p2_canvas, (0, 0, 255), max(1, int(round(2 * f_scale))), cv2.LINE_AA)
+                    cv2.line(s_color, p2_canvas, p3_canvas, (0, 255, 0), max(1, int(round(2 * f_scale))), cv2.LINE_AA)
+                    cv2.circle(s_color, p1_canvas, int(round(5 * f_scale)), (0, 0, 255), -1)
+                    cv2.circle(s_color, p2_canvas, int(round(5 * f_scale)), (0, 255, 255), -1)
+                    cv2.circle(s_color, p3_canvas, int(round(5 * f_scale)), (0, 255, 0), -1)
+                else:
+                    # Background matches: thin connections
+                    cv2.line(s_color, p1_canvas, p2_canvas, (0, 0, 150), 1, cv2.LINE_AA)
+                    cv2.line(s_color, p2_canvas, p3_canvas, (0, 150, 0), 1, cv2.LINE_AA)
+                    cv2.circle(s_color, p1_canvas, int(round(2 * f_scale)), (0, 0, 150), -1)
+                    cv2.circle(s_color, p2_canvas, int(round(2 * f_scale)), (0, 150, 150), -1)
+                    cv2.circle(s_color, p3_canvas, int(round(2 * f_scale)), (0, 150, 0), -1)
             else:
-                # Background matches: draw smaller indicators on Row 1 context images
-                cv2.circle(h_color, p1_h, int(round(3 * f_scale)), (0, 0, 180), -1)
-                cv2.circle(c_color, p2_flow, int(round(5 * f_scale)), (0, 180, 0), 1)
-                cv2.circle(c_color, p2_flow, int(round(1 * f_scale)), (0, 180, 0), -1)
+                p2_c_canvas = (px_c + h_size, py_c)
                 
-                # Background matches: thin white connections on Row 1 Match panel
-                cv2.line(s_color, p1_h, p2_c, (220, 220, 220), 1, cv2.LINE_AA)
-                cv2.circle(s_color, p1_h, int(round(3 * f_scale)), (220, 220, 220), -1)
-                cv2.circle(s_color, p2_c, int(round(3 * f_scale)), (220, 220, 220), -1)
-                
-                # Background flow vectors: thin green vectors on Row 1 Flow panel
-                cv2.line(flow_panel, p1_h, p2_flow, (0, 255, 0), 1, cv2.LINE_AA)
-                cv2.circle(flow_panel, p1_h, int(round(2 * f_scale)), (0, 0, 255), -1)
+                if is_active:
+                    # Active target: draw larger indicators on Row 1 context images
+                    cv2.circle(h_color, p1_h, int(round(5 * f_scale)), (0, 0, 255), -1)
+                    cv2.circle(c_color, p3_c, int(round(8 * f_scale)), (0, 255, 0), max(1, int(round(2 * f_scale))))
+                    cv2.circle(c_color, p3_c, int(round(2 * f_scale)), (0, 255, 0), -1)
+                    
+                    # Active match: thick blue connection on Row 1 Match panel
+                    cv2.line(s_color, p1_h, p2_c_canvas, (255, 0, 0), max(1, int(round(2 * f_scale))), cv2.LINE_AA)
+                    cv2.circle(s_color, p1_h, int(round(5 * f_scale)), (255, 0, 0), -1)
+                    cv2.circle(s_color, p2_c_canvas, int(round(5 * f_scale)), (255, 0, 0), -1)
+                    
+                    # Active flow vector: thick yellow vector on Row 1 Flow panel
+                    cv2.line(flow_panel, p1_h, p3_c, (0, 255, 255), max(1, int(round(2 * f_scale))), cv2.LINE_AA)
+                    cv2.circle(flow_panel, p1_h, int(round(4 * f_scale)), (0, 0, 255), -1)
+                else:
+                    # Background matches: draw smaller indicators on Row 1 context images
+                    cv2.circle(h_color, p1_h, int(round(3 * f_scale)), (0, 0, 180), -1)
+                    cv2.circle(c_color, p3_c, int(round(5 * f_scale)), (0, 180, 0), 1)
+                    cv2.circle(c_color, p3_c, int(round(1 * f_scale)), (0, 180, 0), -1)
+                    
+                    # Background matches: thin white connections on Row 1 Match panel
+                    cv2.line(s_color, p1_h, p2_c_canvas, (220, 220, 220), 1, cv2.LINE_AA)
+                    cv2.circle(s_color, p1_h, int(round(3 * f_scale)), (220, 220, 220), -1)
+                    cv2.circle(s_color, p2_c_canvas, int(round(3 * f_scale)), (220, 220, 220), -1)
+                    
+                    # Background flow vectors: thin green vectors on Row 1 Flow panel
+                    cv2.line(flow_panel, p1_h, p3_c, (0, 255, 0), 1, cv2.LINE_AA)
+                    cv2.circle(flow_panel, p1_h, int(round(2 * f_scale)), (0, 0, 255), -1)
     else:
         hx, hy = int(hist_norm[0] * h_size), int(hist_norm[1] * h_size)
         cv2.circle(h_color, (hx, hy), int(round(4 * f_scale)), (0, 0, 255), -1)
@@ -588,11 +761,14 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
         text_scale = 0.6 * f_scale
         text_thickness = max(1, int(round(1.5 * f_scale)))
         
+        # Center coordinates for labels in case of hover mode
+        center_x = int((W * 3/8) * f_scale) if is_3frame else int(160 * f_scale)
+        
         if sift_info is None:
-            cv2.putText(s_color, "HOVER MODE", (int(160 * f_scale), int(145 * f_scale)), cv2.FONT_HERSHEY_SIMPLEX, text_scale, (0, 255, 255), text_thickness, cv2.LINE_AA)
-            cv2.putText(s_color, "Gimbal Jitter Active", (int(180 * f_scale), int(175 * f_scale)), cv2.FONT_HERSHEY_SIMPLEX, 0.40 * f_scale, (0, 200, 200), thickness_h, cv2.LINE_AA)
+            cv2.putText(s_color, "HOVER MODE", (center_x, int(145 * f_scale)), cv2.FONT_HERSHEY_SIMPLEX, text_scale, (0, 255, 255), text_thickness, cv2.LINE_AA)
+            cv2.putText(s_color, "Gimbal Jitter Active", (center_x + int(20 * f_scale), int(175 * f_scale)), cv2.FONT_HERSHEY_SIMPLEX, 0.40 * f_scale, (0, 200, 200), thickness_h, cv2.LINE_AA)
         else:
-            cv2.putText(s_color, "NO MATCHES FOUND", (int(140 * f_scale), int(145 * f_scale)), cv2.FONT_HERSHEY_SIMPLEX, text_scale, (0, 0, 255), text_thickness, cv2.LINE_AA)
+            cv2.putText(s_color, "NO MATCHES FOUND", (center_x - int(20 * f_scale), int(145 * f_scale)), cv2.FONT_HERSHEY_SIMPLEX, text_scale, (0, 0, 255), text_thickness, cv2.LINE_AA)
             
     # 4. Create high-resolution HUD System Stats console (Row 1, Column 4)
     system_stats_panel = np.zeros((h_size, h_size, 3), dtype=np.uint8) + 15
@@ -603,10 +779,10 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
     label_color = (0, 255, 255)
     
     cv2.putText(system_stats_panel, "--- SYSTEM STATUS ---", (int(70 * f_scale), int(35 * f_scale)), font, title_font_scale_h, status_color, thickness_h, cv2.LINE_AA)
-    cv2.putText(system_stats_panel, "Siam-Lite 2-Frame Tracker", (int(20 * f_scale), int(75 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
+    cv2.putText(system_stats_panel, "Siam-Lite 2-Frame Tracker" if not is_3frame else "Siam-Lite 3-Frame Midpoint", (int(20 * f_scale), int(75 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
     cv2.putText(system_stats_panel, f"Active Matches: {inlier_count}", (int(20 * f_scale), int(115 * f_scale)), font, font_scale_h, label_color, thickness_h, cv2.LINE_AA)
-    cv2.putText(system_stats_panel, "Focus of Expansion: Active", (int(20 * f_scale), int(155 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
-    cv2.putText(system_stats_panel, "Boundary Limits: 5/6", (int(20 * f_scale), int(195 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
+    cv2.putText(system_stats_panel, "Focus of Expansion: Active" if not is_3frame else "Temporal Coherence: Active", (int(20 * f_scale), int(155 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
+    cv2.putText(system_stats_panel, f"Filter Mode: {filter_mode.upper()}", (int(20 * f_scale), int(195 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
     cv2.putText(system_stats_panel, f"Proc Size: {proc_size} px", (int(20 * f_scale), int(235 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
     cv2.putText(system_stats_panel, "Mode: Sourcing-Safe HUD", (int(20 * f_scale), int(275 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
     
@@ -703,7 +879,17 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
     
     # 7. Draw HUD labels dynamically scaled on main high-res panels
     draw_hud_label(s_color, sift_label, (int(10 * f_scale), int((h_size - 19) * f_scale)), sift_label_color, scale=font_scale_h, thickness=thickness_h)
-    draw_hud_label(flow_panel, "FLOW VECTORS: HIST TO CURR", (int(10 * f_scale), int((h_size - 19) * f_scale)), (0, 255, 255) if is_success else (0, 0, 255), scale=font_scale_h, thickness=thickness_h)
+    
+    # Draw individual frame titles on top-left of each frame in the Row 1 canvas
+    draw_hud_label(s_color, "HIST FRAME", (int(10 * f_scale), int(25 * f_scale)), (0, 255, 255), scale=font_scale_h, thickness=thickness_h)
+    if is_3frame:
+        draw_hud_label(s_color, "MID FRAME", (int(10 * f_scale) + h_size, int(25 * f_scale)), (0, 255, 255), scale=font_scale_h, thickness=thickness_h)
+        draw_hud_label(s_color, "CURR FRAME", (int(10 * f_scale) + 2 * h_size, int(25 * f_scale)), (0, 255, 255), scale=font_scale_h, thickness=thickness_h)
+    else:
+        draw_hud_label(s_color, "CURR FRAME", (int(10 * f_scale) + h_size, int(25 * f_scale)), (0, 255, 255), scale=font_scale_h, thickness=thickness_h)
+        
+    if not is_3frame:
+        draw_hud_label(flow_panel, "FLOW VECTORS: HIST TO CURR", (int(10 * f_scale), int((h_size - 19) * f_scale)), (0, 255, 255) if is_success else (0, 0, 255), scale=font_scale_h, thickness=thickness_h)
     
     # 8. Spacer panels for Row 2 (s_size x s_size each)
     spacer_s = np.zeros((s_size, s_size, 3), dtype=np.uint8) + 15
@@ -711,6 +897,7 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
     
     # 9. Horizontal stacking of rows
     row1 = np.hstack([s_color, flow_panel, system_stats_panel])
+        
     row2 = np.hstack([
         epipoles_on_curr, telemetry_panel, hist_mask_panel, expected_heatmap_panel,
         spacer_s, spacer_s, spacer_s, spacer_s, spacer_s
@@ -720,7 +907,7 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
     
     # Header bar with dynamically right-aligned help commands
     header_bar = np.zeros((35, W, 3), dtype=np.uint8)
-    title_text = "VIDEO DATASET GENERATOR - PREVIEW HUD (2-FRAME LITE)"
+    title_text = "VIDEO DATASET GENERATOR - PREVIEW HUD (2-FRAME LITE)" if not is_3frame else "VIDEO DATASET GENERATOR - PREVIEW HUD (3-FRAME MIDPOINT)"
     title_color = (0, 255, 255) if (is_success or sift_info is None) else (0, 0, 255)
     
     cv2.putText(header_bar, title_text, (10, 22), font, 0.40, title_color, 1, cv2.LINE_AA)
@@ -802,16 +989,43 @@ def visualize_pipeline(args, video_paths, asift_matcher):
                 continue
             target_kp = random.choice(kp)
             target_coords = [target_kp.pt[0] / 256.0, target_kp.pt[1] / 256.0]
-            f_curr_256, curr_coords = simulate_hover_jitter(f_hist_256, target_coords)
+            if args.filter_mode in ["midpoint", "both"]:
+                f_mid_256, mid_coords = simulate_hover_jitter(f_hist_256, target_coords)
+                f_curr_256, curr_coords = simulate_hover_jitter(f_mid_256, mid_coords)
+            else:
+                f_mid_256 = None
+                f_curr_256, curr_coords = simulate_hover_jitter(f_hist_256, target_coords)
             hist_coords = target_coords
             sift_match_debug = None
         else:
             # Read curr frame
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx + gap_frames)
-            ret_c, frame_curr_raw = cap.read()
-            cap.release()
-            if not ret_c or frame_curr_raw is None:
-                continue
+            if args.filter_mode in ["midpoint", "both"]:
+                half_gap_frames = max(1, int(round((args.frame_gap_seconds * fps) / 2.0)))
+                
+                # Read mid frame
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx + half_gap_frames)
+                ret_m, frame_mid_raw = cap.read()
+                if not ret_m or frame_mid_raw is None:
+                    cap.release()
+                    continue
+                f_mid_full = to_grayscale(frame_mid_raw)
+                f_mid_256 = cv2.resize(f_mid_full, (256, 256), interpolation=cv2.INTER_AREA)
+                f_mid_proc = cv2.resize(f_mid_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+                
+                # Read curr frame
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx + 2 * half_gap_frames)
+                ret_c, frame_curr_raw = cap.read()
+                cap.release()
+                if not ret_c or frame_curr_raw is None:
+                    continue
+            else:
+                f_mid_256 = None
+                # Read curr frame
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx + gap_frames)
+                ret_c, frame_curr_raw = cap.read()
+                cap.release()
+                if not ret_c or frame_curr_raw is None:
+                    continue
                 
             f_curr_full = to_grayscale(frame_curr_raw)
             f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
@@ -819,18 +1033,34 @@ def visualize_pipeline(args, video_paths, asift_matcher):
             f_hist_proc = cv2.resize(f_hist_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
             f_curr_proc = cv2.resize(f_curr_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
             
-            # Match doublets and retain debug structures for GUI
-            match_res = match_features_doublet(
-                f_hist_proc, f_curr_proc,
-                ratio=args.ratio, min_inliers=args.min_inliers,
-                ransac_thresh=args.ransac_thresh,
-                min_motion=args.target_min_motion,
-                min_texture_std=args.min_texture_std,
-                proc_size=args.proc_size,
-                min_ncc=args.min_ncc,
-                asift_matcher=asift_matcher,
-                keep_debug_info=True
-            )
+            # Match features and retain debug structures for GUI
+            if args.filter_mode in ["midpoint", "both"]:
+                active_min_ncc = args.min_ncc if args.filter_mode == "both" else -1.0
+                match_res = match_features_triplet(
+                    f_hist_proc, f_mid_proc, f_curr_proc,
+                    ratio=args.ratio, min_inliers=args.min_inliers,
+                    ransac_thresh=args.ransac_thresh,
+                    min_motion=args.target_min_motion,
+                    min_texture_std=args.min_texture_std,
+                    proc_size=args.proc_size,
+                    min_ncc=active_min_ncc,
+                    asift_matcher=asift_matcher,
+                    keep_debug_info=True,
+                    midpoint_angle_thresh=args.midpoint_angle_thresh,
+                    midpoint_dist_tolerance=args.midpoint_dist_tolerance
+                )
+            else:
+                match_res = match_features_doublet(
+                    f_hist_proc, f_curr_proc,
+                    ratio=args.ratio, min_inliers=args.min_inliers,
+                    ransac_thresh=args.ransac_thresh,
+                    min_motion=args.target_min_motion,
+                    min_texture_std=args.min_texture_std,
+                    proc_size=args.proc_size,
+                    min_ncc=args.min_ncc,
+                    asift_matcher=asift_matcher,
+                    keep_debug_info=True
+                )
             
             if isinstance(match_res, dict) and match_res.get("status") == "success":
                 valid_paths = [p for p in match_res["paths"] if is_path_in_inner_5_6(p)]
@@ -880,7 +1110,9 @@ def visualize_pipeline(args, video_paths, asift_matcher):
             label_radius=args.label_radius,
             match_index=0,
             total_matches=total_matches,
-            match_dist=match_dist
+            match_dist=match_dist,
+            f_mid_256=f_mid_256,
+            filter_mode=args.filter_mode
         )
         
         try:
@@ -985,11 +1217,13 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
             
         frame_step = int(round(args.temporal_step_seconds * fps))
         gap_frames = int(round(args.frame_gap_seconds * fps))
+        half_gap_frames = max(1, int(round((args.frame_gap_seconds * fps) / 2.0)))
+        current_gap = 2 * half_gap_frames if (args.filter_mode in ["midpoint", "both"]) else gap_frames
         
         video_sample_count = 0
         consecutive_failures = 0
         current_frame_idx = 0
-        max_start = total_frames - int(fps * 1.5)
+        max_start = total_frames - max(current_gap + 10, int(fps * 1.5))
         
         t_start_video = time.time()
         doublets_processed = 0
@@ -1001,10 +1235,21 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
             if not ret or frame_hist_raw is None:
                 break
                 
-            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx + gap_frames)
-            ret_c, frame_curr_raw = cap.read()
-            if not ret_c or frame_curr_raw is None:
-                break
+            if args.filter_mode in ["midpoint", "both"]:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx + half_gap_frames)
+                ret_m, frame_mid_raw = cap.read()
+                if not ret_m or frame_mid_raw is None:
+                    break
+                
+                cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx + 2 * half_gap_frames)
+                ret_c, frame_curr_raw = cap.read()
+                if not ret_c or frame_curr_raw is None:
+                    break
+            else:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx + gap_frames)
+                ret_c, frame_curr_raw = cap.read()
+                if not ret_c or frame_curr_raw is None:
+                    break
                 
             doublets_processed += 1
             
@@ -1016,16 +1261,34 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
             f_curr_256 = cv2.resize(f_curr_full, (256, 256), interpolation=cv2.INTER_AREA)
             f_curr_proc = cv2.resize(f_curr_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
             
-            inlier_paths = match_features_doublet(
-                f_hist_proc, f_curr_proc,
-                ratio=args.ratio, min_inliers=args.min_inliers,
-                ransac_thresh=args.ransac_thresh,
-                min_motion=args.target_min_motion,
-                min_texture_std=args.min_texture_std,
-                proc_size=args.proc_size,
-                min_ncc=args.min_ncc,
-                asift_matcher=asift_matcher
-            )
+            if args.filter_mode in ["midpoint", "both"]:
+                f_mid_full = to_grayscale(frame_mid_raw)
+                f_mid_proc = cv2.resize(f_mid_full, (args.proc_size, args.proc_size), interpolation=cv2.INTER_AREA)
+                
+                active_min_ncc = args.min_ncc if args.filter_mode == "both" else -1.0
+                inlier_paths = match_features_triplet(
+                    f_hist_proc, f_mid_proc, f_curr_proc,
+                    ratio=args.ratio, min_inliers=args.min_inliers,
+                    ransac_thresh=args.ransac_thresh,
+                    min_motion=args.target_min_motion,
+                    min_texture_std=args.min_texture_std,
+                    proc_size=args.proc_size,
+                    min_ncc=active_min_ncc,
+                    asift_matcher=asift_matcher,
+                    midpoint_angle_thresh=args.midpoint_angle_thresh,
+                    midpoint_dist_tolerance=args.midpoint_dist_tolerance
+                )
+            else:
+                inlier_paths = match_features_doublet(
+                    f_hist_proc, f_curr_proc,
+                    ratio=args.ratio, min_inliers=args.min_inliers,
+                    ransac_thresh=args.ransac_thresh,
+                    min_motion=args.target_min_motion,
+                    min_texture_std=args.min_texture_std,
+                    proc_size=args.proc_size,
+                    min_ncc=args.min_ncc,
+                    asift_matcher=asift_matcher
+                )
             
             frame_yield = 0
             if len(inlier_paths) > 0:
@@ -1093,6 +1356,8 @@ def run_two_stage_pipeline(args, video_paths, asift_matcher):
             )
             sys.stdout.flush()
             
+            if args.filter_mode in ["midpoint", "both"]:
+                del f_mid_full, f_mid_proc, frame_mid_raw
             del f_hist_full, f_hist_256, f_hist_proc
             del f_curr_full, f_curr_256, f_curr_proc
             del frame_hist_raw, frame_curr_raw
@@ -1308,6 +1573,24 @@ def main():
         type=int,
         default=10,
         help="Maximum consecutive failures before skipping a video (default: 10)."
+    )
+    parser.add_argument(
+        "--filter_mode",
+        choices=["ncc", "midpoint", "both"],
+        default="ncc",
+        help="Target filtering mode: ncc patch similarity, midpoint temporal coherence, or both (default: ncc)."
+    )
+    parser.add_argument(
+        "--midpoint_angle_thresh",
+        type=float,
+        default=0.85,
+        help="Minimum cosine similarity for midpoint coherence direction matching (default: 0.85)."
+    )
+    parser.add_argument(
+        "--midpoint_dist_tolerance",
+        type=float,
+        default=3.0,
+        help="Maximum magnitude displacement difference for midpoint coherence velocity tolerance (default: 3.0)."
     )
     
     # Load default configs
