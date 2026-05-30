@@ -463,9 +463,31 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
     Renders a dynamic, resolution-generic 2-row HUD dashboard tailored strictly for Two-Frame Siamese Tracking.
     All dimensions (panels, font scales, text positions) are computed dynamically in real time based on proc_size.
     """
-    # 1. Dynamic Layout Geometry (LCM of 4 and 9 is 36, ensuring perfect seam-free stacking)
-    W = int(round(proc_size / 36.0)) * 36
-    W = max(W, 720)  # Clamp minimum width to 720px for readability
+    # 1. Dynamic Screen Resolution Detection (cached on the function to prevent Tkinter window rebuild overhead)
+    if not hasattr(render_dashboard, "W"):
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            screen_w = root.winfo_screenwidth()
+            screen_h = root.winfo_screenheight()
+            root.destroy()
+        except Exception:
+            # Fallback to standard 1080p if GUI environment is not fully ready
+            screen_w = 1920
+            screen_h = 1080
+
+        # We want the window width to comfortably fit in 80% of screen width,
+        # and the height (35 + W//4 + W//9) to comfortably fit in 80% of screen height.
+        limit_w_by_width = int(screen_w * 0.80)
+        limit_w_by_height = int((screen_h * 0.80 - 35) * 36 / 13)
+        
+        target_W = min(limit_w_by_width, limit_w_by_height)
+        W = int(round(target_W / 36.0)) * 36
+        W = max(W, 720) # Clamp minimum width to 720px
+        
+        render_dashboard.W = W
+        
+    W = render_dashboard.W
     
     # Calculate high-res (Row 1) and compact (Row 2) panel sizes
     h_size = W // 4
