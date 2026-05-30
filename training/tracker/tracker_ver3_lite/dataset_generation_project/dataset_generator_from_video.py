@@ -247,6 +247,7 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
     pts_hist = []
     pts_curr = []
     kp_triplets = []
+    match_distances = []
 
     # 3. Apply Multi-Stage Geometric & Texture Filters
     for idx_match, m in enumerate(valid_matches):
@@ -290,6 +291,7 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
         pts_hist.append(pt_h)
         pts_curr.append(pt_c)
         kp_triplets.append((m.queryIdx, m.trainIdx))
+        match_distances.append(m.distance)
 
     if len(pts_hist) < min_inliers:
         return []
@@ -313,7 +315,8 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
             c_norm = [pts_curr[idx][0] / proc_size, pts_curr[idx][1] / proc_size]
             inlier_paths.append({
                 "hist": h_norm,
-                "curr": c_norm
+                "curr": c_norm,
+                "distance": float(match_distances[idx])
             })
             inlier_indices.append(idx)
 
@@ -419,16 +422,14 @@ def simulate_hover_jitter(frame_256, coords):
     ]
     return warped_frame, warped_norm
 
-def draw_hud_label(img, label, org, color=(0, 255, 0)):
+def draw_hud_label(img, label, org, color=(0, 255, 0), scale=0.38, thickness=1):
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.38
-    thickness = 1
     (w, h), baseline = cv2.getTextSize(label, font, scale, thickness)
     
-    y1 = max(0, org[1] - h - 4)
-    y2 = min(img.shape[0], org[1] + baseline)
-    x1 = max(0, org[0] - 4)
-    x2 = min(img.shape[1], org[0] + w + 4)
+    y1 = max(org[1] - h - 4, 0)
+    y2 = min(org[1] + baseline, img.shape[0])
+    x1 = max(org[0] - 4, 0)
+    x2 = min(org[0] + w + 4, img.shape[1])
     
     sub_img = img[y1:y2, x1:x2]
     if sub_img.shape[0] > 0 and sub_img.shape[1] > 0:
@@ -457,26 +458,37 @@ def draw_epipolar_line(img, line, color, thickness=1):
 # Dashboard Rendering for Symmetrical 2-Frame Pipeline
 # =====================================================================
 
-def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, sift_info=None, proc_size=800, label_radius=32):
+def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, sift_info=None, proc_size=800, label_radius=32, match_index=0, total_matches=0, match_dist=0.0):
     """
-    Renders a highly symmetric 4x2 grid dashboard (total width 512px, total height 1024px)
-    tailored strictly for Two-Frame Tracking (hist and curr).
+    Renders a dynamic, resolution-generic 2-row HUD dashboard tailored strictly for Two-Frame Siamese Tracking.
+    All dimensions (panels, font scales, text positions) are computed dynamically in real time based on proc_size.
     """
-    h_color = cv2.cvtColor(f_hist_256, cv2.COLOR_GRAY2BGR)
-    c_color = cv2.cvtColor(f_curr_256, cv2.COLOR_GRAY2BGR)
+    # 1. Dynamic Layout Geometry (LCM of 4 and 9 is 36, ensuring perfect seam-free stacking)
+    W = int(round(proc_size / 36.0)) * 36
+    W = max(W, 720)  # Clamp minimum width to 720px for readability
     
-    # 1. Soft red glow for template attention mask
+    # Calculate high-res (Row 1) and compact (Row 2) panel sizes
+    h_size = W // 4
+    s_size = W // 9
+    
+    # Proportional scaling factors for text and drawing elements
+    f_scale = h_size / 288.0
+    font_scale_h = 0.38 * f_scale
+    title_font_scale_h = 0.45 * f_scale
+    thickness_h = max(1, int(round(1.0 * f_scale)))
+    
+    # 2. Resize and prepare main Row 1 context images (h_size x h_size)
+    f_hist_h = cv2.resize(f_hist_256, (h_size, h_size), interpolation=cv2.INTER_LINEAR)
+    f_curr_h = cv2.resize(f_curr_256, (h_size, h_size), interpolation=cv2.INTER_LINEAR)
+    
+    h_color = cv2.cvtColor(f_hist_h, cv2.COLOR_GRAY2BGR)
+    c_color = cv2.cvtColor(f_curr_h, cv2.COLOR_GRAY2BGR)
+    
+    # Soft red glow attention mask scaled to h_size x h_size
+    h_mask_h = cv2.resize(hist_mask, (h_size, h_size), interpolation=cv2.INTER_LINEAR)
     h_mask_bgr = np.zeros_like(h_color)
-    h_mask_bgr[:, :, 2] = (hist_mask[:, :, 0] * 255.0).astype(np.uint8)
+    h_mask_bgr[:, :, 2] = (h_mask_h * 255.0).astype(np.uint8)
     cv2.addWeighted(h_mask_bgr, 0.50, h_color, 1.0, 0, h_color)
-    
-    # 2. Draw target indicators
-    hx, hy = int(hist_norm[0] * 256), int(hist_norm[1] * 256)
-    cv2.circle(h_color, (hx, hy), 4, (0, 0, 255), -1)  # Red dot for hist anchor
-    
-    cx, cy = int(curr_norm[0] * 256), int(curr_norm[1] * 256)
-    cv2.circle(c_color, (cx, cy), 8, (0, 255, 0), 2)   # Green target ring for curr
-    cv2.circle(c_color, (cx, cy), 2, (0, 255, 0), -1)
     
     is_success = (sift_info is not None and sift_info.get("status") == "success")
     if is_success:
@@ -485,108 +497,147 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
         status_color = (0, 255, 255)
     else:
         status_color = (0, 0, 255)
-    sift_panel = np.hstack([f_hist_256, f_curr_256])
+        
+    sift_panel = np.hstack([f_hist_h, f_curr_h])
     s_color = cv2.cvtColor(sift_panel, cv2.COLOR_GRAY2BGR)
     
     inlier_count = 0
     avg_err = 0.0
     
-    if sift_info is not None and len(sift_info.get("inliers", [])) > 0:
-        kp_hist = sift_info["kp_hist"]
-        kp_curr = sift_info["kp_curr"]
-        triplets = sift_info["triplets"]
+    # Flow Vector Panel (starts as copy of f_hist_h)
+    flow_panel = cv2.cvtColor(f_hist_h, cv2.COLOR_GRAY2BGR)
+    
+    sift_label = "GEOMETRIC CONNECTIONS (HIST -> CURR)" if is_success else "GEOMETRIC FAILURE CONNECTIONS"
+    sift_label_color = (255, 255, 0) if is_success else (0, 128, 255)
+    
+    # 3. Draw matching keypoint targets on main panels dynamically scaled to h_size
+    if sift_info is not None and "paths" in sift_info and len(sift_info["paths"]) > 0:
         inliers = sift_info["inliers"]
-        scale = 256.0 / proc_size
-        
-        # Background inlier lines
-        for color_idx, idx in enumerate(inliers):
-            if color_idx > 0 and idx < len(triplets):
-                trip = triplets[idx]
-                pt_h = kp_hist[trip[0]].pt
-                pt_c = kp_curr[trip[1]].pt
-                
-                p1_h = (int(pt_h[0] * scale), int(pt_h[1] * scale))
-                p2_c = (int(pt_c[0] * scale + 256), int(pt_c[1] * scale))
-                
-                color = (255, 255, 255)
-                cv2.line(s_color, p1_h, p2_c, color, 1, cv2.LINE_AA)
-                cv2.circle(s_color, p1_h, 3, color, -1)
-                cv2.circle(s_color, p2_c, 3, color, -1)
-                
-        # Foreground optimal matching line
-        if len(inliers) > 0:
-            idx = inliers[0]
-            if idx < len(triplets):
-                trip = triplets[idx]
-                pt_h = kp_hist[trip[0]].pt
-                pt_c = kp_curr[trip[1]].pt
-                
-                p1_h = (int(pt_h[0] * scale), int(pt_h[1] * scale))
-                p2_c = (int(pt_c[0] * scale + 256), int(pt_c[1] * scale))
-                
-                color = (255, 0, 0)
-                cv2.line(s_color, p1_h, p2_c, color, 2, cv2.LINE_AA)
-                cv2.circle(s_color, p1_h, 5, color, -1)
-                cv2.circle(s_color, p2_c, 5, color, -1)
-                
         inlier_count = len(inliers)
-    else:
-        if sift_info is None:
-            cv2.putText(s_color, "HOVER MODE", (150, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(s_color, "Gimbal Jitter Active", (170, 155), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 200, 200), 1, cv2.LINE_AA)
-        else:
-            cv2.putText(s_color, "NO MATCHES FOUND", (140, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+        
+        for p in sift_info["paths"]:
+            px_h = int(p["hist"][0] * h_size)
+            py_h = int(p["hist"][1] * h_size)
+            px_c = int(p["curr"][0] * h_size)
+            py_c = int(p["curr"][1] * h_size)
             
-    # 4. Epipolar line on current frame & Telemetry panel
-    epipoles_on_curr = cv2.cvtColor(f_curr_256, cv2.COLOR_GRAY2BGR)
-    telemetry_panel = np.zeros((256, 256, 3), dtype=np.uint8) + 20
+            p1_h = (px_h, py_h)
+            p2_c = (px_c + h_size, py_c)
+            p2_flow = (px_c, py_c)
+            
+            is_active = (abs(p["hist"][0] - hist_norm[0]) < 1e-5 and abs(p["hist"][1] - hist_norm[1]) < 1e-5)
+            
+            if is_active:
+                # Active target: draw larger indicators on Row 1 context images
+                cv2.circle(h_color, p1_h, int(round(5 * f_scale)), (0, 0, 255), -1)
+                cv2.circle(c_color, p2_flow, int(round(8 * f_scale)), (0, 255, 0), max(1, int(round(2 * f_scale))))
+                cv2.circle(c_color, p2_flow, int(round(2 * f_scale)), (0, 255, 0), -1)
+                
+                # Active match: thick blue connection on Row 1 Match panel
+                cv2.line(s_color, p1_h, p2_c, (255, 0, 0), max(1, int(round(2 * f_scale))), cv2.LINE_AA)
+                cv2.circle(s_color, p1_h, int(round(5 * f_scale)), (255, 0, 0), -1)
+                cv2.circle(s_color, p2_c, int(round(5 * f_scale)), (255, 0, 0), -1)
+                
+                # Active flow vector: thick yellow vector on Row 1 Flow panel
+                cv2.line(flow_panel, p1_h, p2_flow, (0, 255, 255), max(1, int(round(2 * f_scale))), cv2.LINE_AA)
+                cv2.circle(flow_panel, p1_h, int(round(4 * f_scale)), (0, 0, 255), -1)
+            else:
+                # Background matches: draw smaller indicators on Row 1 context images
+                cv2.circle(h_color, p1_h, int(round(3 * f_scale)), (0, 0, 180), -1)
+                cv2.circle(c_color, p2_flow, int(round(5 * f_scale)), (0, 180, 0), 1)
+                cv2.circle(c_color, p2_flow, int(round(1 * f_scale)), (0, 180, 0), -1)
+                
+                # Background matches: thin white connections on Row 1 Match panel
+                cv2.line(s_color, p1_h, p2_c, (220, 220, 220), 1, cv2.LINE_AA)
+                cv2.circle(s_color, p1_h, int(round(3 * f_scale)), (220, 220, 220), -1)
+                cv2.circle(s_color, p2_c, int(round(3 * f_scale)), (220, 220, 220), -1)
+                
+                # Background flow vectors: thin green vectors on Row 1 Flow panel
+                cv2.line(flow_panel, p1_h, p2_flow, (0, 255, 0), 1, cv2.LINE_AA)
+                cv2.circle(flow_panel, p1_h, int(round(2 * f_scale)), (0, 0, 255), -1)
+    else:
+        hx, hy = int(hist_norm[0] * h_size), int(hist_norm[1] * h_size)
+        cv2.circle(h_color, (hx, hy), int(round(4 * f_scale)), (0, 0, 255), -1)
+        
+        cx, cy = int(curr_norm[0] * h_size), int(curr_norm[1] * h_size)
+        cv2.circle(c_color, (cx, cy), int(round(8 * f_scale)), (0, 255, 0), max(1, int(round(2 * f_scale))))
+        cv2.circle(c_color, (cx, cy), int(round(2 * f_scale)), (0, 255, 0), -1)
+        
+        text_scale = 0.6 * f_scale
+        text_thickness = max(1, int(round(1.5 * f_scale)))
+        
+        if sift_info is None:
+            cv2.putText(s_color, "HOVER MODE", (int(160 * f_scale), int(145 * f_scale)), cv2.FONT_HERSHEY_SIMPLEX, text_scale, (0, 255, 255), text_thickness, cv2.LINE_AA)
+            cv2.putText(s_color, "Gimbal Jitter Active", (int(180 * f_scale), int(175 * f_scale)), cv2.FONT_HERSHEY_SIMPLEX, 0.40 * f_scale, (0, 200, 200), thickness_h, cv2.LINE_AA)
+        else:
+            cv2.putText(s_color, "NO MATCHES FOUND", (int(140 * f_scale), int(145 * f_scale)), cv2.FONT_HERSHEY_SIMPLEX, text_scale, (0, 0, 255), text_thickness, cv2.LINE_AA)
+            
+    # 4. Create high-resolution HUD System Stats console (Row 1, Column 4)
+    system_stats_panel = np.zeros((h_size, h_size, 3), dtype=np.uint8) + 15
+    cv2.rectangle(system_stats_panel, (0, 0), (h_size - 1, h_size - 1), status_color, max(1, int(round(2 * f_scale))))
+    
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_color = (220, 220, 220)
+    label_color = (0, 255, 255)
+    
+    cv2.putText(system_stats_panel, "--- SYSTEM STATUS ---", (int(70 * f_scale), int(35 * f_scale)), font, title_font_scale_h, status_color, thickness_h, cv2.LINE_AA)
+    cv2.putText(system_stats_panel, "Siam-Lite 2-Frame Tracker", (int(20 * f_scale), int(75 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
+    cv2.putText(system_stats_panel, f"Active Matches: {inlier_count}", (int(20 * f_scale), int(115 * f_scale)), font, font_scale_h, label_color, thickness_h, cv2.LINE_AA)
+    cv2.putText(system_stats_panel, "Focus of Expansion: Active", (int(20 * f_scale), int(155 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
+    cv2.putText(system_stats_panel, "Boundary Limits: 5/6", (int(20 * f_scale), int(195 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
+    cv2.putText(system_stats_panel, f"Proc Size: {proc_size} px", (int(20 * f_scale), int(235 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
+    cv2.putText(system_stats_panel, "Mode: Sourcing-Safe HUD", (int(20 * f_scale), int(275 * f_scale)), font, font_scale_h, text_color, thickness_h, cv2.LINE_AA)
+    
+    # 5. Construct Row 2 secondary panels (s_size x s_size each)
+    f_curr_s = cv2.resize(f_curr_256, (s_size, s_size), interpolation=cv2.INTER_AREA)
+    epipoles_on_curr = cv2.cvtColor(f_curr_s, cv2.COLOR_GRAY2BGR)
     
     if sift_info is not None and len(sift_info.get("inliers", [])) >= 5:
         kp_hist = sift_info["kp_hist"]
         kp_curr = sift_info["kp_curr"]
         triplets = sift_info["triplets"]
         inliers = sift_info["inliers"]
-        scale = 256.0 / proc_size
+        scale_s = float(s_size) / proc_size
         
-        pts_h_256 = []
-        pts_c_256 = []
+        pts_h_s = []
+        pts_c_s = []
         
         for idx in inliers:
             if idx < len(triplets):
                 trip = triplets[idx]
                 pt_h = kp_hist[trip[0]].pt
                 pt_c = kp_curr[trip[1]].pt
-                pts_h_256.append([pt_h[0] * scale, pt_h[1] * scale])
-                pts_c_256.append([pt_c[0] * scale, pt_c[1] * scale])
+                pts_h_s.append([pt_h[0] * scale_s, pt_h[1] * scale_s])
+                pts_c_s.append([pt_c[0] * scale_s, pt_c[1] * scale_s])
                 
-        pts_h_256 = np.float32(pts_h_256)
-        pts_c_256 = np.float32(pts_c_256)
+        pts_h_s = np.float32(pts_h_s)
+        pts_c_s = np.float32(pts_c_s)
         
-        if len(pts_h_256) >= 8:
-            F_256, _ = cv2.findFundamentalMat(pts_h_256, pts_c_256, cv2.FM_RANSAC, 5.0)
+        if len(pts_h_s) >= 8:
+            F_s, _ = cv2.findFundamentalMat(pts_h_s, pts_c_s, cv2.FM_RANSAC, 5.0 * (float(s_size) / 256.0))
         else:
-            F_256, _ = cv2.findFundamentalMat(pts_h_256, pts_c_256, cv2.FM_LMEDS)
+            F_s, _ = cv2.findFundamentalMat(pts_h_s, pts_c_s, cv2.FM_LMEDS)
             
-        if F_256 is not None and F_256.shape == (3, 3):
-            lines_on_curr = cv2.computeCorrespondEpilines(pts_h_256.reshape(-1, 1, 2), 1, F_256)
+        if F_s is not None and F_s.shape == (3, 3):
+            lines_on_curr = cv2.computeCorrespondEpilines(pts_h_s.reshape(-1, 1, 2), 1, F_s)
             
             total_err = 0.0
             err_count = 0
             
-            for i in range(len(pts_h_256)):
-                pt_c = pts_c_256[i]
+            for i in range(len(pts_h_s)):
+                pt_c = pts_c_s[i]
                 l_curr = lines_on_curr[i][0]
                 
                 a, b, c = l_curr[0], l_curr[1], l_curr[2]
                 denom = np.sqrt(a**2 + b**2)
                 if denom > 1e-8:
                     dist = abs(a * pt_c[0] + b * pt_c[1] + c) / denom
-                    total_err += dist
+                    total_err += dist * (proc_size / float(s_size))
                     err_count += 1
                     
                 color = (255, 255, 255) if i > 0 else (255, 0, 0)
-                thickness = 1 if i > 0 else 2
-                radius = 3 if i > 0 else 5
+                thickness = 1
+                radius = 2 if i > 0 else 3
                 
                 draw_epipolar_line(epipoles_on_curr, l_curr, color, thickness)
                 cv2.circle(epipoles_on_curr, (int(pt_c[0]), int(pt_c[1])), radius, color, -1)
@@ -594,83 +645,70 @@ def render_dashboard(f_hist_256, f_curr_256, hist_mask, hist_norm, curr_norm, si
             if err_count > 0:
                 avg_err = total_err / err_count
                 
-    # Draw telemetry HUD console borders
-    cv2.rectangle(telemetry_panel, (0, 0), (255, 255), status_color, 2)
+    cv2.rectangle(epipoles_on_curr, (0, 0), (s_size - 1, s_size - 1), (255, 0, 255) if is_success else (0, 0, 255), 1)
     
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale_txt = 0.38
-    thickness = 1
-    text_color = (220, 220, 220)
-    label_color = (0, 255, 255)
+    # 6. Row 2 secondary telemetry and mask panels (scaled to s_size)
+    telemetry_scale = s_size / 128.0
+    telemetry_font_scale = 0.30 * telemetry_scale
+    telemetry_title_font_scale = 0.35 * telemetry_scale
+    telemetry_thickness = max(1, int(round(1.0 * telemetry_scale)))
     
-    cv2.putText(telemetry_panel, "--- TELEMETRY HUD ---", (45, 25), font, 0.45, status_color, 1, cv2.LINE_AA)
+    telemetry_panel = np.zeros((s_size, s_size, 3), dtype=np.uint8) + 20
+    cv2.rectangle(telemetry_panel, (0, 0), (s_size - 1, s_size - 1), status_color, 1)
+    cv2.putText(telemetry_panel, "TELEMETRY", (int(25 * telemetry_scale), int(20 * telemetry_scale)), font, telemetry_title_font_scale, status_color, telemetry_thickness, cv2.LINE_AA)
+    cv2.putText(telemetry_panel, f"Inliers: {inlier_count}", (int(10 * telemetry_scale), int(50 * telemetry_scale)), font, telemetry_font_scale, text_color, telemetry_thickness, cv2.LINE_AA)
+    if total_matches > 0:
+        cv2.putText(telemetry_panel, f"Rank: {match_index+1}/{total_matches}", (int(10 * telemetry_scale), int(80 * telemetry_scale)), font, telemetry_font_scale, text_color, telemetry_thickness, cv2.LINE_AA)
+        cv2.putText(telemetry_panel, f"Dist: {match_dist:.3f}", (int(10 * telemetry_scale), int(110 * telemetry_scale)), font, telemetry_font_scale, label_color, telemetry_thickness, cv2.LINE_AA)
+    else:
+        avg_err_str = f"EpiErr: {avg_err:.2f}" if avg_err > 0.0 else "EpiErr: N/A"
+        cv2.putText(telemetry_panel, avg_err_str, (int(10 * telemetry_scale), int(80 * telemetry_scale)), font, telemetry_font_scale, text_color, telemetry_thickness, cv2.LINE_AA)
+        
+    # Mask Panel
+    hist_mask_s = cv2.resize(hist_mask, (s_size, s_size), interpolation=cv2.INTER_LINEAR)
+    hist_mask_panel = np.zeros((s_size, s_size, 3), dtype=np.uint8)
+    hist_mask_panel[:, :, 2] = (hist_mask_s * 255.0).astype(np.uint8)
+    cv2.rectangle(hist_mask_panel, (0, 0), (s_size - 1, s_size - 1), (0, 0, 255), 1)
+    cv2.putText(hist_mask_panel, "MASK", (int(10 * telemetry_scale), int(115 * telemetry_scale)), font, telemetry_font_scale, (0, 0, 255), telemetry_thickness, cv2.LINE_AA)
     
-    cv2.putText(telemetry_panel, "Proc Size: ", (15, 60), font, scale_txt, label_color, thickness, cv2.LINE_AA)
-    cv2.putText(telemetry_panel, f"{proc_size}x{proc_size}", (95, 60), font, scale_txt, text_color, thickness, cv2.LINE_AA)
-    
-    cv2.putText(telemetry_panel, "Inliers: ", (15, 90), font, scale_txt, label_color, thickness, cv2.LINE_AA)
-    cv2.putText(telemetry_panel, f"{inlier_count}", (95, 90), font, scale_txt, text_color, thickness, cv2.LINE_AA)
-    
-    cv2.putText(telemetry_panel, "Avg Epi Err:", (15, 120), font, scale_txt, label_color, thickness, cv2.LINE_AA)
-    avg_err_str = f"{avg_err:.4f} px" if avg_err > 0.0 else "N/A"
-    cv2.putText(telemetry_panel, avg_err_str, (95, 120), font, scale_txt, text_color, thickness, cv2.LINE_AA)
-    
-    hx_256 = hist_norm[0] * 256.0
-    hy_256 = hist_norm[1] * 256.0
-    cx_256 = curr_norm[0] * 256.0
-    cy_256 = curr_norm[1] * 256.0
-    
-    cv2.putText(telemetry_panel, "Hist Coord:", (15, 155), font, scale_txt, label_color, thickness, cv2.LINE_AA)
-    cv2.putText(telemetry_panel, f"({hx_256:.1f}, {hy_256:.1f})", (105, 155), font, scale_txt, text_color, thickness, cv2.LINE_AA)
-    
-    cv2.putText(telemetry_panel, "Curr Coord:", (15, 185), font, scale_txt, label_color, thickness, cv2.LINE_AA)
-    cv2.putText(telemetry_panel, f"({cx_256:.1f}, {cy_256:.1f})", (105, 185), font, scale_txt, text_color, thickness, cv2.LINE_AA)
-    
-    status_str = "SUCCESS" if is_success else ("HOVER" if sift_info is None else "FAILED")
-    cv2.putText(telemetry_panel, "Status: ", (15, 220), font, scale_txt, label_color, thickness, cv2.LINE_AA)
-    cv2.putText(telemetry_panel, status_str, (95, 220), font, scale_txt, status_color, 1, cv2.LINE_AA)
-    
-    # 5. Row 4: Pure attention mask & expected target heatmap
-    hist_mask_panel = np.zeros((256, 256, 3), dtype=np.uint8)
-    hist_mask_panel[:, :, 2] = (hist_mask[:, :, 0] * 255.0).astype(np.uint8)
-    
+    # Heatmap Panel
     expected_heatmap_64 = generate_exponential_heatmap(curr_norm, size=64, sigma=label_radius / 8.0)
-    expected_heatmap_256 = cv2.resize(expected_heatmap_64, (256, 256), interpolation=cv2.INTER_LINEAR)
-    expected_heatmap_panel = np.zeros((256, 256, 3), dtype=np.uint8)
-    expected_heatmap_panel[:, :, 1] = (expected_heatmap_256 * 255.0).astype(np.uint8)
+    expected_heatmap_s = cv2.resize(expected_heatmap_64, (s_size, s_size), interpolation=cv2.INTER_LINEAR)
+    expected_heatmap_panel = np.zeros((s_size, s_size, 3), dtype=np.uint8)
+    expected_heatmap_panel[:, :, 1] = (expected_heatmap_s * 255.0).astype(np.uint8)
+    cv2.rectangle(expected_heatmap_panel, (0, 0), (s_size - 1, s_size - 1), (0, 255, 0), 1)
+    cv2.putText(expected_heatmap_panel, "HEATMAP", (int(10 * telemetry_scale), int(115 * telemetry_scale)), font, telemetry_font_scale, (0, 255, 0), telemetry_thickness, cv2.LINE_AA)
     
-    # Draw Labels
-    draw_hud_label(h_color, "HIST CONTEXT + SOFT MASK", (10, 240), (0, 0, 255))
-    draw_hud_label(c_color, "CURR CONTEXT (TARGET)", (10, 240), (0, 255, 0))
+    # 7. Draw HUD labels dynamically scaled on main high-res panels
+    draw_hud_label(s_color, sift_label, (int(10 * f_scale), int((h_size - 19) * f_scale)), sift_label_color, scale=font_scale_h, thickness=thickness_h)
+    draw_hud_label(flow_panel, "FLOW VECTORS: HIST TO CURR", (int(10 * f_scale), int((h_size - 19) * f_scale)), (0, 255, 255) if is_success else (0, 0, 255), scale=font_scale_h, thickness=thickness_h)
     
-    sift_label = "GEOMETRIC CONNECTIONS (HIST -> CURR)" if is_success else "GEOMETRIC FAILURE CONNECTIONS"
-    sift_label_color = (255, 255, 0) if is_success else (0, 128, 255)
-    draw_hud_label(s_color, sift_label, (10, 240), sift_label_color)
+    # 8. Spacer panels for Row 2 (s_size x s_size each)
+    spacer_s = np.zeros((s_size, s_size, 3), dtype=np.uint8) + 15
+    cv2.rectangle(spacer_s, (0, 0), (s_size - 1, s_size - 1), (35, 35, 35), 1)
     
-    draw_hud_label(epipoles_on_curr, "EPIPOLAR LINES: HIST ON CURR", (10, 240), (255, 0, 255) if is_success else (0, 0, 255))
-    draw_hud_label(hist_mask_panel, "HIST ATTENTION MASK (RED)", (10, 240), (0, 0, 255))
-    draw_hud_label(expected_heatmap_panel, "EXPECTED HEATMAP (GREEN)", (10, 240), (0, 255, 0))
+    # 9. Horizontal stacking of rows
+    row1 = np.hstack([s_color, flow_panel, system_stats_panel])
+    row2 = np.hstack([
+        epipoles_on_curr, telemetry_panel, hist_mask_panel, expected_heatmap_panel,
+        spacer_s, spacer_s, spacer_s, spacer_s, spacer_s
+    ])
     
-    # Assemble final grid
-    row1 = np.hstack([h_color, c_color])
-    row2 = s_color
-    row3 = np.hstack([epipoles_on_curr, telemetry_panel])
-    row4 = np.hstack([hist_mask_panel, expected_heatmap_panel])
+    dashboard = np.vstack([row1, row2])
     
-    dashboard = np.vstack([row1, row2, row3, row4])
-    
-    # Header
-    header_bar = np.zeros((35, 512, 3), dtype=np.uint8)
+    # Header bar with dynamically right-aligned help commands
+    header_bar = np.zeros((35, W, 3), dtype=np.uint8)
     title_text = "VIDEO DATASET GENERATOR - PREVIEW HUD (2-FRAME LITE)"
     title_color = (0, 255, 255) if (is_success or sift_info is None) else (0, 0, 255)
     
     cv2.putText(header_bar, title_text, (10, 22), font, 0.40, title_color, 1, cv2.LINE_AA)
-    cv2.putText(header_bar, "[SPACE]: Next | [ENTER]: Auto-run | [ESC/Q]: Exit", (250, 22), font, 0.30, (200, 200, 200), 1, cv2.LINE_AA)
+    
+    help_text = "[SPACE]: Next | [ENTER]: Auto-run | [ESC/Q]: Exit"
+    (help_w, _), _ = cv2.getTextSize(help_text, font, 0.30, 1)
+    cv2.putText(header_bar, help_text, (W - help_w - 15, 22), font, 0.30, (200, 200, 200), 1, cv2.LINE_AA)
     
     final_output = np.vstack([header_bar, dashboard])
     return final_output
-
-# =====================================================================
 # Real-Time Visualization Preview Pipeline (ASIFT + SURF + AKAZE)
 # =====================================================================
 
@@ -773,37 +811,54 @@ def visualize_pipeline(args, video_paths, asift_matcher):
             )
             
             if isinstance(match_res, dict) and match_res.get("status") == "success":
-                selected_path = None
-                for path in match_res["paths"]:
-                    if is_path_in_inner_5_6(path):
-                        selected_path = path
-                        break
-                if selected_path is not None:
+                valid_paths = [p for p in match_res["paths"] if is_path_in_inner_5_6(p)]
+                valid_paths.sort(key=lambda x: x.get("distance", float('inf')))
+                
+                if len(valid_paths) > 0:
+                    selected_path = valid_paths[0]
                     hist_coords = selected_path["hist"]
                     curr_coords = selected_path["curr"]
+                    match_dist = selected_path.get("distance", 0.0)
+                    is_success = True
+                    total_matches = len(valid_paths)
                 else:
                     match_res["status"] = "failed"
                     match_res["reason"] = "no_inlier_in_inner_5_6"
                     hist_coords = [0.5, 0.5]
                     curr_coords = [0.5, 0.5]
+                    is_success = False
+                    total_matches = 0
+                    match_dist = 0.0
             else:
                 hist_coords = [0.5, 0.5]
                 curr_coords = [0.5, 0.5]
+                is_success = False
+                total_matches = 0
+                match_dist = 0.0
                 
             sift_match_debug = match_res
+            
+        # Draw and display the HUD panel
+        if is_hover:
+            hist_coords = target_coords
+            curr_coords = curr_coords
+            is_success = True
+            total_matches = 0
+            match_dist = 0.0
             
         hist_mask = generate_exponential_mask(
             hist_coords, size=256, sigma=args.mask_sigma
         )
-        
-        is_success = (sift_match_debug is not None and sift_match_debug.get("status") == "success") or is_hover
         
         dashboard = render_dashboard(
             f_hist_256, f_curr_256,
             hist_mask, hist_coords, curr_coords,
             sift_info=sift_match_debug,
             proc_size=args.proc_size,
-            label_radius=args.label_radius
+            label_radius=args.label_radius,
+            match_index=0,
+            total_matches=total_matches,
+            match_dist=match_dist
         )
         
         try:
@@ -813,18 +868,19 @@ def visualize_pipeline(args, video_paths, asift_matcher):
             delay = 100 if auto_run_until_success else 0
             key = cv2.waitKey(delay) & 0xFF
             
-            if key == 13 or key == 10:
+            if key in [13, 10]:  # ENTER
                 auto_run_until_success = True
-            elif key == 32:
+            elif key == 32:  # SPACE
                 auto_run_until_success = False
-            elif key == 27 or key == ord('q'):
+            elif key == 27 or key == ord('q') or key == ord('Q'):  # ESC or Q
                 cv2.destroyAllWindows()
                 print("\nHUD Preview Mode exited by user.")
                 sys.exit(0)
         except cv2.error as e:
             print(f"\nGUI Error: Could not render visualization window ({e}).")
             sys.exit(1)
-            
+
+        # Logging output for this step
         if is_success:
             sample_count += 1
             print(f"[Sample {sample_count} | Attempt {attempt_count}] success (Hover: {is_hover})")
