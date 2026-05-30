@@ -186,7 +186,7 @@ def generate_exponential_heatmap(coords, size=64, sigma=4.0):
 # Multi-Detector Feature Matching Framework
 # =====================================================================
 
-def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=None, ratio=0.85, min_inliers=6, ransac_thresh=5.0, min_motion=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75, keep_debug_info=False):
+def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=None, ratio=0.85, min_inliers=6, ransac_thresh=5.0, min_motion=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75, keep_debug_info=False, disable_ransac=False):
     """
     Performs keypoint extraction and matching for a single specific detector type.
     Handles L2 vs Hamming metric correctly. Returns verified inlier paths.
@@ -296,20 +296,11 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
     if len(pts_hist) < min_inliers:
         return []
 
-    # 4. RANSAC Epipolar Filtering (Fundamental Matrix)
-    pts_hist_np = np.float32(pts_hist)
-    pts_curr_np = np.float32(pts_curr)
-    
-    F, mask = cv2.findFundamentalMat(pts_hist_np, pts_curr_np, cv2.FM_RANSAC, ransac_thresh)
-    if F is None or mask is None or F.shape != (3, 3):
-        return []
-
-    mask_flat = mask.ravel()
-    inlier_paths = []
-    inlier_indices = []
-    
-    for idx, is_inlier in enumerate(mask_flat):
-        if is_inlier:
+    if disable_ransac:
+        # Bypass global RANSAC fundamental matrix filtering
+        inlier_paths = []
+        inlier_indices = []
+        for idx in range(len(pts_hist)):
             # Map coordinates back into normalized [0, 1] grid relative to proc_size
             h_norm = [pts_hist[idx][0] / proc_size, pts_hist[idx][1] / proc_size]
             c_norm = [pts_curr[idx][0] / proc_size, pts_curr[idx][1] / proc_size]
@@ -319,6 +310,30 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
                 "distance": float(match_distances[idx])
             })
             inlier_indices.append(idx)
+    else:
+        # 4. RANSAC Epipolar Filtering (Fundamental Matrix)
+        pts_hist_np = np.float32(pts_hist)
+        pts_curr_np = np.float32(pts_curr)
+        
+        F, mask = cv2.findFundamentalMat(pts_hist_np, pts_curr_np, cv2.FM_RANSAC, ransac_thresh)
+        if F is None or mask is None or F.shape != (3, 3):
+            return []
+
+        mask_flat = mask.ravel()
+        inlier_paths = []
+        inlier_indices = []
+        
+        for idx, is_inlier in enumerate(mask_flat):
+            if is_inlier:
+                # Map coordinates back into normalized [0, 1] grid relative to proc_size
+                h_norm = [pts_hist[idx][0] / proc_size, pts_hist[idx][1] / proc_size]
+                c_norm = [pts_curr[idx][0] / proc_size, pts_curr[idx][1] / proc_size]
+                inlier_paths.append({
+                    "hist": h_norm,
+                    "curr": c_norm,
+                    "distance": float(match_distances[idx])
+                })
+                inlier_indices.append(idx)
 
     if keep_debug_info:
         # Wrap everything needed to render matches in GUI Mode
@@ -333,7 +348,7 @@ def detect_and_match_single_type(f_hist, f_curr, feature_type, asift_matcher=Non
         
     return inlier_paths
 
-def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thresh=5.0, min_motion=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75, asift_matcher=None, keep_debug_info=False):
+def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thresh=5.0, min_motion=3.0, min_texture_std=3.0, proc_size=800, min_ncc=0.75, asift_matcher=None, keep_debug_info=False, disable_ransac=False):
     """
     Executes and aggregates feature matches across multiple detectors (ASIFT, SURF, AKAZE).
     Keeps each matching metric distinct, and then pools verified moving paths together.
@@ -344,7 +359,7 @@ def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thr
             res = detect_and_match_single_type(
                 f_hist, f_curr, f_type, asift_matcher,
                 ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc,
-                keep_debug_info=True
+                keep_debug_info=True, disable_ransac=disable_ransac
             )
             if isinstance(res, dict) and res.get("status") == "success":
                 return res
@@ -355,7 +370,8 @@ def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thr
     # 1. ASIFT matching
     paths_asift = detect_and_match_single_type(
         f_hist, f_curr, 'asift', asift_matcher,
-        ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc
+        ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc,
+        disable_ransac=disable_ransac
     )
     if isinstance(paths_asift, list):
         aggregated_paths.extend(paths_asift)
@@ -363,7 +379,8 @@ def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thr
     # 2. SURF matching
     paths_surf = detect_and_match_single_type(
         f_hist, f_curr, 'surf', None,
-        ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc
+        ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc,
+        disable_ransac=disable_ransac
     )
     if isinstance(paths_surf, list):
         aggregated_paths.extend(paths_surf)
@@ -371,7 +388,8 @@ def match_features_doublet(f_hist, f_curr, ratio=0.85, min_inliers=6, ransac_thr
     # 3. AKAZE matching
     paths_akaze = detect_and_match_single_type(
         f_hist, f_curr, 'akaze', None,
-        ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc
+        ratio, min_inliers, ransac_thresh, min_motion, min_texture_std, proc_size, min_ncc,
+        disable_ransac=disable_ransac
     )
     if isinstance(paths_akaze, list):
         aggregated_paths.extend(paths_akaze)
@@ -404,10 +422,10 @@ def match_features_triplet(f_hist, f_mid, f_curr, ratio=0.85, min_inliers=6, ran
     if keep_debug_info:
         # In HUD visualize mode, we extract detailed matches for a single feature type, but try them in order
         res_1 = match_features_doublet(
-            f_hist, f_mid, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=True
+            f_hist, f_mid, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=True, disable_ransac=True
         )
         res_2 = match_features_doublet(
-            f_mid, f_curr, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=True
+            f_mid, f_curr, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=True, disable_ransac=True
         )
         
         if res_1["status"] != "success" or res_2["status"] != "success":
@@ -418,10 +436,10 @@ def match_features_triplet(f_hist, f_mid, f_curr, ratio=0.85, min_inliers=6, ran
     else:
         # Production mode: returns lists of paths aggregated across ASIFT, SURF, and AKAZE
         paths_1 = match_features_doublet(
-            f_hist, f_mid, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=False
+            f_hist, f_mid, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=False, disable_ransac=True
         )
         paths_2 = match_features_doublet(
-            f_mid, f_curr, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=False
+            f_mid, f_curr, ratio, min_inliers, ransac_thresh, relaxed_min_motion, min_texture_std, proc_size, min_ncc, asift_matcher, keep_debug_info=False, disable_ransac=True
         )
         
         if not paths_1 or not paths_2:
