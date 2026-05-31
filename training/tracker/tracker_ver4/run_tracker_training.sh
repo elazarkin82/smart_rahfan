@@ -8,8 +8,9 @@ python3 tracker_model.py train \
     --num_of_epochs 5 \
     --lr 1e-4 \
     --loss focal \
-    --batch_size 64 \
+    --batch_size 16 \
+    --eval_pkl_num 20 \
     --output outputs/tracker.keras \
-    --output outputs/tracker.keras \
+    --init_keras_file outputs/tracker.keras \
     --best_train_loss_output outputs/tracker_best_train_loss.keras \
     --log_file outputs/train.log

@@ -254,12 +254,9 @@ def parse_training_samples(pkl_path):
         
         yield (ref, search), heatmap
 
-def build_tf_dataset(dataset_dir, batch_size=16, shuffle=True):
-    import glob
-    pkl_files = sorted(glob.glob(os.path.join(dataset_dir, "train_*.pkl")))
-    
+def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
     if not pkl_files:
-        raise FileNotFoundError(f"No train_*.pkl files found in '{dataset_dir}'.")
+        raise ValueError("No PKL files provided for dataset.")
         
     def generator():
         local_files = list(pkl_files)
@@ -310,23 +307,42 @@ def main():
     parser = argparse.ArgumentParser(description="TargetTrackerVer4 Training CLI")
     parser.add_argument("command", choices=["train"])
     parser.add_argument("--dataset_dir", required=True, help="Path to dataset PKL dir")
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=16, help="Training batch size")
+    parser.add_argument("--eval_pkl_num", type=int, default=4, help="Number of PKLs for validation")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_of_epochs", type=int, default=10)
     parser.add_argument("--loss", choices=["mse", "dice_bce", "focal"], default="mse")
     parser.add_argument("--output", type=str, default="outputs/tracker.keras")
     parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_best_train.keras")
+    parser.add_argument("--init_keras_file", type=str, default=None, help="Path to initial model to resume from")
     parser.add_argument("--log_file", type=str, default="outputs/train.log")
     
     args = parser.parse_args()
     
     if args.command == "train":
-        # Note: In a real scenario we'd split train and val. Here we just duplicate for demonstration.
-        train_ds = build_tf_dataset(args.dataset_dir, batch_size=args.batch_size, shuffle=True)
-        val_ds = build_tf_dataset(args.dataset_dir, batch_size=args.batch_size, shuffle=False)
+        import glob
+        all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "train_*.pkl")))
+        if not all_pkls:
+            raise FileNotFoundError(f"No train_*.pkl files in {args.dataset_dir}")
+            
+        val_files = all_pkls[:args.eval_pkl_num]
+        train_files = all_pkls[args.eval_pkl_num:]
+        if not train_files:
+            train_files = val_files # Fallback
+            
+        train_ds = build_tf_dataset(train_files, batch_size=args.batch_size, shuffle=True)
+        val_ds = build_tf_dataset(val_files, batch_size=args.batch_size, shuffle=False)
         
         tracker = TargetTrackerVer4()
-        tracker.create_model()
+        
+        if args.init_keras_file and os.path.exists(args.init_keras_file):
+            import tensorflow as tf
+            print(f"Resuming training: loading model from {args.init_keras_file}...")
+            tracker.model = tf.keras.models.load_model(args.init_keras_file, compile=False, safe_mode=False)
+        else:
+            print("Building new TargetTrackerVer4 model...")
+            tracker.create_model()
+            
         tracker.train(
             train_dataset=train_ds,
             val_dataset=val_ds,
