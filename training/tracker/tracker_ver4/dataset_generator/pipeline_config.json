@@ -22,5 +22,13 @@
         "secondary_capture_delay_sec": 2.0,
         "drone_altitude_meters": 30.0,
         "drone_pitch_degrees": -30.0
+    },
+    "compiler": {
+        "dataset_dir": "dataset",
+        "stack_layers": 16,
+        "stack_target_size": 16,
+        "crop_max_size": 128,
+        "crop_min_size": 4,
+        "heatmap_sigma": 15.0
     }
 }
