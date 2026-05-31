@@ -33,4 +33,8 @@ import tqdm
 print("tqdm successfully loaded. Version:", tqdm.__version__)
 PY
 
+# Install dependencies for CARLA tracker_ver4 dataset_generator
+RUN python3 -m pip install pygame carla==0.9.15
+
 CMD ["/bin/bash"]
+

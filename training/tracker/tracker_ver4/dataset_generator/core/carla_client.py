@@ -32,7 +32,7 @@ class CarlaClientManager:
             "ClearNoon": carla.WeatherParameters.ClearNoon,
             "HeavyRain": carla.WeatherParameters.HardRainNoon,
             "Sunset": carla.WeatherParameters.ClearSunset,
-            "Foggy": carla.WeatherParameters.MidFoggyNoon
+            "Foggy": carla.WeatherParameters.CloudyNoon
         }
         preset = weather_presets.get(weather_str, carla.WeatherParameters.Default)
         self.world.set_weather(preset)

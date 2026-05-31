@@ -16,5 +16,5 @@ VOLUMES="\
 	-v /home/elazarkin/storage/private:/home/elazarkin/storage/private:ro \
 "
 
-docker run --rm --gpus all --cpus=3 -m 20g --net=host --env="DISPLAY" ${VOLUMES} -it smart-rahfan-keras-gpu:latest bash -c "${ADD_USER_COMMAND} && bash"
+docker run --rm --gpus all --cpus=8 --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -m 20g --net=host --env="DISPLAY" ${VOLUMES} -it smart-rahfan-keras-gpu:latest bash -c "${ADD_USER_COMMAND} && bash"
 #docker run --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --cpus=8 -m 20g --net=host --env="DISPLAY" ${VOLUMES} -it nvcr.io/nvidia/tensorflow:24.04-tf2-py3 bash -c "${ADD_USER_COMMAND} && bash"
