@@ -185,7 +185,11 @@ public class AutoCorrelationActivity extends AppCompatActivity {
                 
                 Bitmap currentFrame = cameraHelper.captureFrame();
                 if (currentFrame != null) {
-                    float[] imageCoords = getNormalizedCoords(viewX, viewY);
+                    int viewWidth = viewFinder.getWidth();
+                    int viewHeight = viewFinder.getHeight();
+                    float[] imageCoords = MainActivity.mapScreenCoordsToFrame(
+                            viewX, viewY, viewWidth, viewHeight, currentFrame.getWidth(), currentFrame.getHeight()
+                    );
                     if (imageCoords != null) {
                         lockTargetAt(imageCoords[0], imageCoords[1], currentFrame);
                         return true;

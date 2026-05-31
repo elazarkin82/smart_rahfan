@@ -96,7 +96,7 @@ if [ -d "${VIDEOS_DIR}" ]; then
         --filter_mode "${FILTER_MODE}" \
         --midpoint_angle_thresh "${MIDPOINT_ANGLE_THRESH}" \
         --midpoint_dist_tolerance "${MIDPOINT_DIST_TOLERANCE}" \
-        --num_of_samples 16384
+        --num_of_samples 8500
 else
     echo "Error: Videos directory '${VIDEOS_DIR}' does not exist or is not a directory." >&2
     echo "Usage: $0 [/path/to/videos]" >&2

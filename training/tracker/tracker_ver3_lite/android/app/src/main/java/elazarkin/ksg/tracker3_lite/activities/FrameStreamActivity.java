@@ -173,7 +173,11 @@ public class FrameStreamActivity extends AppCompatActivity {
                     
                     Bitmap currentFrame = cameraHelper.captureFrame();
                     if (currentFrame != null) {
-                        float[] imageCoords = getNormalizedCoords(viewX, viewY);
+                        int viewWidth = capturedImageView.getWidth();
+                        int viewHeight = capturedImageView.getHeight();
+                        float[] imageCoords = MainActivity.mapScreenCoordsToFrame(
+                                viewX, viewY, viewWidth, viewHeight, currentFrame.getWidth(), currentFrame.getHeight()
+                        );
                         if (imageCoords != null) {
                             initializeTrackingAt(imageCoords[0], imageCoords[1], currentFrame);
                             return true;
@@ -478,7 +482,7 @@ public class FrameStreamActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (currentUiState == STATE_TRACKING && !isLoopActive) {
+        if (cameraHelper != null && cameraHelper.hasCameraPermission() && !isLoopActive) {
             isLoopActive = true;
             trackingHandler.post(trackingRunnable);
         }

@@ -131,26 +131,58 @@ class TargetTracker:
         self.curr_shape = curr_shape
         self.model = None
         
+    def _inverted_residual_block(self, inputs, expansion, filters, strides, name_prefix):
+        x = inputs
+        in_channels = inputs.shape[-1]
+        
+        # Expand
+        if expansion > 1:
+            x = layers.Conv2D(expansion * in_channels, (1, 1), padding="same", use_bias=False, name=f"{name_prefix}_expand")(x)
+            x = layers.BatchNormalization(name=f"{name_prefix}_expand_bn")(x)
+            x = layers.ReLU(6.0, name=f"{name_prefix}_expand_relu")(x)
+            
+        # Depthwise
+        x = layers.DepthwiseConv2D((3, 3), strides=strides, padding="same", use_bias=False, name=f"{name_prefix}_dw")(x)
+        x = layers.BatchNormalization(name=f"{name_prefix}_dw_bn")(x)
+        x = layers.ReLU(6.0, name=f"{name_prefix}_dw_relu")(x)
+        
+        # Project
+        x = layers.Conv2D(filters, (1, 1), padding="same", use_bias=False, name=f"{name_prefix}_project")(x)
+        x = layers.BatchNormalization(name=f"{name_prefix}_project_bn")(x)
+        
+        # Skip connection if strides == 1 and in_channels == filters
+        if strides == 1 and in_channels == filters:
+            x = layers.Add(name=f"{name_prefix}_add")([inputs, x])
+            
+        return x
+
     def _create_cnn_backbone(self):
         """
         Creates a shared Siamese CNN backbone for feature extraction.
+        Uses Lightweight Inverted Residual Blocks (MobileNet-style) for low-power edge devices.
         Accepts 1-channel inputs: (256, 256, 1)
-        Output shape: (16, 16, 128)
+        Output shape: (16, 16, 64)
         """
         inputs = layers.Input(shape=(256, 256, 1), name="cnn_input")
         
-        # Lightweight strided convolutions (Max 128 channels)
-        x = layers.Conv2D(16, (3, 3), strides=2, padding="same", activation="relu")(inputs)
-        x = layers.BatchNormalization()(x)
+        # Init conv (strides=2) -> (128, 128, 16)
+        x = layers.Conv2D(16, (3, 3), strides=2, padding="same", use_bias=False, name="backbone_init_conv")(inputs)
+        x = layers.BatchNormalization(name="backbone_init_bn")(x)
+        x = layers.ReLU(6.0, name="backbone_init_relu")(x)
         
-        x = layers.Conv2D(32, (3, 3), strides=2, padding="same", activation="relu")(x)
-        x = layers.BatchNormalization()(x)
+        # IR Block 1 (strides=2) -> (64, 64, 16)
+        x = self._inverted_residual_block(x, expansion=1, filters=16, strides=2, name_prefix="backbone_ir1")
         
-        x = layers.Conv2D(64, (3, 3), strides=2, padding="same", activation="relu")(x)
-        x = layers.BatchNormalization()(x)
+        # IR Block 2 (strides=2) -> (32, 32, 24)
+        x = self._inverted_residual_block(x, expansion=3, filters=24, strides=2, name_prefix="backbone_ir2")
         
-        x = layers.Conv2D(128, (3, 3), strides=2, padding="same", activation="relu")(x)
-        x = layers.BatchNormalization()(x)
+        # IR Block 3 (strides=2) -> (16, 16, 32)
+        x = self._inverted_residual_block(x, expansion=3, filters=32, strides=2, name_prefix="backbone_ir3")
+        
+        # Final Expand -> (16, 16, 64)
+        x = layers.Conv2D(64, (1, 1), padding="same", use_bias=False, name="backbone_final_conv")(x)
+        x = layers.BatchNormalization(name="backbone_final_bn")(x)
+        x = layers.ReLU(6.0, name="backbone_final_relu")(x)
         
         return models.Model(inputs, x, name="siamese_cnn_backbone")
 
@@ -190,21 +222,19 @@ class TargetTracker:
             [hist_features_gated, curr_features, interaction_features]
         )
         
-        # 8. Lightweight Decoder with Depthwise Separable Convolutions
-        # Depthwise step
-        x = layers.DepthwiseConv2D((3, 3), padding="same", activation="relu", name="decoder_depthwise")(fused_features)
+        # 8. Lightweight Decoder for edge devices
+        # Reduce channels using Pointwise
+        x = layers.Conv2D(64, (1, 1), padding="same", use_bias=False, name="decoder_reduce")(fused_features)
         x = layers.BatchNormalization()(x)
-        # Pointwise step to compress channels: (16, 16, 128)
-        x = layers.Conv2D(128, (1, 1), padding="same", activation="relu", name="decoder_pointwise")(x)
-        x = layers.BatchNormalization()(x)
+        x = layers.ReLU(6.0)(x)
         
-        # Upsample 1: (16, 16) -> (32, 32, 64)
-        x = layers.Conv2DTranspose(64, (3, 3), strides=2, padding="same", activation="relu", name="decoder_upsample_1")(x)
-        x = layers.BatchNormalization()(x)
+        # Upsample 1: (16, 16) -> (32, 32)
+        x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_upsample_1")(x)
+        x = self._inverted_residual_block(x, expansion=2, filters=32, strides=1, name_prefix="decoder_ir1")
         
-        # Upsample 2: (32, 32) -> (64, 64, 32)
-        x = layers.Conv2DTranspose(32, (3, 3), strides=2, padding="same", activation="relu", name="decoder_upsample_2")(x)
-        x = layers.BatchNormalization()(x)
+        # Upsample 2: (32, 32) -> (64, 64)
+        x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_upsample_2")(x)
+        x = self._inverted_residual_block(x, expansion=2, filters=16, strides=1, name_prefix="decoder_ir2")
         
         # Final Convolutional Prediction Layer: (64, 64, 1) probability heatmap
         output_heatmap = layers.Conv2D(1, (3, 3), padding="same", activation="sigmoid", name="predicted_heatmap")(x)
@@ -455,8 +485,8 @@ def main(args_list=None):
     train_parser.add_argument(
         "--loss", 
         choices=["mse", "huber", "logcosh", "dice_bce", "focal"], 
-        default="dice_bce", 
-        help="Loss function (default: dice_bce)"
+        default="mse", 
+        help="Loss function (default: mse)"
     )
     train_parser.add_argument(
         "--eval_pkl_num", 

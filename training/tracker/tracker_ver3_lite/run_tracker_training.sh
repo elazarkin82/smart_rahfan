@@ -2,10 +2,10 @@
 
 python3 tracker_model.py train \
     --dataset_dir dataset_generation_project/video_dataset/ \
-    --num_of_epochs 2 \
-    --lr 1e-5 \
-    --loss dice_bce \
-    --eval_pkl_num 100 \
+    --num_of_epochs 10 \
+    --lr 1e-3 \
+    --loss mse \
+    --eval_pkl_num 5 \
     --init_keras_file outputs/tracker.keras \
     --output outputs/tracker.keras \
     --best_train_loss_output outputs/tracker_best_train_loss.keras \

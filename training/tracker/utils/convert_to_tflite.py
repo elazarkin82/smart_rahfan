@@ -48,7 +48,7 @@ def main():
     print(f"[*] Loading Keras model from: {args.keras_in} ...")
     try:
         # Load with compile=False to bypass custom loss function requirements during inference conversion
-        model = tf.keras.models.load_model(args.keras_in, compile=False)
+        model = tf.keras.models.load_model(args.keras_in, compile=False, safe_mode=False)
         print("[+] Model loaded successfully.")
     except Exception as e:
         print(f"Error: Failed to load the Keras model. Details:\n{e}", file=sys.stderr)
