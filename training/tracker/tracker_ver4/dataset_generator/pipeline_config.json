@@ -1,0 +1,21 @@
+{
+    "carla": {
+        "host": "127.0.0.1",
+        "port": 2000,
+        "timeout": 30.0,
+        "town": "Town10HD_Opt",
+        "weather": "ClearNoon"
+    },
+    "sensor": {
+        "width": 800,
+        "height": 600,
+        "fov": 90.0,
+        "fps": 30
+    },
+    "generation": {
+        "output_dir": "outputs",
+        "secondary_capture_delay_sec": 2.0,
+        "drone_altitude_meters": 30.0,
+        "drone_pitch_degrees": -30.0
+    }
+}
