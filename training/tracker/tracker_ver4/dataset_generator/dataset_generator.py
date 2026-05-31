@@ -203,14 +203,20 @@ def main():
                 frame_success = False
                 for attempt in range(10):
                     base_t = carla.Transform(clean_base_t.location, clean_base_t.rotation)
+                    
+                    # Dynamic Noise Scaling: scale down wind/mechanical noise as the drone gets closer to the target
+                    # (since pixel projection sensitivity rises exponentially at close range).
+                    current_dist = dist - smooth_t * (dist - stop_dist)
+                    noise_scale = min(1.0, current_dist / 30.0)
+                    
                     # Add smooth mechanical/wind noise (Pitch, Roll, X, Y)
                     phase = flights_generated * 10 + frame_idx * 0.2 + attempt * 5.0
-                    base_t.location.x += math.sin(phase * 1.3) * 0.3
-                    base_t.location.y += math.cos(phase * 1.7) * 0.3
-                    base_t.location.z += math.sin(phase * 0.9) * 0.1
-                    base_t.rotation.pitch += math.cos(phase * 2.1) * 0.5
-                    base_t.rotation.roll += math.sin(phase * 2.5) * 1.0
-                    base_t.rotation.yaw += math.cos(phase * 1.5) * 0.5
+                    base_t.location.x += math.sin(phase * 1.3) * 0.3 * noise_scale
+                    base_t.location.y += math.cos(phase * 1.7) * 0.3 * noise_scale
+                    base_t.location.z += math.sin(phase * 0.9) * 0.1 * noise_scale
+                    base_t.rotation.pitch += math.cos(phase * 2.1) * 0.5 * noise_scale
+                    base_t.rotation.roll += math.sin(phase * 2.5) * 1.0 * noise_scale
+                    base_t.rotation.yaw += math.cos(phase * 1.5) * 0.5 * noise_scale
                     
                     sensor_mgr.move_to(base_t)
                     

@@ -29,12 +29,17 @@ class SensorManager:
         rgb_bp.set_attribute('fov', str(self.fov))
         self.rgb_sensor = self.world.spawn_actor(rgb_bp, transform)
         
-        # Depth
+        # Depth - Rigidly attach to RGB sensor to eliminate synchronization jitter and network set_transform delays
         depth_bp = blueprint_library.find('sensor.camera.depth')
         depth_bp.set_attribute('image_size_x', str(self.width))
         depth_bp.set_attribute('image_size_y', str(self.height))
         depth_bp.set_attribute('fov', str(self.fov))
-        self.depth_sensor = self.world.spawn_actor(depth_bp, transform)
+        self.depth_sensor = self.world.spawn_actor(
+            depth_bp, 
+            carla.Transform(), 
+            attach_to=self.rgb_sensor, 
+            attachment_type=carla.AttachmentType.Rigid
+        )
         
         # Listeners
         weak_self = weakref.ref(self)
@@ -44,8 +49,6 @@ class SensorManager:
     def move_to(self, transform):
         if self.rgb_sensor:
             self.rgb_sensor.set_transform(transform)
-        if self.depth_sensor:
-            self.depth_sensor.set_transform(transform)
  
     def get_transform(self):
         if self.rgb_sensor:
