@@ -75,7 +75,7 @@ class SensorManager:
         array = array[:, :, :3]
         # BGR to RGB
         array = array[:, :, ::-1]
-        self.image_queue.put((image.frame, array))
+        self.image_queue.put((image.frame, array, image.transform))
 
     @staticmethod
     def _depth_callback(weak_self, image):
@@ -95,23 +95,23 @@ class SensorManager:
         normalized = (R + G * 256.0 + B * 256.0 * 256.0) / (256.0 * 256.0 * 256.0 - 1.0)
         depth_meters = normalized * 1000.0
         
-        self.depth_queue.put((image.frame, depth_meters))
+        self.depth_queue.put((image.frame, depth_meters, image.transform))
 
     def get_sync_data(self, timeout=2.0):
         """
         Attempts to fetch a synchronized pair of (RGB, Depth) frames.
         """
         try:
-            rgb_frame, rgb_array = self.image_queue.get(timeout=timeout)
-            depth_frame, depth_array = self.depth_queue.get(timeout=timeout)
+            rgb_frame, rgb_array, rgb_transform = self.image_queue.get(timeout=timeout)
+            depth_frame, depth_array, depth_transform = self.depth_queue.get(timeout=timeout)
             
             # Simple sync loop in case they fall out of step
             while rgb_frame != depth_frame:
                 if rgb_frame < depth_frame:
-                    rgb_frame, rgb_array = self.image_queue.get(timeout=timeout)
+                    rgb_frame, rgb_array, rgb_transform = self.image_queue.get(timeout=timeout)
                 else:
-                    depth_frame, depth_array = self.depth_queue.get(timeout=timeout)
+                    depth_frame, depth_array, depth_transform = self.depth_queue.get(timeout=timeout)
                     
-            return rgb_array, depth_array
+            return rgb_array, depth_array, rgb_transform
         except queue.Empty:
-            return None, None
+            return None, None, None

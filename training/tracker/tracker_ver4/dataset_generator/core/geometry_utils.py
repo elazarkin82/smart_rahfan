@@ -51,3 +51,40 @@ def get_3d_world_from_pixel(x, y, depth_image_meters, K, camera_transform):
     # Multiply Extrinsic Matrix by local vector
     p_world = np.dot(extrinsic, p_ue4_local)
     return p_world[:3]
+
+def get_3d_world_to_pixel(world_point, K, camera_transform):
+    """
+    Projects a 3D absolute world coordinate back to a 2D pixel (x,y) on the camera screen.
+    Returns (x, y) if the point is in front of the camera, else None.
+    """
+    if world_point is None:
+        return None
+        
+    p_world = np.array([world_point[0], world_point[1], world_point[2], 1.0])
+    
+    # 1. World to Camera Local (inverse of extrinsic)
+    extrinsic_inv = np.array(camera_transform.get_inverse_matrix())
+    p_ue4_local = np.dot(extrinsic_inv, p_world)
+    
+    # 2. UE4 Local to Camera Standard CV space
+    # UE4: X is forward, Y is right, Z is up
+    # CV: Z is forward, X is right, Y is down
+    Z_cam = p_ue4_local[0]
+    X_cam = p_ue4_local[1]
+    Y_cam = -p_ue4_local[2]
+    
+    if Z_cam <= 0.0:
+        # Point is behind the camera plane
+        return None
+        
+    p_cam = np.array([X_cam, Y_cam, Z_cam])
+    
+    # 3. Project to 2D pixel coordinates using Intrinsic Matrix K
+    p_img = np.dot(K, p_cam)
+    
+    # Normalize by Z
+    u = p_img[0] / p_img[2]
+    v = p_img[1] / p_img[2]
+    
+    return (int(u), int(v))
+
