@@ -19,7 +19,7 @@ class KerasFCNVisualizer:
         
         # 1. Load the Keras model
         print(f"Loading Keras FCN model from {model_path}...")
-        self.model = tf.keras.models.load_model(model_path, compile=False)
+        self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
         
         # 2. Discover all pre-generated pickle batches
         self.dataset_dir = dataset_dir

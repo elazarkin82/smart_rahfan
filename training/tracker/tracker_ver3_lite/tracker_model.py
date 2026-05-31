@@ -501,7 +501,7 @@ def main(args_list=None):
         
         if args.init_keras_file and os.path.exists(args.init_keras_file):
             print(f"Resuming training: loading model from {args.init_keras_file}...")
-            tracker.model = tf.keras.models.load_model(args.init_keras_file, compile=False)
+            tracker.model = tf.keras.models.load_model(args.init_keras_file, compile=False, safe_mode=False)
         else:
             print("Building new symmetric TargetTracker Lite model...")
             tracker.create_model()
