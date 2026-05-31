@@ -17,6 +17,15 @@ def load_config(path="pipeline_config.json"):
 def lerp(a, b, t):
     return a + (b - a) * t
 
+def shortest_angle_diff(source, target):
+    diff = (target - source) % 360.0
+    if diff > 180.0:
+        diff -= 360.0
+    return diff
+
+def lerp_angle(a, b, t):
+    return a + shortest_angle_diff(a, b) * t
+
 def lerp_transform(t1, t2, t):
     """Linearly interpolates between two carla.Transforms."""
     loc = carla.Location(
@@ -25,9 +34,9 @@ def lerp_transform(t1, t2, t):
         lerp(t1.location.z, t2.location.z, t)
     )
     rot = carla.Rotation(
-        lerp(t1.rotation.pitch, t2.rotation.pitch, t),
-        lerp(t1.rotation.yaw, t2.rotation.yaw, t),
-        lerp(t1.rotation.roll, t2.rotation.roll, t)
+        lerp_angle(t1.rotation.pitch, t2.rotation.pitch, t),
+        lerp_angle(t1.rotation.yaw, t2.rotation.yaw, t),
+        lerp_angle(t1.rotation.roll, t2.rotation.roll, t)
     )
     return carla.Transform(loc, rot)
 
@@ -232,6 +241,8 @@ def main():
                     )
                     is_auto_flying = True
                     flight_start_time = time.time()
+                    # Calculate duration based on distance (approx 5 meters per second, min 3 seconds)
+                    flight_duration = max(3.0, (dist - stop_dist) / 5.0)
                     
                     pending_capture = True
                     capture_timer = time.time() + config['generation']['secondary_capture_delay_sec']
