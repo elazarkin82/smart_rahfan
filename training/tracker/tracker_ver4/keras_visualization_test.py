@@ -107,8 +107,8 @@ class KerasFCNVisualizer:
                 
             sample = self.current_batch_data[self.current_sample_idx]
             
-            ref_stack = sample["reference_stack"]  # (16, 16, 16, 3)
-            search_raw = sample["search_frame"]    # (H, W, 3)
+            ref_stack = sample["reference_stack"]  # (16, 16, 16, 1)
+            search_raw = sample["search_frame"]    # (H, W, 1)
             gt_heatmap = sample["ground_truth_heatmap"]
             meta = sample["metadata"]
             target_2d = meta["target_2d"]
@@ -120,15 +120,15 @@ class KerasFCNVisualizer:
             norm_y = target_2d[1] / h_raw
             
             # Show the largest reference crop (layer 0) scaled up
-            ref_layer_0 = ref_stack[0] # (16, 16, 3)
+            ref_layer_0 = ref_stack[0, :, :, 0] # (16, 16)
             ref_vis = cv2.resize(ref_layer_0, (256, 256), interpolation=cv2.INTER_NEAREST)
             self.tk_img_ref = ImageTk.PhotoImage(Image.fromarray(ref_vis))
             
             # Prepare inputs for model
             ref_tensor = tf.expand_dims(tf.cast(ref_stack, tf.float32) / 255.0, 0)
             
-            search_256 = cv2.resize(search_raw, (256, 256), interpolation=cv2.INTER_LINEAR)
-            search_tensor = tf.expand_dims(tf.cast(search_256, tf.float32) / 255.0, 0)
+            search_256 = cv2.resize(search_raw[:, :, 0], (256, 256), interpolation=cv2.INTER_LINEAR)
+            search_tensor = tf.expand_dims(tf.expand_dims(tf.cast(search_256, tf.float32) / 255.0, -1), 0)
             
             # Predict
             pred = self.model([ref_tensor, search_tensor], training=False)
@@ -147,11 +147,12 @@ class KerasFCNVisualizer:
             else:
                 pred_norm = [0.5, 0.5]
             
-            self.tk_img_curr = self.process_and_draw(search_256, [norm_x, norm_y], "#00e6ff")
+            search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
+            self.tk_img_curr = self.process_and_draw(search_rgb, [norm_x, norm_y], "#00e6ff")
             
             # Overlay heatmap on search image
             heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
-            overlay = cv2.addWeighted(search_256, 0.6, heatmap_color, 0.4, 0)
+            overlay = cv2.addWeighted(search_rgb, 0.6, heatmap_color, 0.4, 0)
             self.tk_img_pred = self.process_and_draw(overlay, pred_norm, "#33ff33")
             
             self.ref_panel.config(image=self.tk_img_ref)

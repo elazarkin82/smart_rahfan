@@ -97,21 +97,42 @@ class SensorManager:
         
         self.depth_queue.put((image.frame, depth_meters, image.transform))
 
-    def get_sync_data(self, timeout=2.0):
+    def get_sync_data(self, frame_id=None, timeout=2.0):
         """
         Attempts to fetch a synchronized pair of (RGB, Depth) frames.
+        If frame_id is provided, discards any frames older than frame_id to prevent queue backlog.
         """
         try:
-            rgb_frame, rgb_array, rgb_transform = self.image_queue.get(timeout=timeout)
-            depth_frame, depth_array, depth_transform = self.depth_queue.get(timeout=timeout)
+            # 1. Fetch RGB frame, discarding stale frames
+            while True:
+                rgb_frame, rgb_array, rgb_transform = self.image_queue.get(timeout=timeout)
+                if frame_id is None or rgb_frame >= frame_id:
+                    break
+                # Discard older frames
+                
+            # 2. Fetch Depth frame, discarding stale frames
+            while True:
+                depth_frame, depth_array, depth_transform = self.depth_queue.get(timeout=timeout)
+                if frame_id is None or depth_frame >= frame_id:
+                    break
+                # Discard older frames
             
-            # Simple sync loop in case they fall out of step
+            # 3. Synchronize frame IDs between RGB and Depth
             while rgb_frame != depth_frame:
                 if rgb_frame < depth_frame:
-                    rgb_frame, rgb_array, rgb_transform = self.image_queue.get(timeout=timeout)
+                    while True:
+                        rgb_frame, rgb_array, rgb_transform = self.image_queue.get(timeout=timeout)
+                        if frame_id is None or rgb_frame >= frame_id:
+                            break
                 else:
-                    depth_frame, depth_array, depth_transform = self.depth_queue.get(timeout=timeout)
-                    
+                    while True:
+                        depth_frame, depth_array, depth_transform = self.depth_queue.get(timeout=timeout)
+                        if frame_id is None or depth_frame >= frame_id:
+                            break
+            
+            if frame_id is not None and rgb_frame > frame_id:
+                print(f"[SensorManager] Warning: Missed exact frame {frame_id}, caught up to {rgb_frame}")
+                
             return rgb_array, depth_array, rgb_transform
         except queue.Empty:
             return None, None, None

@@ -140,9 +140,9 @@ def main():
             
             # Clear old frames, then tick to get exactly 1 frame at start_point
             clear_queues(sensor_mgr)
-            world.tick()
+            fid_start = world.tick()
             
-            rgb_array, depth_array, rgb_transform = sensor_mgr.get_sync_data(timeout=5.0)
+            rgb_array, depth_array, rgb_transform = sensor_mgr.get_sync_data(frame_id=fid_start, timeout=5.0)
             if rgb_array is None or depth_array is None:
                 continue
                 
@@ -192,53 +192,68 @@ def main():
             
             # Thorough flush to clear any late-arriving TCP packets from previous ticks
             for _ in range(4):
-                world.tick()
-                sensor_mgr.get_sync_data(timeout=1.0)
+                fid_flush = world.tick()
+                sensor_mgr.get_sync_data(frame_id=fid_flush, timeout=1.0)
             
             for frame_idx in range(frames_per_flight):
                 t = frame_idx / float(frames_per_flight - 1)
                 smooth_t = t * t * (3 - 2 * t)
-                base_t = lerp_transform(start_point, end_transform, smooth_t)
+                clean_base_t = lerp_transform(start_point, end_transform, smooth_t)
                 
-                # Add smooth mechanical/wind noise (Pitch, Roll, X, Y)
-                # Using sine/cosine based on frame index to create a smooth wobble instead of violent shaking
-                phase = flights_generated * 10 + frame_idx * 0.2
-                base_t.location.x += math.sin(phase * 1.3) * 0.3
-                base_t.location.y += math.cos(phase * 1.7) * 0.3
-                base_t.location.z += math.sin(phase * 0.9) * 0.1
-                base_t.rotation.pitch += math.cos(phase * 2.1) * 0.5
-                base_t.rotation.roll += math.sin(phase * 2.5) * 1.0
-                base_t.rotation.yaw += math.cos(phase * 1.5) * 0.5
-                
-                sensor_mgr.move_to(base_t)
-                
-                # In synchronous mode, TICK forces the engine to step and render EXACTLY this transform!
-                world.tick()
-                rgb_arr, d_arr, trans = sensor_mgr.get_sync_data(timeout=2.0)
-                
-                if rgb_arr is None or trans is None:
+                frame_success = False
+                for attempt in range(10):
+                    base_t = carla.Transform(clean_base_t.location, clean_base_t.rotation)
+                    # Add smooth mechanical/wind noise (Pitch, Roll, X, Y)
+                    phase = flights_generated * 10 + frame_idx * 0.2 + attempt * 5.0
+                    base_t.location.x += math.sin(phase * 1.3) * 0.3
+                    base_t.location.y += math.cos(phase * 1.7) * 0.3
+                    base_t.location.z += math.sin(phase * 0.9) * 0.1
+                    base_t.rotation.pitch += math.cos(phase * 2.1) * 0.5
+                    base_t.rotation.roll += math.sin(phase * 2.5) * 1.0
+                    base_t.rotation.yaw += math.cos(phase * 1.5) * 0.5
+                    
+                    sensor_mgr.move_to(base_t)
+                    
+                    # In synchronous mode, TICK forces the engine to step and render EXACTLY this transform!
+                    fid_step = world.tick()
+                    rgb_arr, d_arr, trans = sensor_mgr.get_sync_data(frame_id=fid_step, timeout=2.0)
+                    
+                    if rgb_arr is None or trans is None or d_arr is None:
+                        continue
+                        
+                    # Project target
+                    px_draw = get_3d_world_to_pixel(target_3d, K, trans)
+                    
+                    # If target goes out of frame, this flight is ruined
+                    if px_draw is None or not (0 <= px_draw[0] < width and 0 <= px_draw[1] < height):
+                        continue
+                        
+                    # Check occlusion
+                    actual_dist = np.linalg.norm(target_3d - np.array([trans.location.x, trans.location.y, trans.location.z]))
+                    depth_val = d_arr[px_draw[1], px_draw[0]]
+                    if depth_val < actual_dist - 1.5:
+                        continue # Occluded!
+                    
+                    frame_success = True
+                    break
+                    
+                if not frame_success:
                     valid_flight = False
                     break
                     
-                # Project target
-                px_draw = get_3d_world_to_pixel(target_3d, K, trans)
-                
-                # If target goes out of frame, this flight is ruined
-                if px_draw is None or not (0 <= px_draw[0] < width and 0 <= px_draw[1] < height):
-                    valid_flight = False
-                    break
+                gray_arr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2GRAY)
                     
                 flight_data.append({
                     "frame_index": frame_idx,
-                    "image_rgb": rgb_arr,
+                    "image_gray": gray_arr,
                     "target_2d": px_draw,
                     "target_3d": target_3d,
-                    "distance_to_target": np.linalg.norm(target_3d - np.array([trans.location.x, trans.location.y, trans.location.z]))
+                    "distance_to_target": actual_dist
                 })
                 
                 # Debug Drawing
                 if is_debug:
-                    bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+                    bgr = cv2.cvtColor(gray_arr, cv2.COLOR_GRAY2BGR)
                     cv2.circle(bgr, px_draw, 20, (0, 0, 255), 2)
                     cv2.circle(bgr, px_draw, 3, (0, 0, 255), -1)
                     cv2.imwrite(os.path.join(flight_debug_dir, f"{frame_idx:02d}_frame.png"), bgr)

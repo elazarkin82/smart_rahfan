@@ -65,9 +65,10 @@ def build_reference_stack(image, center, num_layers, max_size, min_size, target_
         resized = cv2.resize(crop, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
         stack_layers.append(resized)
         
-    # Stack along first axis to form (Layers, H, W, C)
-    # Output dtype uint8 to save space in the PKL
-    return np.stack(stack_layers, axis=0).astype(np.uint8)
+    # Stack along first axis to form (Layers, H, W)
+    stack = np.stack(stack_layers, axis=0).astype(np.uint8)
+    # Expand dims to add the channel dimension: (Layers, H, W, 1)
+    return np.expand_dims(stack, axis=-1)
 
 def main():
     config = load_config()
@@ -112,7 +113,7 @@ def main():
         # 1. Reference Initialization (from frame 0)
         frame_0 = flight_data[0]
         ref_stack = build_reference_stack(
-            frame_0['image_rgb'], 
+            frame_0['image_gray'], 
             frame_0['target_2d'], 
             layers, max_sz, min_sz, tgt_sz
         )
@@ -120,14 +121,15 @@ def main():
         # 2. Training Pairs (frames 1..N)
         training_samples = []
         for frame_dict in flight_data[1:]:
-            search_frame = frame_dict['image_rgb']
+            search_frame_gray = frame_dict['image_gray']
+            search_frame = np.expand_dims(search_frame_gray, axis=-1)
             target_2d = frame_dict['target_2d']
             
             heatmap = generate_heatmap(search_frame.shape, target_2d, sigma)
             
             sample = {
-                "reference_stack": ref_stack,               # Shape: (16, 16, 16, 3)
-                "search_frame": search_frame,               # Shape: (H, W, 3)
+                "reference_stack": ref_stack,               # Shape: (16, 16, 16, 1)
+                "search_frame": search_frame,               # Shape: (H, W, 1)
                 "ground_truth_heatmap": heatmap.astype(np.float16), # Shape: (H, W, 1) Float16 to save space
                 "metadata": {
                     "flight_id": basename,

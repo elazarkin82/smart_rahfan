@@ -40,7 +40,7 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
 # =====================================================================
 
 class TargetTrackerVer4:
-    def __init__(self, ref_shape=(16, 16, 16, 3), search_shape=(256, 256, 3)):
+    def __init__(self, ref_shape=(16, 16, 16, 1), search_shape=(256, 256, 1)):
         self.ref_shape = ref_shape
         self.search_shape = search_shape
         self.model = None
@@ -266,13 +266,13 @@ def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
         for path in local_files:
             yield from parse_training_samples(path)
             
-    # Reference shape: (16, 16, 16, 3) uint8
-    # Search frame shape: (H, W, 3) uint8
+    # Reference shape: (16, 16, 16, 1) uint8
+    # Search frame shape: (H, W, 1) uint8
     # Heatmap shape: (H, W, 1) float16
     output_signature = (
         (
-            tf.TensorSpec(shape=(16, 16, 16, 3), dtype=tf.uint8, name="reference_stack"),
-            tf.TensorSpec(shape=(None, None, 3), dtype=tf.uint8, name="search_frame")
+            tf.TensorSpec(shape=(16, 16, 16, 1), dtype=tf.uint8, name="reference_stack"),
+            tf.TensorSpec(shape=(None, None, 1), dtype=tf.uint8, name="search_frame")
         ),
         tf.TensorSpec(shape=(None, None, 1), dtype=tf.float16, name="heatmap")
     )
