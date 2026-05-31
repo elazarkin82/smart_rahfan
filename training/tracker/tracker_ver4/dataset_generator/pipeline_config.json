@@ -3,7 +3,7 @@
         "host": "127.0.0.1",
         "port": 2000,
         "timeout": 30.0,
-        "maps": ["Town10HD_Opt", "Town04", "Town07", "Town01", "Town02"],
+        "maps": ["Town10HD_Opt", "Town04_Opt", "Town05_Opt"],
         "weather_presets": ["ClearNoon", "HeavyRain", "Sunset", "Foggy"]
     },
     "sensor": {

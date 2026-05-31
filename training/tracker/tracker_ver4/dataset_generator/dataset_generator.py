@@ -74,6 +74,7 @@ def main():
     client, world = client_mgr.connect()
     
     maps = config['carla']['maps']
+    random.shuffle(maps)
     weathers = config['carla']['weather_presets']
     
     flights_generated = len(existing_flights)
@@ -81,13 +82,14 @@ def main():
     debug_interval = config['generation']['debug_interval']
     
     sensor_mgr = None
+    last_map_load_flight = -1
     
     print(f"Starting Dataset Generation. Goal: {num_flights_target} flights.")
     
     try:
         while flights_generated < num_flights_target:
             # Load a random map every 10 flights to save loading time
-            if flights_generated % 10 == 0 or sensor_mgr is None:
+            if (flights_generated % 10 == 0 and flights_generated != last_map_load_flight) or sensor_mgr is None:
                 if sensor_mgr:
                     sensor_mgr.destroy()
                     
@@ -118,6 +120,8 @@ def main():
                     continue
                 sensor_mgr.spawn_cameras(sp[0])
                 world.tick() # Initial tick to spawn
+                
+                last_map_load_flight = flights_generated
                 
             client_mgr.set_weather(random.choice(weathers))
             world.tick()
@@ -160,8 +164,8 @@ def main():
             print(f"[{flights_generated+1}/{num_flights_target}] Generating Flight... Target Dist: {dist:.1f}m")
             
             # 2. Calculate flight path
-            # Fly towards the target, stopping 10 meters away
-            stop_dist = random.uniform(5.0, 15.0)
+            # Fly towards the target, getting very close
+            stop_dist = random.uniform(2.0, 5.0)
             vec = target_3d - np.array([start_point.location.x, start_point.location.y, start_point.location.z])
             dir_vec = vec / dist
             end_loc = np.array([start_point.location.x, start_point.location.y, start_point.location.z]) + dir_vec * (dist - stop_dist)
@@ -186,20 +190,25 @@ def main():
                 
             valid_flight = True
             
-            clear_queues(sensor_mgr)
+            # Thorough flush to clear any late-arriving TCP packets from previous ticks
+            for _ in range(4):
+                world.tick()
+                sensor_mgr.get_sync_data(timeout=1.0)
             
             for frame_idx in range(frames_per_flight):
                 t = frame_idx / float(frames_per_flight - 1)
                 smooth_t = t * t * (3 - 2 * t)
                 base_t = lerp_transform(start_point, end_transform, smooth_t)
                 
-                # Add mechanical/wind noise (Pitch, Roll, X, Y)
-                base_t.location.x += random.uniform(-0.5, 0.5)
-                base_t.location.y += random.uniform(-0.5, 0.5)
-                base_t.location.z += random.uniform(-0.2, 0.2)
-                base_t.rotation.pitch += random.uniform(-1.0, 1.0)
-                base_t.rotation.roll += random.uniform(-2.0, 2.0)
-                base_t.rotation.yaw += random.uniform(-1.0, 1.0)
+                # Add smooth mechanical/wind noise (Pitch, Roll, X, Y)
+                # Using sine/cosine based on frame index to create a smooth wobble instead of violent shaking
+                phase = flights_generated * 10 + frame_idx * 0.2
+                base_t.location.x += math.sin(phase * 1.3) * 0.3
+                base_t.location.y += math.cos(phase * 1.7) * 0.3
+                base_t.location.z += math.sin(phase * 0.9) * 0.1
+                base_t.rotation.pitch += math.cos(phase * 2.1) * 0.5
+                base_t.rotation.roll += math.sin(phase * 2.5) * 1.0
+                base_t.rotation.yaw += math.cos(phase * 1.5) * 0.5
                 
                 sensor_mgr.move_to(base_t)
                 
