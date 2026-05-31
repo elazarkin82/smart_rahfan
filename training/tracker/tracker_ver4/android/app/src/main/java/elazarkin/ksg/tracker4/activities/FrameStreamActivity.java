@@ -235,27 +235,26 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         Object[] inputs = new Object[]{ refStackInput, currInput };
         float[][][][] outputHeatmap = new float[1][256][256][1];
+        float[][] outputQuality = new float[1][1];
         Map<Integer, Object> outputs = new HashMap<>();
         outputs.put(0, outputHeatmap);
+        outputs.put(1, outputQuality);
 
         long infStart = SystemClock.elapsedRealtime();
         tflite.runForMultipleInputsOutputs(inputs, outputs);
         long infDuration = SystemClock.elapsedRealtime() - infStart;
 
-        float maxConfidence = 0.0f;
+        float qualityScore = outputQuality[0][0];
         float[] flatHeatmap = new float[256 * 256];
         for (int y = 0; y < 256; y++) {
             for (int x = 0; x < 256; x++) {
                 float val = outputHeatmap[0][y][x][0];
                 flatHeatmap[y * 256 + x] = val;
-                if (val > maxConfidence) {
-                    maxConfidence = val;
-                }
             }
         }
 
-        if (maxConfidence < CONFIDENCE_THRESHOLD) {
-            handleTargetLost("Low confidence peak: " + String.format("%.2f", maxConfidence));
+        if (qualityScore < CONFIDENCE_THRESHOLD) {
+            handleTargetLost("Low quality score: " + String.format("%.2f", qualityScore));
             return;
         }
 
@@ -277,7 +276,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
                 preDuration, infDuration, postDuration, totalDuration));
-        txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Conf: %.2f]", px, py, maxConfidence));
+        txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Quality: %.2f]", px, py, qualityScore));
         txtBufferStatus.setText("Tracking Engine: Active");
     }
 

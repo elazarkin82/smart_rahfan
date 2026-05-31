@@ -132,7 +132,8 @@ class KerasFCNVisualizer:
             
             # Predict
             pred = self.model([ref_tensor, search_tensor], training=False)
-            pred_heatmap = pred.numpy()[0]  # (256, 256, 1)
+            pred_heatmap = pred[0].numpy()[0]  # (256, 256, 1)
+            pred_quality = pred[1].numpy()[0][0]  # scalar float
             
             # Center of mass logic for sub-pixel prediction
             heatmap = pred_heatmap[:, :, 0]
@@ -163,7 +164,7 @@ class KerasFCNVisualizer:
             self.curr_lbl.config(text=f"GT: [{norm_x:.2f}, {norm_y:.2f}]", fg="#00e6ff")
             
             error = np.sqrt((pred_norm[0] - norm_x)**2 + (pred_norm[1] - norm_y)**2) * 256.0
-            self.pred_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\nError: {error:.1f}px", fg="#33ff33")
+            self.pred_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\nError: {error:.1f}px\nQuality: {pred_quality:.2f}", fg="#33ff33")
             
             self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
             

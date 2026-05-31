@@ -120,7 +120,17 @@ def main():
         
         # 2. Training Pairs (frames 1..N)
         training_samples = []
-        for frame_dict in flight_data[1:]:
+        
+        idx = cache_files.index(cache_path)
+        neg_flight_data = None
+        neg_cache_path = None
+        if len(cache_files) > 1:
+            neg_idx = (idx + 1) % len(cache_files)
+            neg_cache_path = cache_files[neg_idx]
+            with open(neg_cache_path, 'rb') as f:
+                neg_flight_data = pickle.load(f)
+                
+        for k, frame_dict in enumerate(flight_data[1:]):
             search_frame_gray = frame_dict['image_gray']
             search_frame = np.expand_dims(search_frame_gray, axis=-1)
             target_2d = frame_dict['target_2d']
@@ -131,14 +141,41 @@ def main():
                 "reference_stack": ref_stack,               # Shape: (16, 16, 16, 1)
                 "search_frame": search_frame,               # Shape: (H, W, 1)
                 "ground_truth_heatmap": heatmap.astype(np.float16), # Shape: (H, W, 1) Float16 to save space
+                "ground_truth_quality": np.array([1.0], dtype=np.float16), # Shape: (1,)
                 "metadata": {
                     "flight_id": basename,
                     "frame_idx": frame_dict['frame_index'],
                     "target_2d": target_2d,
-                    "distance": frame_dict['distance_to_target']
+                    "distance": frame_dict['distance_to_target'],
+                    "is_positive": 1
                 }
             }
             training_samples.append(sample)
+            
+            # 2b. Negative Pair: target from flight i is NOT present in flight j
+            if neg_flight_data is not None and len(neg_flight_data) > 1:
+                neg_k = (k % (len(neg_flight_data) - 1)) + 1
+                neg_frame_dict = neg_flight_data[neg_k]
+                
+                search_frame_gray_neg = neg_frame_dict['image_gray']
+                search_frame_neg = np.expand_dims(search_frame_gray_neg, axis=-1)
+                heatmap_neg = np.zeros(search_frame_neg.shape, dtype=np.float16)
+                
+                sample_neg = {
+                    "reference_stack": ref_stack,               # Shape: (16, 16, 16, 1)
+                    "search_frame": search_frame_neg,           # Shape: (H, W, 1)
+                    "ground_truth_heatmap": heatmap_neg,        # Shape: (H, W, 1)
+                    "ground_truth_quality": np.array([0.0], dtype=np.float16), # Shape: (1,)
+                    "metadata": {
+                        "flight_id": basename,
+                        "neg_flight_id": os.path.basename(neg_cache_path),
+                        "frame_idx": neg_frame_dict['frame_index'],
+                        "target_2d": None,
+                        "distance": neg_frame_dict['distance_to_target'],
+                        "is_positive": 0
+                    }
+                }
+                training_samples.append(sample_neg)
             
         # 3. Save to dataset dir
         with open(out_path, 'wb') as f:

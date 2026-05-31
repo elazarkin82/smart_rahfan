@@ -96,7 +96,7 @@ class TargetTrackerVer4:
     def _create_reference_encoder(self):
         inputs = layers.Input(shape=self.ref_shape, name="ref_encoder_input")
         
-        # Reshape (16, 16, 16, 3) -> (16, 16, 48)
+        # Reshape (16, 16, 16, 1) -> (16, 16, 16)
         x = layers.Reshape((self.ref_shape[0], self.ref_shape[1], self.ref_shape[2] * self.ref_shape[3]), name="ref_reshape")(inputs)
         
         # Conv 1
@@ -112,12 +112,7 @@ class TargetTrackerVer4:
         x = layers.BatchNormalization(name="ref_final_bn")(x)
         x = layers.ReLU(6.0, name="ref_final_relu")(x)
         
-        # Global Average Pooling to get the vector
-        x = layers.GlobalAveragePooling2D(name="ref_gap")(x) # -> (128,)
-        
-        # Expand dims to allow broadcast multiplication (1, 1, 128)
-        x = layers.Reshape((1, 1, 128), name="ref_vector_reshape")(x)
-        
+        # Return spatial features of shape (4, 4, 128) for spatial cross-attention
         return models.Model(inputs, x, name="reference_target_encoder")
 
     def create_model(self):
@@ -128,14 +123,30 @@ class TargetTrackerVer4:
         ref_encoder = self._create_reference_encoder()
         search_encoder = self._create_search_backbone()
         
-        target_vector = ref_encoder(ref_input)          # (1, 1, 128)
+        ref_features = ref_encoder(ref_input)          # (4, 4, 128)
         search_features = search_encoder(search_input)  # (16, 16, 128)
         
-        # 2. Late Feature Gating (Channel-wise Attention)
-        # Multiply search features by the target representation
-        fused_features = layers.Multiply(name="late_feature_gating")([search_features, target_vector])
+        # 2. Dot-Product Cross-Attention Fusion
+        # Project Q from search_features, K and V from ref_features
+        q_proj = layers.Conv2D(64, (1, 1), use_bias=False, name="q_proj")(search_features)  # (16, 16, 64)
+        k_proj = layers.Conv2D(64, (1, 1), use_bias=False, name="k_proj")(ref_features)     # (4, 4, 64)
+        v_proj = layers.Conv2D(128, (1, 1), use_bias=False, name="v_proj")(ref_features)    # (4, 4, 128)
         
-        # 3. Decoder
+        # Flatten spatial dimensions
+        q_flat = layers.Reshape((256, 64), name="q_flat")(q_proj)
+        k_flat = layers.Reshape((16, 64), name="k_flat")(k_proj)
+        v_flat = layers.Reshape((16, 128), name="v_flat")(v_proj)
+        
+        # Calculate search-to-reference spatial correlation: (256, 64) x (16, 64)^T -> (256, 16)
+        attn_weights = layers.Dot(axes=(2, 2), name="attention_dot")([q_flat, k_flat])
+        attn_weights = layers.Lambda(lambda x: x / 8.0, name="attention_scale")(attn_weights) # scale by sqrt(d_k)=8
+        attn_weights = layers.Softmax(axis=-1, name="attention_softmax")(attn_weights)
+        
+        # Fused features: (256, 16) x (16, 128) -> (256, 128)
+        fused_flat = layers.Dot(axes=(2, 1), name="attention_value_dot")([attn_weights, v_flat])
+        fused_features = layers.Reshape((16, 16, 128), name="fused_features_reshape")(fused_flat)
+        
+        # 3. Decoder for Output 1: Heatmap
         # Upsample 1: (16, 16) -> (32, 32)
         x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up1")(fused_features)
         x = self._inverted_residual_block(x, expansion=2, filters=64, strides=1, name_prefix="decoder_ir1")
@@ -152,12 +163,18 @@ class TargetTrackerVer4:
         x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up4")(x)
         x = self._inverted_residual_block(x, expansion=2, filters=8, strides=1, name_prefix="decoder_ir4")
         
-        # Final prediction layer
+        # Final prediction heatmap
         output_heatmap = layers.Conv2D(1, (3, 3), padding="same", activation="sigmoid", name="predicted_heatmap")(x)
+        
+        # 4. Classification Branch for Output 2: Quality Score
+        q = layers.Conv2D(32, (3, 3), strides=2, padding="same", activation="relu", name="quality_conv")(fused_features) # -> (8, 8, 32)
+        q = layers.GlobalAveragePooling2D(name="quality_gap")(q) # -> (32,)
+        q = layers.Dense(16, activation="relu", name="quality_fc1")(q)
+        output_quality = layers.Dense(1, activation="sigmoid", name="predicted_quality")(q)
         
         self.model = models.Model(
             inputs=[ref_input, search_input],
-            outputs=output_heatmap,
+            outputs=[output_heatmap, output_quality],
             name="TargetTrackerVer4"
         )
         
@@ -173,52 +190,66 @@ class TargetTrackerVer4:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(message + "\n")
 
-    def evaluate(self, dataset, loss_fn):
+    def evaluate(self, dataset, loss_fn_heatmap, loss_fn_quality):
         val_loss_avg = tf.keras.metrics.Mean()
         import tqdm
         for inputs, targets in tqdm.tqdm(dataset, desc="Evaluating", leave=False):
+            gt_heatmap = targets["predicted_heatmap"]
+            gt_quality = targets["predicted_quality"]
             predictions = self.model(inputs, training=False)
-            loss_value = loss_fn(targets, predictions)
+            pred_heatmap, pred_quality = predictions
+            
+            loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
+            loss_quality = loss_fn_quality(gt_quality, pred_quality)
+            loss_value = loss_heatmap + 1.0 * loss_quality
+            
             val_loss_avg.update_state(loss_value)
         return float(val_loss_avg.result())
 
-    def train_epoch(self, dataset, optimizer, loss_fn, epoch, num_epochs):
+    def train_epoch(self, dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_epochs):
         epoch_loss_avg = tf.keras.metrics.Mean()
         import tqdm
         progress_bar = tqdm.tqdm(dataset, desc=f"Epoch {epoch:03d}/{num_epochs:03d}", leave=False)
         
         for inputs, targets in progress_bar:
+            gt_heatmap = targets["predicted_heatmap"]
+            gt_quality = targets["predicted_quality"]
             with tf.GradientTape() as tape:
                 predictions = self.model(inputs, training=True)
-                loss_value = loss_fn(targets, predictions)
+                pred_heatmap, pred_quality = predictions
+                
+                loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
+                loss_quality = loss_fn_quality(gt_quality, pred_quality)
+                loss_value = loss_heatmap + 1.0 * loss_quality
                 
             grads = tape.gradient(loss_value, self.model.trainable_variables)
             optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
             
             epoch_loss_avg.update_state(loss_value)
-            progress_bar.set_postfix(loss=float(loss_value))
+            progress_bar.set_postfix(loss=float(loss_value), hm=float(loss_heatmap), q=float(loss_quality))
             
         return float(epoch_loss_avg.result())
 
     def train(self, train_dataset, val_dataset, lr, num_of_epochs, loss_name="mse", output_path=None, best_train_loss_output=None, log_file=None):
         if loss_name == "mse":
-            loss_fn = losses.MeanSquaredError()
+            loss_fn_heatmap = losses.MeanSquaredError()
         elif loss_name == "dice_bce":
-            loss_fn = dice_bce_loss
+            loss_fn_heatmap = dice_bce_loss
         elif loss_name == "focal":
-            loss_fn = focal_loss
+            loss_fn_heatmap = focal_loss
         else:
             raise ValueError(f"Unknown loss: {loss_name}")
             
+        loss_fn_quality = losses.BinaryCrossentropy()
         optimizer = optimizers.Adam(learning_rate=lr)
         
         self.log("Calculating initial validation loss...", log_file)
-        best_val_loss = self.evaluate(val_dataset, loss_fn)
+        best_val_loss = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality)
         best_train_loss = float('inf')
         self.log(f"Initial Validation Loss: {best_val_loss:.6f}", log_file)
         
         for epoch in range(1, num_of_epochs + 1):
-            epoch_loss = self.train_epoch(train_dataset, optimizer, loss_fn, epoch, num_of_epochs)
+            epoch_loss = self.train_epoch(train_dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_of_epochs)
             
             if best_train_loss_output and epoch_loss < best_train_loss:
                 self.log(f"   [TRAIN IMPROVEMENT] Train loss improved from {best_train_loss:.6f} to {epoch_loss:.6f}. Saving to {best_train_loss_output}", log_file)
@@ -227,7 +258,7 @@ class TargetTrackerVer4:
                     os.makedirs(os.path.dirname(best_train_loss_output), exist_ok=True)
                 self.model.save(best_train_loss_output)
             
-            val_loss = self.evaluate(val_dataset, loss_fn)
+            val_loss = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality)
             self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} | Val Loss: {val_loss:.6f}", log_file)
             
             if val_loss < best_val_loss:
@@ -251,8 +282,9 @@ def parse_training_samples(pkl_path):
         ref = sample['reference_stack']
         search = sample['search_frame']
         heatmap = sample['ground_truth_heatmap']
+        quality = sample.get('ground_truth_quality', np.array([1.0], dtype=np.float16))
         
-        yield (ref, search), heatmap
+        yield (ref, search), (heatmap, quality)
 
 def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
     if not pkl_files:
@@ -269,21 +301,25 @@ def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
     # Reference shape: (16, 16, 16, 1) uint8
     # Search frame shape: (H, W, 1) uint8
     # Heatmap shape: (H, W, 1) float16
+    # Quality shape: (1,) float16
     output_signature = (
         (
             tf.TensorSpec(shape=(16, 16, 16, 1), dtype=tf.uint8, name="reference_stack"),
             tf.TensorSpec(shape=(None, None, 1), dtype=tf.uint8, name="search_frame")
         ),
-        tf.TensorSpec(shape=(None, None, 1), dtype=tf.float16, name="heatmap")
+        (
+            tf.TensorSpec(shape=(None, None, 1), dtype=tf.float16, name="heatmap"),
+            tf.TensorSpec(shape=(1,), dtype=tf.float16, name="quality")
+        )
     )
     
     ds = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
     
-    def process_element(inputs, heatmap):
+    def process_element(inputs, targets):
         ref, search = inputs
+        heatmap, quality = targets
         
         # Resize inputs to model expectations
-        # Reference is already 16x16x16x3, just cast and normalize
         ref_float = tf.cast(ref, tf.float32) / 255.0
         
         # Resize search frame to 256x256
@@ -293,7 +329,7 @@ def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
         # Resize heatmap to 256x256
         heatmap_resized = tf.image.resize(tf.cast(heatmap, tf.float32), (256, 256))
         
-        return {"reference_stack": ref_float, "search_frame": search_float}, heatmap_resized
+        return {"reference_stack": ref_float, "search_frame": search_float}, {"predicted_heatmap": heatmap_resized, "predicted_quality": tf.cast(quality, tf.float32)}
 
     ds = ds.map(process_element, num_parallel_calls=tf.data.AUTOTUNE)
     if shuffle:

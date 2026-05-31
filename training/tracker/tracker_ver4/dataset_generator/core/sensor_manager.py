@@ -13,55 +13,50 @@ class SensorManager:
         self.height = height
         self.fov = fov
         
-        self.camera_dummy = None
         self.rgb_sensor = None
         self.depth_sensor = None
         
         self.image_queue = queue.Queue()
         self.depth_queue = queue.Queue()
-
+ 
     def spawn_cameras(self, transform):
         blueprint_library = self.world.get_blueprint_library()
-        
-        # We need an invisible dummy actor to attach the cameras to, so we can move it easily
-        dummy_bp = blueprint_library.find('sensor.other.collision')
-        self.camera_dummy = self.world.spawn_actor(dummy_bp, transform)
         
         # RGB
         rgb_bp = blueprint_library.find('sensor.camera.rgb')
         rgb_bp.set_attribute('image_size_x', str(self.width))
         rgb_bp.set_attribute('image_size_y', str(self.height))
         rgb_bp.set_attribute('fov', str(self.fov))
-        self.rgb_sensor = self.world.spawn_actor(rgb_bp, carla.Transform(), attach_to=self.camera_dummy)
+        self.rgb_sensor = self.world.spawn_actor(rgb_bp, transform)
         
         # Depth
         depth_bp = blueprint_library.find('sensor.camera.depth')
         depth_bp.set_attribute('image_size_x', str(self.width))
         depth_bp.set_attribute('image_size_y', str(self.height))
         depth_bp.set_attribute('fov', str(self.fov))
-        self.depth_sensor = self.world.spawn_actor(depth_bp, carla.Transform(), attach_to=self.camera_dummy)
+        self.depth_sensor = self.world.spawn_actor(depth_bp, transform)
         
         # Listeners
         weak_self = weakref.ref(self)
         self.rgb_sensor.listen(lambda image: SensorManager._rgb_callback(weak_self, image))
         self.depth_sensor.listen(lambda image: SensorManager._depth_callback(weak_self, image))
-
+ 
     def move_to(self, transform):
-        if self.camera_dummy:
-            self.camera_dummy.set_transform(transform)
-
+        if self.rgb_sensor:
+            self.rgb_sensor.set_transform(transform)
+        if self.depth_sensor:
+            self.depth_sensor.set_transform(transform)
+ 
     def get_transform(self):
-        if self.camera_dummy:
-            return self.camera_dummy.get_transform()
+        if self.rgb_sensor:
+            return self.rgb_sensor.get_transform()
         return None
-
+ 
     def destroy(self):
         if self.rgb_sensor:
             self.rgb_sensor.destroy()
         if self.depth_sensor:
             self.depth_sensor.destroy()
-        if self.camera_dummy:
-            self.camera_dummy.destroy()
 
     @staticmethod
     def _rgb_callback(weak_self, image):
@@ -82,13 +77,14 @@ class SensorManager:
         self = weak_self()
         if not self:
             return
-        # Convert depth to meters (CARLA depth decoding)
-        image.convert(carla.ColorConverter.Depth)
+        # Decode depth using raw 24-bit representation (millimetric precision)
+        # Avoid converting to ColorConverter.Depth which degrades precision to 8-bit (4-meter quantization errors).
         array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
         array = np.reshape(array, (image.height, image.width, 4))
         
-        # R = array[:,:,2], G = array[:,:,1], B = array[:,:,0]
-        # Depth in meters = (R + G * 256 + B * 256 * 256) / (256 * 256 * 256 - 1) * 1000
+        # Correct BGRA mapping to 24-bit depth formula:
+        # channel 2 (Red) is the least significant byte (LSB / R in CARLA formula).
+        # channel 0 (Blue) is the most significant byte (MSB / B in CARLA formula).
         R = array[:, :, 2].astype(np.float32)
         G = array[:, :, 1].astype(np.float32)
         B = array[:, :, 0].astype(np.float32)
