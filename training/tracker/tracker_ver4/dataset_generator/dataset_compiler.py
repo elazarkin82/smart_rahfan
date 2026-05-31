@@ -138,7 +138,7 @@ def main():
             heatmap = generate_heatmap(search_frame.shape, target_2d, sigma)
             
             sample = {
-                "reference_stack": ref_stack,               # Shape: (16, 16, 16, 1)
+                "reference_stack": ref_stack,               # Shape: (16, 32, 32, 1)
                 "search_frame": search_frame,               # Shape: (H, W, 1)
                 "ground_truth_heatmap": heatmap.astype(np.float16), # Shape: (H, W, 1) Float16 to save space
                 "ground_truth_quality": np.array([1.0], dtype=np.float16), # Shape: (1,)
@@ -162,7 +162,7 @@ def main():
                 heatmap_neg = np.zeros(search_frame_neg.shape, dtype=np.float16)
                 
                 sample_neg = {
-                    "reference_stack": ref_stack,               # Shape: (16, 16, 16, 1)
+                    "reference_stack": ref_stack,               # Shape: (16, 32, 32, 1)
                     "search_frame": search_frame_neg,           # Shape: (H, W, 1)
                     "ground_truth_heatmap": heatmap_neg,        # Shape: (H, W, 1)
                     "ground_truth_quality": np.array([0.0], dtype=np.float16), # Shape: (1,)

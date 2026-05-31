@@ -80,8 +80,8 @@ class KerasFCNVisualizer:
         self.frames_frame.pack(pady=10)
         
         self.ref_panel, self.ref_lbl = self.create_frame_slot(self.frames_frame, "Reference Target")
-        self.curr_panel, self.curr_lbl = self.create_frame_slot(self.frames_frame, "Search Frame (GT)")
-        self.pred_panel, self.pred_lbl = self.create_frame_slot(self.frames_frame, "Prediction & Heatmap")
+        self.curr_panel, self.curr_lbl = self.create_frame_slot(self.frames_frame, "Expected Heatmap Overlay")
+        self.pred_panel, self.pred_lbl = self.create_frame_slot(self.frames_frame, "Predicted Heatmap Overlay")
         
         self.status_bar = tk.Label(self.root, text="Press [Space] for Next Sample", font=("Inter", 10), bg="#1c1c1c", fg="#aaaaaa", anchor="w", padx=15, pady=8)
         self.status_bar.pack(side="bottom", fill="x")

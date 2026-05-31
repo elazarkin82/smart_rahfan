@@ -77,7 +77,7 @@ class DatasetVisualizer:
         
         # Setup paths (with fallback logic)
         self.cache_dir = cache_dir or self.config.get("generation", {}).get("cache_dir", "cache")
-        self.dataset_dir = dataset_dir or self.config.get("compiler", {}).get("dataset_dir", "dataset")
+        self.dataset_dir = dataset_dir or self.config.get("compiler", {}).get("compiled_dir", "compiled")
         
         if not os.path.isabs(self.cache_dir):
             self.cache_dir = os.path.abspath(os.path.join(script_dir, self.cache_dir))
@@ -85,7 +85,7 @@ class DatasetVisualizer:
             self.dataset_dir = os.path.abspath(os.path.join(script_dir, self.dataset_dir))
             
         print(f"[Visualizer] Cache directory: {self.cache_dir}")
-        print(f"[Visualizer] Dataset directory: {self.dataset_dir}")
+        print(f"[Visualizer] Compiled Frames directory: {self.dataset_dir}")
         
         # Discover files
         self.raw_files = []
@@ -155,7 +155,7 @@ class DatasetVisualizer:
         mode_lbl = tk.Label(header_frame, text="Mode:", bg="#1e1e1e", fg="#aaaaaa")
         mode_lbl.pack(side="left", padx=(15, 5))
         
-        self.mode_combo = ttk.Combobox(header_frame, values=["Raw Flight Cache (flight_*.pkl)", "Compiled Dataset (train_*.pkl)"], state="readonly", width=30)
+        self.mode_combo = ttk.Combobox(header_frame, values=["Raw Flight Cache (flight_*.pkl)", "Compiled Frames (compiled/)"], state="readonly", width=30)
         self.mode_combo.current(0 if self.mode == "raw" else 1)
         self.mode_combo.pack(side="left", padx=5)
         self.mode_combo.bind("<<ComboboxSelected>>", self.on_mode_changed)
@@ -464,7 +464,7 @@ class DatasetVisualizer:
         filename = self.compiled_files[self.current_file_idx]
         dist = meta.get("distance", 0.0)
         
-        hud_text = f"Compiled Dataset  |  File: {filename}  |  Sample: {self.current_frame_idx+1} / {len(self.loaded_data)}  |  " \
+        hud_text = f"Compiled Frames  |  File: {filename}  |  Sample: {self.current_frame_idx+1} / {len(self.loaded_data)}  |  " \
                    f"Target 2d: [{px}, {py}]  |  Dist: {dist:.1f}m"
         self.info_label.config(text=hud_text, fg="#00e6ff")
         
@@ -541,7 +541,7 @@ class DatasetVisualizer:
 
     def toggle_mode_hotkey(self):
         new_mode = "compiled" if self.mode == "raw" else "raw"
-        new_selection = "Compiled Dataset (train_*.pkl)" if new_mode == "compiled" else "Raw Flight Cache (flight_*.pkl)"
+        new_selection = "Compiled Frames (compiled/)" if new_mode == "compiled" else "Raw Flight Cache (flight_*.pkl)"
         self.mode_combo.set(new_selection)
         self.on_mode_changed()
 

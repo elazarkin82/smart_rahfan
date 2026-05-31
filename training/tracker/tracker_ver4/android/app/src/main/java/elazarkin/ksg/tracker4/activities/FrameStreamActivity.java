@@ -68,7 +68,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private float targetY = 0.0f;
     
     // Ver4 Inputs: 1 channel grayscale
-    private float[][][][][] refStackInput = new float[1][16][16][16][1];
+    private float[][][][][] refStackInput = new float[1][16][32][32][1];
 
     private Interpreter tflite;
 
@@ -194,10 +194,10 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             float size = 128.0f - layer * ((128.0f - 16.0f) / 15.0f);
             float half = size / 2.0f;
             
-            for (int y = 0; y < 16; y++) {
-                for (int x = 0; x < 16; x++) {
-                    float srcX = cx - half + (x / 15.0f) * size;
-                    float srcY = cy - half + (y / 15.0f) * size;
+            for (int y = 0; y < 32; y++) {
+                for (int x = 0; x < 32; x++) {
+                    float srcX = cx - half + (x / 31.0f) * size;
+                    float srcY = cy - half + (y / 31.0f) * size;
                     
                     int ix = (int) Math.max(0, Math.min(width - 1, srcX));
                     int iy = (int) Math.max(0, Math.min(height - 1, srcY));

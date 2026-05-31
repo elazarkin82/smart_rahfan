@@ -24,9 +24,9 @@
         "drone_pitch_degrees": -30.0
     },
     "compiler": {
-        "dataset_dir": "dataset",
+        "dataset_dir": "compiled",
         "stack_layers": 16,
-        "stack_target_size": 16,
+        "stack_target_size": 32,
         "crop_max_size": 128,
         "crop_min_size": 4,
         "heatmap_sigma": 15.0

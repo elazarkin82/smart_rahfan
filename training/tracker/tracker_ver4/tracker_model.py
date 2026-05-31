@@ -40,7 +40,7 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
 # =====================================================================
 
 class TargetTrackerVer4:
-    def __init__(self, ref_shape=(16, 16, 16, 1), search_shape=(256, 256, 1)):
+    def __init__(self, ref_shape=(16, 32, 32, 1), search_shape=(256, 256, 1)):
         self.ref_shape = ref_shape
         self.search_shape = search_shape
         self.model = None
@@ -96,23 +96,23 @@ class TargetTrackerVer4:
     def _create_reference_encoder(self):
         inputs = layers.Input(shape=self.ref_shape, name="ref_encoder_input")
         
-        # Reshape (16, 16, 16, 1) -> (16, 16, 16)
-        x = layers.Reshape((self.ref_shape[0], self.ref_shape[1], self.ref_shape[2] * self.ref_shape[3]), name="ref_reshape")(inputs)
+        # Reshape (16, 32, 32, 1) -> (32, 32, 16)
+        x = layers.Reshape((self.ref_shape[1], self.ref_shape[2], self.ref_shape[0] * self.ref_shape[3]), name="ref_reshape")(inputs)
         
         # Conv 1
-        x = layers.Conv2D(32, (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x) # -> (8, 8, 32)
+        x = layers.Conv2D(32, (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x) # -> (16, 16, 32)
         x = layers.BatchNormalization(name="ref_init_bn")(x)
         x = layers.ReLU(6.0, name="ref_init_relu")(x)
         
         # IR Block
-        x = self._inverted_residual_block(x, expansion=2, filters=64, strides=2, name_prefix="ref_ir1") # -> (4, 4, 64)
+        x = self._inverted_residual_block(x, expansion=2, filters=64, strides=2, name_prefix="ref_ir1") # -> (8, 8, 64)
         
         # Final Expand to match search feature channels
         x = layers.Conv2D(128, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
         x = layers.BatchNormalization(name="ref_final_bn")(x)
         x = layers.ReLU(6.0, name="ref_final_relu")(x)
         
-        # Return spatial features of shape (4, 4, 128) for spatial cross-attention
+        # Return spatial features of shape (8, 8, 128) for spatial cross-attention
         return models.Model(inputs, x, name="reference_target_encoder")
 
     def create_model(self):
@@ -123,26 +123,26 @@ class TargetTrackerVer4:
         ref_encoder = self._create_reference_encoder()
         search_encoder = self._create_search_backbone()
         
-        ref_features = ref_encoder(ref_input)          # (4, 4, 128)
+        ref_features = ref_encoder(ref_input)          # (8, 8, 128)
         search_features = search_encoder(search_input)  # (16, 16, 128)
         
         # 2. Dot-Product Cross-Attention Fusion
         # Project Q from search_features, K and V from ref_features
         q_proj = layers.Conv2D(64, (1, 1), use_bias=False, name="q_proj")(search_features)  # (16, 16, 64)
-        k_proj = layers.Conv2D(64, (1, 1), use_bias=False, name="k_proj")(ref_features)     # (4, 4, 64)
-        v_proj = layers.Conv2D(128, (1, 1), use_bias=False, name="v_proj")(ref_features)    # (4, 4, 128)
+        k_proj = layers.Conv2D(64, (1, 1), use_bias=False, name="k_proj")(ref_features)     # (8, 8, 64)
+        v_proj = layers.Conv2D(128, (1, 1), use_bias=False, name="v_proj")(ref_features)    # (8, 8, 128)
         
         # Flatten spatial dimensions
         q_flat = layers.Reshape((256, 64), name="q_flat")(q_proj)
-        k_flat = layers.Reshape((16, 64), name="k_flat")(k_proj)
-        v_flat = layers.Reshape((16, 128), name="v_flat")(v_proj)
+        k_flat = layers.Reshape((64, 64), name="k_flat")(k_proj)
+        v_flat = layers.Reshape((64, 128), name="v_flat")(v_proj)
         
-        # Calculate search-to-reference spatial correlation: (256, 64) x (16, 64)^T -> (256, 16)
+        # Calculate search-to-reference spatial correlation: (256, 64) x (64, 64)^T -> (256, 64)
         attn_weights = layers.Dot(axes=(2, 2), name="attention_dot")([q_flat, k_flat])
         attn_weights = layers.Lambda(lambda x: x / 8.0, name="attention_scale")(attn_weights) # scale by sqrt(d_k)=8
         attn_weights = layers.Softmax(axis=-1, name="attention_softmax")(attn_weights)
         
-        # Fused features: (256, 16) x (16, 128) -> (256, 128)
+        # Fused features: (256, 64) x (64, 128) -> (256, 128)
         fused_flat = layers.Dot(axes=(2, 1), name="attention_value_dot")([attn_weights, v_flat])
         fused_features = layers.Reshape((16, 16, 128), name="fused_features_reshape")(fused_flat)
         
@@ -298,13 +298,13 @@ def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
         for path in local_files:
             yield from parse_training_samples(path)
             
-    # Reference shape: (16, 16, 16, 1) uint8
+    # Reference shape: (16, 32, 32, 1) uint8
     # Search frame shape: (H, W, 1) uint8
     # Heatmap shape: (H, W, 1) float16
     # Quality shape: (1,) float16
     output_signature = (
         (
-            tf.TensorSpec(shape=(16, 16, 16, 1), dtype=tf.uint8, name="reference_stack"),
+            tf.TensorSpec(shape=(16, 32, 32, 1), dtype=tf.uint8, name="reference_stack"),
             tf.TensorSpec(shape=(None, None, 1), dtype=tf.uint8, name="search_frame")
         ),
         (
@@ -332,8 +332,6 @@ def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
         return {"reference_stack": ref_float, "search_frame": search_float}, {"predicted_heatmap": heatmap_resized, "predicted_quality": tf.cast(quality, tf.float32)}
 
     ds = ds.map(process_element, num_parallel_calls=tf.data.AUTOTUNE)
-    if shuffle:
-        ds = ds.shuffle(100)
     ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
     
     return ds
@@ -357,9 +355,9 @@ def main():
     
     if args.command == "train":
         import glob
-        all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "train_*.pkl")))
+        all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "batch_*.pkl")))
         if not all_pkls:
-            raise FileNotFoundError(f"No train_*.pkl files in {args.dataset_dir}")
+            raise FileNotFoundError(f"No batch_*.pkl files in {args.dataset_dir}")
             
         val_files = all_pkls[:args.eval_pkl_num]
         train_files = all_pkls[args.eval_pkl_num:]
