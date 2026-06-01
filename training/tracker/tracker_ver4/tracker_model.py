@@ -35,6 +35,55 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     loss = alpha * bce_pos + (1.0 - alpha) * bce_neg
     return tf.reduce_mean(loss)
 
+@tf.keras.utils.register_keras_serializable(package="Custom")
+def focal_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha=0.25, gamma=2.0):
+    eps = 1e-7
+    y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
+    
+    # 1. Continuous Focal Loss
+    bce_pos = - y_true * tf.math.log(y_pred) * tf.math.pow(1.0 - y_pred, gamma)
+    bce_neg = - (1.0 - y_true) * tf.math.log(1.0 - y_pred) * tf.math.pow(y_pred, gamma)
+    focal_loss_val = tf.reduce_mean(alpha * bce_pos + (1.0 - alpha) * bce_neg)
+    
+    # 2. Soft Dice Loss (Square Form) for continuous heatmaps
+    y_true_f = tf.reshape(tf.cast(y_true, tf.float32), [-1])
+    y_pred_f = tf.reshape(tf.cast(y_pred, tf.float32), [-1])
+    
+    intersection = tf.reduce_sum(y_true_f * y_pred_f)
+    denominator = tf.reduce_sum(tf.square(y_true_f)) + tf.reduce_sum(tf.square(y_pred_f))
+    dice_loss_val = 1.0 - (2.0 * intersection + eps) / (denominator + eps)
+    
+    return focal_weight * focal_loss_val + dice_weight * dice_loss_val
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+def centernet_focal_loss(y_true, y_pred, alpha=2.0, beta=4.0):
+    eps = 1e-7
+    y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
+    
+    # Soft continuous formulation of CenterNet Penalty-Reduced Focal Loss:
+    # y_true acts as the anchor, and (1 - y_true)^beta suppresses background penalty near the peak
+    pos_loss = - y_true * tf.math.pow(1.0 - y_pred, alpha) * tf.math.log(y_pred)
+    neg_loss = - tf.math.pow(1.0 - y_true, beta) * tf.math.pow(y_pred, alpha) * tf.math.log(1.0 - y_pred)
+    
+    loss = pos_loss + neg_loss
+    return tf.reduce_mean(loss)
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+def centernet_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha=2.0, beta=4.0):
+    eps = 1e-7
+    # 1. CenterNet Focal Loss
+    cn_loss = centernet_focal_loss(y_true, y_pred, alpha=alpha, beta=beta)
+    
+    # 2. Soft Dice Loss (Square Form)
+    y_true_f = tf.reshape(tf.cast(y_true, tf.float32), [-1])
+    y_pred_f = tf.reshape(tf.cast(y_pred, tf.float32), [-1])
+    
+    intersection = tf.reduce_sum(y_true_f * y_pred_f)
+    denominator = tf.reduce_sum(tf.square(y_true_f)) + tf.reduce_sum(tf.square(y_pred_f))
+    dice_loss_val = 1.0 - (2.0 * intersection + eps) / (denominator + eps)
+    
+    return focal_weight * cn_loss + dice_weight * dice_loss_val
+
 # =====================================================================
 # Target Tracker Ver 4 Class
 # =====================================================================
@@ -73,25 +122,25 @@ class TargetTrackerVer4:
         inputs = layers.Input(shape=self.search_shape, name="search_backbone_input")
         
         # Init conv (strides=2) -> (128, 128, 16)
-        x = layers.Conv2D(16, (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-        x = layers.BatchNormalization(name="sb_init_bn")(x)
-        x = layers.ReLU(6.0, name="sb_init_relu")(x)
+        x1 = layers.Conv2D(16, (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
+        x1 = layers.BatchNormalization(name="sb_init_bn")(x1)
+        x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
         
         # IR Block 1 (strides=2) -> (64, 64, 24)
-        x = self._inverted_residual_block(x, expansion=2, filters=24, strides=2, name_prefix="sb_ir1")
+        x2 = self._inverted_residual_block(x1, expansion=2, filters=24, strides=2, name_prefix="sb_ir1")
         
         # IR Block 2 (strides=2) -> (32, 32, 32)
-        x = self._inverted_residual_block(x, expansion=3, filters=32, strides=2, name_prefix="sb_ir2")
+        x3 = self._inverted_residual_block(x2, expansion=3, filters=32, strides=2, name_prefix="sb_ir2")
         
         # IR Block 3 (strides=2) -> (16, 16, 64)
-        x = self._inverted_residual_block(x, expansion=4, filters=64, strides=2, name_prefix="sb_ir3")
+        x4 = self._inverted_residual_block(x3, expansion=4, filters=64, strides=2, name_prefix="sb_ir3")
         
         # Final Expand -> (16, 16, 128)
-        x = layers.Conv2D(128, (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x)
+        x = layers.Conv2D(128, (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
         x = layers.BatchNormalization(name="sb_final_bn")(x)
         x = layers.ReLU(6.0, name="sb_final_relu")(x)
         
-        return models.Model(inputs, x, name="search_feature_extractor")
+        return models.Model(inputs, [x1, x2, x3, x], name="search_feature_extractor")
 
     def _create_reference_encoder(self):
         inputs = layers.Input(shape=self.ref_shape, name="ref_encoder_input")
@@ -127,7 +176,9 @@ class TargetTrackerVer4:
         search_encoder = self._create_search_backbone()
         
         ref_features = ref_encoder(ref_input)          # (8, 8, 128)
-        search_features = search_encoder(search_input)  # (16, 16, 128)
+        
+        # Multi-output Search Encoder to get intermediate features for skip connections
+        sb_init, sb_ir1, sb_ir2, search_features = search_encoder(search_input)
         
         # 2. Dot-Product Cross-Attention Fusion
         # Project Q from search_features, K and V from ref_features
@@ -149,17 +200,23 @@ class TargetTrackerVer4:
         fused_flat = layers.Dot(axes=(2, 1), name="attention_value_dot")([attn_weights, v_flat])
         fused_features = layers.Reshape((16, 16, 128), name="fused_features_reshape")(fused_flat)
         
-        # 3. Decoder for Output 1: Heatmap
+        # 3. Decoder for Output 1: Heatmap (with U-Net style skip connections)
         # Upsample 1: (16, 16) -> (32, 32)
         x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up1")(fused_features)
+        # Skip 1: Concatenate with sb_ir2 (32, 32, 32)
+        x = layers.Concatenate(axis=-1, name="decoder_skip1")([x, sb_ir2])
         x = self._inverted_residual_block(x, expansion=2, filters=64, strides=1, name_prefix="decoder_ir1")
         
         # Upsample 2: (32, 32) -> (64, 64)
         x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up2")(x)
+        # Skip 2: Concatenate with sb_ir1 (64, 64, 24)
+        x = layers.Concatenate(axis=-1, name="decoder_skip2")([x, sb_ir1])
         x = self._inverted_residual_block(x, expansion=2, filters=32, strides=1, name_prefix="decoder_ir2")
         
         # Upsample 3: (64, 64) -> (128, 128)
         x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up3")(x)
+        # Skip 3: Concatenate with sb_init (128, 128, 16)
+        x = layers.Concatenate(axis=-1, name="decoder_skip3")([x, sb_init])
         x = self._inverted_residual_block(x, expansion=2, filters=16, strides=1, name_prefix="decoder_ir3")
         
         # Upsample 4: (128, 128) -> (256, 256)
@@ -233,13 +290,19 @@ class TargetTrackerVer4:
             
         return float(epoch_loss_avg.result())
 
-    def train(self, train_dataset, val_dataset, lr, num_of_epochs, loss_name="mse", output_path=None, best_train_loss_output=None, log_file=None):
+    def train(self, train_dataset, val_dataset, lr, num_of_epochs, loss_name="centernet_dice", output_path=None, best_train_loss_output=None, log_file=None):
         if loss_name == "mse":
             loss_fn_heatmap = losses.MeanSquaredError()
         elif loss_name == "dice_bce":
             loss_fn_heatmap = dice_bce_loss
         elif loss_name == "focal":
             loss_fn_heatmap = focal_loss
+        elif loss_name == "focal_dice":
+            loss_fn_heatmap = focal_dice_loss
+        elif loss_name == "centernet":
+            loss_fn_heatmap = centernet_focal_loss
+        elif loss_name == "centernet_dice":
+            loss_fn_heatmap = centernet_dice_loss
         else:
             raise ValueError(f"Unknown loss: {loss_name}")
             
@@ -344,7 +407,7 @@ def main():
     parser.add_argument("--eval_pkl_num", type=int, default=4, help="Number of PKLs for validation")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_of_epochs", type=int, default=10)
-    parser.add_argument("--loss", choices=["mse", "dice_bce", "focal"], default="mse")
+    parser.add_argument("--loss", choices=["mse", "dice_bce", "focal", "focal_dice", "centernet", "centernet_dice"], default="centernet_dice")
     parser.add_argument("--output", type=str, default="outputs/tracker.keras")
     parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_best_train.keras")
     parser.add_argument("--init_keras_file", type=str, default=None, help="Path to initial model to resume from")

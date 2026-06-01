@@ -132,24 +132,34 @@ def main():
                 
         for k, frame_dict in enumerate(flight_data[1:]):
             search_frame_gray = frame_dict['image_gray']
-            search_frame = np.expand_dims(search_frame_gray, axis=-1)
             target_2d = frame_dict['target_2d']
             
-            # 1. Dynamic Isotropic Gaussian Heatmap (sigma is 1/4 of minimum image dimension)
+            # Determine square crop size (minimum image dimension)
             h_s, w_s = search_frame_gray.shape[:2]
-            sigma = min(h_s, w_s) / 4.0
+            s_crop = min(h_s, w_s)
+            half = s_crop / 2.0
             
-            heatmap = generate_heatmap(search_frame.shape, target_2d, sigma)
+            # 1. Crop Search Frame centered around true target
+            search_crop_gray = get_crop(search_frame_gray, target_2d[0], target_2d[1], s_crop)
+            search_crop = np.expand_dims(search_crop_gray, axis=-1)
+            
+            # Target local coordinate in cropped space is exactly at the center
+            local_target_2d = (half, half)
+            
+            # Dynamic Isotropic Gaussian Heatmap on the cropped space
+            sigma = s_crop / 4.0
+            heatmap = generate_heatmap(search_crop.shape, local_target_2d, sigma)
             
             sample = {
                 "reference_stack": ref_stack,               # Shape: (16, 32, 32, 1)
-                "search_frame": search_frame,               # Shape: (H, W, 1)
-                "ground_truth_heatmap": heatmap.astype(np.float16), # Shape: (H, W, 1) Float16 to save space
+                "search_frame": search_crop,                # Shape: (S_crop, S_crop, 1)
+                "ground_truth_heatmap": heatmap.astype(np.float16), # Shape: (S_crop, S_crop, 1) Float16 to save space
                 "ground_truth_quality": np.array([1.0], dtype=np.float16), # Shape: (1,)
                 "metadata": {
                     "flight_id": basename,
                     "frame_idx": frame_dict['frame_index'],
-                    "target_2d": target_2d,
+                    "target_2d": local_target_2d,
+                    "original_target_2d": target_2d,
                     "distance": frame_dict['distance_to_target'],
                     "is_positive": 1
                 }
@@ -168,7 +178,7 @@ def main():
                 shifted_x = target_2d[0] + dx
                 shifted_y = target_2d[1] + dy
                 
-                # Check if shifted target falls out of bounds
+                # Check if shifted target falls out of bounds of the original image
                 out_of_bounds = (shifted_x < 0 or shifted_x >= w_s or shifted_y < 0 or shifted_y >= h_s)
                 
                 # Calculate piecewise continuous quality score
@@ -184,19 +194,34 @@ def main():
                     # Exponential decay from 0.4 onwards
                     quality_score = 0.4 * np.exp(-(distance - 8.0) / 16.0)
                 
-                # Generate shifted heatmap centered at the shifted target coordinate
-                heatmap_shifted = generate_heatmap(search_frame_gray.shape, (shifted_x, shifted_y), sigma)
+                # Crop Search Frame centered around the shifted coordinate
+                search_crop_gray_jittered = get_crop(search_frame_gray, shifted_x, shifted_y, s_crop)
+                search_crop_jittered = np.expand_dims(search_crop_gray_jittered, axis=-1)
+                
+                # In the shifted crop, the shifted target is at the center
+                local_shifted_2d = (half, half)
+                
+                # Generate shifted heatmap centered at the shifted target coordinate in cropped space
+                heatmap_shifted = generate_heatmap(search_crop_jittered.shape, local_shifted_2d, sigma)
+                
+                # Calculate where the true target is in this shifted crop space
+                x1_shifted = int(round(shifted_x - half))
+                y1_shifted = int(round(shifted_y - half))
+                local_true_x = target_2d[0] - x1_shifted
+                local_true_y = target_2d[1] - y1_shifted
                 
                 sample_jittered = {
                     "reference_stack": ref_stack,
-                    "search_frame": search_frame,
+                    "search_frame": search_crop_jittered,
                     "ground_truth_heatmap": heatmap_shifted.astype(np.float16),
                     "ground_truth_quality": np.array([quality_score], dtype=np.float16),
                     "metadata": {
                         "flight_id": basename,
                         "frame_idx": frame_idx,
-                        "target_2d": (shifted_x, shifted_y),
-                        "true_target_2d": target_2d,
+                        "target_2d": local_shifted_2d,
+                        "original_target_2d": (shifted_x, shifted_y),
+                        "true_target_2d": (local_true_x, local_true_y),
+                        "original_true_target_2d": target_2d,
                         "distance": frame_dict['distance_to_target'],
                         "shift_distance": distance,
                         "is_positive": 2 # 2 indicates synthetic jittered quality sample
@@ -210,13 +235,19 @@ def main():
                 neg_frame_dict = neg_flight_data[neg_k]
                 
                 search_frame_gray_neg = neg_frame_dict['image_gray']
-                search_frame_neg = np.expand_dims(search_frame_gray_neg, axis=-1)
-                heatmap_neg = np.zeros(search_frame_neg.shape, dtype=np.float16)
+                h_n, w_n = search_frame_gray_neg.shape[:2]
+                s_crop_neg = min(h_n, w_n)
+                
+                # Crop negative search frame centered at the middle of the frame
+                search_crop_gray_neg = get_crop(search_frame_gray_neg, w_n / 2.0, h_n / 2.0, s_crop_neg)
+                search_crop_neg = np.expand_dims(search_crop_gray_neg, axis=-1)
+                
+                heatmap_neg = np.zeros(search_crop_neg.shape, dtype=np.float16)
                 
                 sample_neg = {
                     "reference_stack": ref_stack,               # Shape: (16, 32, 32, 1)
-                    "search_frame": search_frame_neg,           # Shape: (H, W, 1)
-                    "ground_truth_heatmap": heatmap_neg,        # Shape: (H, W, 1)
+                    "search_frame": search_crop_neg,            # Shape: (S_crop_neg, S_crop_neg, 1)
+                    "ground_truth_heatmap": heatmap_neg,        # Shape: (S_crop_neg, S_crop_neg, 1)
                     "ground_truth_quality": np.array([0.0], dtype=np.float16), # Shape: (1,)
                     "metadata": {
                         "flight_id": basename,
