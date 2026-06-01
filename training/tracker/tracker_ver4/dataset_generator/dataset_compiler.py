@@ -135,6 +135,10 @@ def main():
             search_frame = np.expand_dims(search_frame_gray, axis=-1)
             target_2d = frame_dict['target_2d']
             
+            # 1. Dynamic Isotropic Gaussian Heatmap (sigma is 1/4 of minimum image dimension)
+            h_s, w_s = search_frame_gray.shape[:2]
+            sigma = min(h_s, w_s) / 4.0
+            
             heatmap = generate_heatmap(search_frame.shape, target_2d, sigma)
             
             sample = {
@@ -151,6 +155,54 @@ def main():
                 }
             }
             training_samples.append(sample)
+            
+            # 2. Synthetic Coordinate Jittering & Quality Decay (Every 3 frames)
+            frame_idx = frame_dict['frame_index']
+            if frame_idx % 3 == 0:
+                angle = np.random.uniform(0, 2 * np.pi)
+                distance = np.random.uniform(0, 30.0)
+                
+                dx = distance * np.cos(angle)
+                dy = distance * np.sin(angle)
+                
+                shifted_x = target_2d[0] + dx
+                shifted_y = target_2d[1] + dy
+                
+                # Check if shifted target falls out of bounds
+                out_of_bounds = (shifted_x < 0 or shifted_x >= w_s or shifted_y < 0 or shifted_y >= h_s)
+                
+                # Calculate piecewise continuous quality score
+                if out_of_bounds:
+                    quality_score = 0.0
+                elif distance <= 2.0:
+                    quality_score = 1.0 - distance * 0.05
+                elif distance <= 4.0:
+                    quality_score = 0.9 - (distance - 2.0) * 0.10
+                elif distance <= 8.0:
+                    quality_score = 0.7 - (distance - 4.0) * 0.075
+                else:
+                    # Exponential decay from 0.4 onwards
+                    quality_score = 0.4 * np.exp(-(distance - 8.0) / 16.0)
+                
+                # Generate shifted heatmap centered at the shifted target coordinate
+                heatmap_shifted = generate_heatmap(search_frame_gray.shape, (shifted_x, shifted_y), sigma)
+                
+                sample_jittered = {
+                    "reference_stack": ref_stack,
+                    "search_frame": search_frame,
+                    "ground_truth_heatmap": heatmap_shifted.astype(np.float16),
+                    "ground_truth_quality": np.array([quality_score], dtype=np.float16),
+                    "metadata": {
+                        "flight_id": basename,
+                        "frame_idx": frame_idx,
+                        "target_2d": (shifted_x, shifted_y),
+                        "true_target_2d": target_2d,
+                        "distance": frame_dict['distance_to_target'],
+                        "shift_distance": distance,
+                        "is_positive": 2 # 2 indicates synthetic jittered quality sample
+                    }
+                }
+                training_samples.append(sample_jittered)
             
             # 2b. Negative Pair: target from flight i is NOT present in flight j
             if neg_flight_data is not None and len(neg_flight_data) > 1:

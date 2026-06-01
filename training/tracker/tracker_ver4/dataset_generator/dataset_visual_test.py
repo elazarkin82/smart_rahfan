@@ -94,7 +94,10 @@ class DatasetVisualizer:
             
         self.compiled_files = []
         if os.path.exists(self.dataset_dir):
-            self.compiled_files = sorted([f for f in os.listdir(self.dataset_dir) if f.startswith("train_") and f.endswith(".pkl")])
+            self.compiled_files = sorted([
+                f for f in os.listdir(self.dataset_dir) 
+                if f.endswith(".pkl") and os.path.isfile(os.path.join(self.dataset_dir, f))
+            ])
             
         print(f"[Visualizer] Found {len(self.raw_files)} raw flights in cache.")
         print(f"[Visualizer] Found {len(self.compiled_files)} compiled files in dataset.")
@@ -552,7 +555,7 @@ class DatasetVisualizer:
 def main():
     parser = argparse.ArgumentParser(description="TargetTrackerVer4 Dataset & Cache Visualizer")
     parser.add_argument("--cache_dir", default=None, help="Directory containing raw flight_.pkl files")
-    parser.add_argument("--dataset_dir", default=None, help="Directory containing compiled train_.pkl files")
+    parser.add_argument("--dataset_dir", default=None, help="Directory containing compiled PKL files (train_*.pkl, batch_*.pkl, etc.)")
     args = parser.parse_args()
     
     root = tk.Tk()

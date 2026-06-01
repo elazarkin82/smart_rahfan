@@ -96,8 +96,11 @@ class TargetTrackerVer4:
     def _create_reference_encoder(self):
         inputs = layers.Input(shape=self.ref_shape, name="ref_encoder_input")
         
-        # Reshape (16, 32, 32, 1) -> (32, 32, 16)
-        x = layers.Reshape((self.ref_shape[1], self.ref_shape[2], self.ref_shape[0] * self.ref_shape[3]), name="ref_reshape")(inputs)
+        # 1. Permute to align dimensions properly: (Layers, H, W, C) -> (H, W, Layers, C)
+        x = layers.Permute((2, 3, 1, 4), name="ref_permute")(inputs)
+        
+        # 2. Reshape to combine Layers and Channels: (32, 32, 16, 1) -> (32, 32, 16)
+        x = layers.Reshape((self.ref_shape[1], self.ref_shape[2], self.ref_shape[0] * self.ref_shape[3]), name="ref_reshape")(x)
         
         # Conv 1
         x = layers.Conv2D(32, (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x) # -> (16, 16, 32)
@@ -277,16 +280,15 @@ def parse_training_samples(pkl_path):
     with open(pkl_path, 'rb') as f:
         samples = pickle.load(f)
     
-    # We yield individual examples from the PKL
-    for sample in samples:
-        ref = sample['reference_stack']
-        search = sample['search_frame']
-        heatmap = sample['ground_truth_heatmap']
-        quality = sample.get('ground_truth_quality', np.array([1.0], dtype=np.float16))
-        
-        yield (ref, search), (heatmap, quality)
+    # Stack list of dicts to form raw batched numpy arrays
+    refs = np.stack([s['reference_stack'] for s in samples], axis=0)
+    searches = np.stack([s['search_frame'] for s in samples], axis=0)
+    heatmaps = np.stack([s['ground_truth_heatmap'] for s in samples], axis=0)
+    qualities = np.stack([s.get('ground_truth_quality', np.array([1.0], dtype=np.float16)) for s in samples], axis=0)
+    
+    return (refs, searches), (heatmaps, qualities)
 
-def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
+def build_tf_dataset(pkl_files, shuffle=True):
     if not pkl_files:
         raise ValueError("No PKL files provided for dataset.")
         
@@ -296,20 +298,17 @@ def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
             import random
             random.shuffle(local_files)
         for path in local_files:
-            yield from parse_training_samples(path)
+            yield parse_training_samples(path)
             
-    # Reference shape: (16, 32, 32, 1) uint8
-    # Search frame shape: (H, W, 1) uint8
-    # Heatmap shape: (H, W, 1) float16
-    # Quality shape: (1,) float16
+    # Batch output signature: added leading Batch dimension (None) to support dynamic batch size
     output_signature = (
         (
-            tf.TensorSpec(shape=(16, 32, 32, 1), dtype=tf.uint8, name="reference_stack"),
-            tf.TensorSpec(shape=(None, None, 1), dtype=tf.uint8, name="search_frame")
+            tf.TensorSpec(shape=(None, 16, 32, 32, 1), dtype=tf.uint8, name="reference_stack"),
+            tf.TensorSpec(shape=(None, None, None, 1), dtype=tf.uint8, name="search_frame")
         ),
         (
-            tf.TensorSpec(shape=(None, None, 1), dtype=tf.float16, name="heatmap"),
-            tf.TensorSpec(shape=(1,), dtype=tf.float16, name="quality")
+            tf.TensorSpec(shape=(None, None, None, 1), dtype=tf.float16, name="heatmap"),
+            tf.TensorSpec(shape=(None, 1), dtype=tf.float16, name="quality")
         )
     )
     
@@ -319,7 +318,7 @@ def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
         ref, search = inputs
         heatmap, quality = targets
         
-        # Resize inputs to model expectations
+        # Resize inputs to model expectations (tf.image.resize and cast natively support batches)
         ref_float = tf.cast(ref, tf.float32) / 255.0
         
         # Resize search frame to 256x256
@@ -332,7 +331,7 @@ def build_tf_dataset(pkl_files, batch_size=16, shuffle=True):
         return {"reference_stack": ref_float, "search_frame": search_float}, {"predicted_heatmap": heatmap_resized, "predicted_quality": tf.cast(quality, tf.float32)}
 
     ds = ds.map(process_element, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
     
     return ds
 
@@ -341,7 +340,7 @@ def main():
     parser = argparse.ArgumentParser(description="TargetTrackerVer4 Training CLI")
     parser.add_argument("command", choices=["train"])
     parser.add_argument("--dataset_dir", required=True, help="Path to dataset PKL dir")
-    parser.add_argument("--batch_size", type=int, default=16, help="Training batch size")
+    parser.add_argument("--batch_size", type=int, default=16, help="Training batch size (ignored, defined by dataset files)")
     parser.add_argument("--eval_pkl_num", type=int, default=4, help="Number of PKLs for validation")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_of_epochs", type=int, default=10)
@@ -364,8 +363,8 @@ def main():
         if not train_files:
             train_files = val_files # Fallback
             
-        train_ds = build_tf_dataset(train_files, batch_size=args.batch_size, shuffle=True)
-        val_ds = build_tf_dataset(val_files, batch_size=args.batch_size, shuffle=False)
+        train_ds = build_tf_dataset(train_files, shuffle=True)
+        val_ds = build_tf_dataset(val_files, shuffle=False)
         
         tracker = TargetTrackerVer4()
         
