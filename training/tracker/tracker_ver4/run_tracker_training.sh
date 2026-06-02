@@ -33,6 +33,14 @@
 #   - mse           : Mean Squared Error (penalizes large outlier score discrepancies)
 #   - huber         : Huber Loss (smooth L1, robust to outlier quality ratings)
 #   - logcosh       : Logarithm of hyperbolic cosine (behaves like L2 near 0, L1 far away)
+#
+# Training Mode Options (--train_mode):
+#   - heatmap_only  : [STAGE 1] Freeze quality branch layers. Globs ONLY batch_pos_*.pkl 
+#                     to train spatial features on positive-only data without negative/jitter pollution.
+#   - quality_only  : [STAGE 2] Freeze shared encoders/decoder layers. Globs ONLY 
+#                     batch_with_negative_*.pkl (50-50 positive/negative balanced) to train 
+#                     quality classification boundaries based on frozen static features.
+#   - joint         : Train both branches jointly (default).
 # =====================================================================
 
 mkdir -p outputs
@@ -43,10 +51,12 @@ python3 tracker_model.py train \
     --dataset_dir dataset_generator/dataset \
     --num_of_epochs 10 \
     --lr 1e-3 \
-    --loss_heatmap dbsz_relu \
+    --loss_heatmap dbsz_soft \
     --loss_quality bce \
+    --train_mode joint \
     --eval_pkl_num 1 \
     --output outputs/tracker.keras \
     --init_keras_file outputs/tracker.keras \
     --best_train_loss_output outputs/tracker_best_train_loss.keras \
-    --log_file outputs/train.log
+    --log_file outputs/train.log \
+    --train_mode heatmap_only

@@ -26,10 +26,11 @@ The heatmap can be trained using continuous-safe custom losses:
   * **Soft Dice Loss (Square Form)**: Measures global intersection-over-union, preventing the network from predicting flat zero heatmaps.
 * **`focal_dice`**: Combines standard continuous Sigmoid Focal Loss and Soft Dice Loss.
 
-### 4. Dual Outputs & Localization Quality Branch
+### 4. Heatmap-Guided Quality Score Branch
 * **Output 1 (Localization Heatmap)**: Predicts a continuous Gaussian heatmap centered at the target location.
-* **Output 2 (Localization Quality Score)**: A continuous scalar value ($0.0$ to $1.0$) indicating tracking confidence:
-  * **Synthetic Localization Jittering**: Trained using synthetic off-center target shifts (every 3 frames) with a piecewise continuous quality decay function.
+* **Output 2 (Localization Quality Score)**: A continuous scalar value ($0.0$ to $1.0$) indicating tracking confidence.
+* **Heatmap-Guided Design**: Instead of classifying quality solely from intermediate features, the predicted `output_heatmap` is downsampled to `(16, 16, 8)` and concatenated directly with the `fused_features` `(16, 16, 128)`. This lets the quality branch directly analyze the confidence, structure, and clarity of the predicted localization peak!
+* **Deeper CNN Architecture**: Uses 2 layers of 2D convolutions with Group Normalization and ReLU activations to preserve spatial layout before applying Global Average Pooling (GAP) and Dense layers, yielding high-capacity confidence classification.
 
 ### Conceptual Architecture Diagram
 ```mermaid
@@ -97,7 +98,11 @@ graph TD
         Out_Q(Output 2:<br/>Quality Score)
     end
     Dec_IR4 --> Out_HM
-    Attn -->|GAP & FC| Out_Q
+    
+    %% Heatmap Guided Quality Connection
+    Out_HM -->|Downsample & Pool| Q_Fuse[Concatenate Features<br/>16x16x136]
+    Attn --> Q_Fuse
+    Q_Fuse -->|Deeper Conv GN ReLU & GAP| Out_Q
 ```
 
 ---
@@ -115,12 +120,36 @@ During compilation, the expected heatmap target is modeled using an isotropic Ga
 $$\sigma = \frac{\min(H, W)}{4}$$
 This provides rich spatial gradients across the frame.
 
-### 3. Chunk-Based Shuffling & Batching
-Our custom shuffling script (`create_batched_dataset.py`) implements a highly optimized, memory-safe sliding window algorithm:
-* **Abstract Keys Mapping**: Shuffles and slices index mappings (`(file_path, sample_index)`) in memory under **1 MB of RAM** to achieve mathematically perfect global shuffling.
-* **Representational Balance**: Loads exactly 10 random unused samples from each flight file per iteration to build a balanced, homogeneous pool of samples from all flights.
-* **O(1) Memory Footprint**: Evicts processed files dynamically from an LRU cache with garbage collection sweeps, maintaining a tiny ~600 MB RAM usage.
-* **Direct Batch Loading**: Stacks samples directly inside the generator to yield batched arrays, removing redundant `ds.batch()` layers from TensorFlow for faster GPU processing.
+### 3. Relaxed Continuous Quality Score Decay
+To resolve conflicting gradients between the heatmap regression branch and the localization quality branch, we replaced the previous aggressive exponential decay (which penalised slightly off-center but still perfectly trackable targets) with a **relaxed piecewise continuous quality score** based on the target offset $d$ (in pixels on the square search window):
+* **For small offsets ($d \le 4.0$ pixels)**: Uses a very gradual linear decay:
+  $$\text{Quality}(d) = 1.0 - d \cdot 0.02$$
+* **For larger offsets ($d > 4.0$ pixels)**: Decays smoothly using a highly relaxed exponential model:
+  $$\text{Quality}(d) = 0.9 \cdot e^{-\frac{d-4.0}{48.0}}$$
+
+This mathematical relaxation guarantees that targets remain trackable ($\text{Quality} \ge 0.70$) up to offset shifts of $15$-$20$ pixels, aligning perfectly with the heatmap's peak prediction capabilities and preventing gradient pollution.
+
+### 4. File-Level Segregated Batching (Zero-Overhead Strategy)
+Our custom shuffling script (`create_batched_dataset.py`) loads all compiled flight samples and segregates them into two distinct batch file categories:
+* **`batch_pos_*.pkl`**: Contains purely positive and jittered target samples. These are used during Stage 1 Heatmap training to ensure zero pollution from negative frames.
+* **`batch_with_negative_*.pkl`**: Contains exactly **50% positive** and **50% negative** (background only) samples. This perfectly balanced class distribution is ideal for training the Quality classifier in Stage 2.
+This file-level split entirely eliminates CPU filtering overhead during training, reduces disk I/O, and guarantees zero data pollution.
+
+---
+
+## Decoupled Two-Stage Training Pipeline
+
+To prevent conflicting gradients from the Quality classifier branch from polluting the shared spatial encoders, the training is conducted in two decoupled stages using the `--train_mode` CLI flag:
+
+### Stage 1: Heatmap Training (`--train_mode heatmap_only`)
+- **Action**: Freezes the Quality branch layers.
+- **Dataset**: Automatically loads **only** the `batch_pos_*.pkl` files from the dataset directory.
+- **Outcome**: The encoders and decoder learn to extract pristine, noise-immune spatial features and predict razor-sharp heatmaps.
+
+### Stage 2: Quality Training (`--train_mode quality_only`)
+- **Action**: **Freezes the shared encoders and heatmap decoder**. Only the quality branch layers are trainable.
+- **Dataset**: Loads **only** the 50-50 balanced `batch_with_negative_*.pkl` files.
+- **Outcome**: The Quality branch learns robust tracking confidence boundaries based on static, pre-trained spatial features.
 
 ---
 
@@ -130,19 +159,32 @@ Our custom shuffling script (`create_batched_dataset.py`) implements a highly op
 ```bash
 python3 dataset_compiler.py
 ```
-This parses raw CARLA cached flights, extracts square crops, and outputs clean compiled flight samples into `compiled/`.
+Parses raw CARLA cached flights, extracts square crops, calculates relaxed continuous quality scores, and outputs compiled samples into `compiled/`.
 
-### Step 2: Global Shuffling & Pre-Batching
+### Step 2: Global Shuffling & Segregated Batching
 ```bash
-python3 create_batched_dataset.py --batch_size 4
+python3 dataset_generator/create_batched_dataset.py --batch_size 4
 ```
-*(We recommend a batch size of 4 inside the Docker container to avoid TF GPU memory limits).*
+Generates the pure positive `batch_pos_*.pkl` and the perfectly balanced 50-50 mixed `batch_with_negative_*.pkl` files in `dataset_generator/dataset/`.
 
-### Step 3: Run Training
+### Step 3: Run Stage 1 (Heatmap Only)
 ```bash
-./run_tracker_training.sh
+python3 tracker_model.py train \
+    --dataset_dir dataset_generator/dataset \
+    --train_mode heatmap_only \
+    --loss_heatmap dbsz_soft \
+    --output outputs/tracker.keras
 ```
-This trains the Siamese-Attention network on the globally shuffled batch files.
+
+### Step 4: Run Stage 2 (Quality Only)
+Loads the pre-trained weights from Stage 1, freezes them, and trains only the Quality classification branch:
+```bash
+python3 tracker_model.py train \
+    --dataset_dir dataset_generator/dataset \
+    --train_mode quality_only \
+    --init_keras_file outputs/tracker.keras \
+    --output outputs/tracker.keras
+```
 
 ---
 

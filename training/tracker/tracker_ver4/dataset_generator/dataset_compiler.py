@@ -160,15 +160,11 @@ def main():
                 sample_sigma = sigma
             heatmap = generate_heatmap(search_crop.shape, local_target_2d, sample_sigma)
             
-            # Piecewise continuous quality score based on actual distance
-            if distance <= 2.0:
-                quality_score = 1.0 - distance * 0.05
-            elif distance <= 4.0:
-                quality_score = 0.9 - (distance - 2.0) * 0.10
-            elif distance <= 8.0:
-                quality_score = 0.7 - (distance - 4.0) * 0.075
+            # Relaxed continuous quality score based on spatial offset
+            if distance <= 4.0:
+                quality_score = 1.0 - distance * 0.02
             else:
-                quality_score = 0.4 * np.exp(-(distance - 8.0) / 16.0)
+                quality_score = 0.9 * np.exp(-(distance - 4.0) / 48.0)
             
             sample = {
                 "reference_stack": ref_stack,               # Shape: (16, 32, 32, 1)
@@ -203,18 +199,13 @@ def main():
                 # Check if shifted target falls out of bounds of the original image
                 out_of_bounds = (shifted_x < 0 or shifted_x >= w_s or shifted_y < 0 or shifted_y >= h_s)
                 
-                # Calculate piecewise continuous quality score
+                # Relaxed continuous quality score based on spatial offset
                 if out_of_bounds:
                     quality_score = 0.0
-                elif distance <= 2.0:
-                    quality_score = 1.0 - distance * 0.05
                 elif distance <= 4.0:
-                    quality_score = 0.9 - (distance - 2.0) * 0.10
-                elif distance <= 8.0:
-                    quality_score = 0.7 - (distance - 4.0) * 0.075
+                    quality_score = 1.0 - distance * 0.02
                 else:
-                    # Exponential decay from 0.4 onwards
-                    quality_score = 0.4 * np.exp(-(distance - 8.0) / 16.0)
+                    quality_score = 0.9 * np.exp(-(distance - 4.0) / 48.0)
                 
                 # Crop Search Frame centered around the shifted coordinate
                 search_crop_gray_jittered = get_crop(search_frame_gray, shifted_x, shifted_y, s_crop)

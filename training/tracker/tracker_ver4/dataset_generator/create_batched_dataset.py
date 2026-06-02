@@ -44,7 +44,7 @@ def main():
     # Prepare output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Remove existing batch files in the output directory to prevent old batch leftovers
+    # Remove existing batch files in the output directory
     old_batches = glob.glob(os.path.join(args.output_dir, "batch_*.pkl"))
     if old_batches:
         print(f"Cleaning {len(old_batches)} existing batch files in '{args.output_dir}'...")
@@ -54,76 +54,67 @@ def main():
             except Exception:
                 pass
 
-    # 2. Chunk-based gathering and shuffling loop
-    temporary_samples = []
-    batch_idx = 0
-    batch_size = args.batch_size
+    # 2. Gather all samples into memory and separate by positive status
+    pos_pool = []
+    neg_pool = []
     
-    print("Starting chunk-based gathering and shuffling loop...")
-    pbar = tqdm.tqdm(total=total_samples, desc="Processing Samples")
-    
-    while True:
-        # Get list of files that still have unused samples
-        active_files = [f for f, indices in available_indices.items() if len(indices) > 0]
-        if not active_files:
-            break
-            
-        # Interleave files randomly in each pass
-        random.shuffle(active_files)
-        
-        # Load one file at a time, randomly pick exactly 10 samples, and add to the temporary pool
-        for fpath in active_files:
-            indices = available_indices[fpath]
-            k_to_pick = min(10, len(indices))
-            
-            # Randomly select indices without replacement
-            chosen_indices = random.sample(indices, k_to_pick)
-            
-            # Remove from available pool
-            for idx in chosen_indices:
-                indices.remove(idx)
-                
-            # Read compiled file to fetch samples
-            with open(fpath, 'rb') as f:
+    print("Gathering and separating samples into positive and negative pools...")
+    for fpath in tqdm.tqdm(compiled_files, desc="Loading Pool"):
+        with open(fpath, 'rb') as f:
+            try:
                 samples = pickle.load(f)
-                
-            for idx in chosen_indices:
-                temporary_samples.append(samples[idx])
-                pbar.update(1)
-                
-            del samples
-            gc.collect()
-            
-        # Globally shuffle the gathered pool
-        random.shuffle(temporary_samples)
-        
-        # Slice the shuffled pool into complete batches of size batch_size
-        num_batches_to_write = len(temporary_samples) // batch_size
-        
-        for _ in range(num_batches_to_write):
-            batch_samples = temporary_samples[:batch_size]
-            temporary_samples = temporary_samples[batch_size:]
-            
-            batch_path = os.path.join(args.output_dir, f"batch_{batch_idx:04d}.pkl")
-            with open(batch_path, 'wb') as f:
-                pickle.dump(batch_samples, f)
-            batch_idx += 1
-            
-            del batch_samples
-            gc.collect()
+                for s in samples:
+                    is_pos = s.get('metadata', {}).get('is_positive', 1)
+                    if is_pos != 0:
+                        pos_pool.append(s)
+                    else:
+                        neg_pool.append(s)
+                del samples
+                gc.collect()
+            except Exception as e:
+                print(f"\nWarning: Failed to load {fpath}: {e}")
 
-    # 3. Save any final remainder at the very end as is
-    if temporary_samples:
-        batch_path = os.path.join(args.output_dir, f"batch_{batch_idx:04d}.pkl")
+    print(f"Pool Stats - Positives: {len(pos_pool)} | Negatives: {len(neg_pool)}")
+
+    # Shuffle both pools globally
+    random.shuffle(pos_pool)
+    random.shuffle(neg_pool)
+
+    batch_size = args.batch_size
+    batch_idx = 0
+
+    # A. Generate purely positive batches: batch_pos_*.pkl
+    # We will use all available positive samples to build pure positive batches
+    print("Creating purely positive batches...")
+    num_pos_batches = len(pos_pool) // batch_size
+    for i in range(num_pos_batches):
+        batch_samples = pos_pool[i * batch_size : (i + 1) * batch_size]
+        batch_path = os.path.join(args.output_dir, f"batch_pos_{batch_idx:04d}.pkl")
         with open(batch_path, 'wb') as f:
-            pickle.dump(temporary_samples, f)
+            pickle.dump(batch_samples, f)
         batch_idx += 1
-        
-        del temporary_samples
-        gc.collect()
 
-    pbar.close()
-    print(f"Done! {batch_idx} batched files successfully created in '{args.output_dir}'.")
+    # B. Generate 50-50 balanced mixed batches: batch_with_negative_*.pkl
+    # Each mixed batch contains exactly batch_size/2 positives and batch_size/2 negatives
+    print("Creating 50-50 balanced mixed batches...")
+    half_batch = batch_size // 2
+    num_mixed_batches = min(len(pos_pool) // half_batch, len(neg_pool) // half_batch)
+    
+    mixed_idx = 0
+    for i in range(num_mixed_batches):
+        pos_sub = pos_pool[i * half_batch : (i + 1) * half_batch]
+        neg_sub = neg_pool[i * half_batch : (i + 1) * half_batch]
+        
+        # Combine and shuffle within the batch
+        batch_samples = pos_sub + neg_sub
+        random.shuffle(batch_samples)
+        
+        batch_path = os.path.join(args.output_dir, f"batch_with_negative_{mixed_idx:04d}.pkl")
+        with open(batch_path, 'wb') as f:
+            pickle.dump(batch_samples, f)
+        mixed_idx += 1
+        
+    print(f"Done! {batch_idx} pure positive batches (batch_pos_*.pkl) and {mixed_idx} mixed batches (batch_with_negative_*.pkl) successfully created.")
 
 if __name__ == "__main__":
     main()

@@ -296,8 +296,23 @@ class TargetTrackerVer4:
         # Final prediction heatmap
         output_heatmap = layers.Conv2D(1, (3, 3), padding="same", activation="sigmoid", name="predicted_heatmap")(x)
         
-        # 4. Classification Branch for Output 2: Quality Score
-        q = layers.Conv2D(32, (3, 3), strides=2, padding="same", activation="relu", name="quality_conv")(fused_features) # -> (8, 8, 32)
+        # 4. Heatmap-Guided Classification Branch for Output 2: Quality Score
+        # Downsample predicted heatmap to (16, 16, 8) to match fused features spatial dimensions
+        hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap) # -> (128, 128, 8)
+        hm_pool = layers.AveragePooling2D(pool_size=8, name="quality_hm_pool")(hm_feat) # -> (16, 16, 8)
+        
+        # Concatenate fused cross-attention features with downsampled heatmap features
+        q_fused = layers.Concatenate(axis=-1, name="quality_fusion")([fused_features, hm_pool]) # -> (16, 16, 136)
+        
+        # Deeper spatial classification convolutions
+        q = layers.Conv2D(64, (3, 3), strides=2, padding="same", use_bias=False, name="quality_conv1")(q_fused) # -> (8, 8, 64)
+        q = layers.GroupNormalization(groups=8, name="quality_gn1")(q)
+        q = layers.ReLU(6.0, name="quality_relu1")(q)
+        
+        q = layers.Conv2D(32, (3, 3), strides=2, padding="same", use_bias=False, name="quality_conv2")(q) # -> (4, 4, 32)
+        q = layers.GroupNormalization(groups=8, name="quality_gn2")(q)
+        q = layers.ReLU(6.0, name="quality_relu2")(q)
+        
         q = layers.GlobalAveragePooling2D(name="quality_gap")(q) # -> (32,)
         q = layers.Dense(16, activation="relu", name="quality_fc1")(q)
         output_quality = layers.Dense(1, activation="sigmoid", name="predicted_quality")(q)
@@ -320,7 +335,7 @@ class TargetTrackerVer4:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(message + "\n")
 
-    def evaluate(self, dataset, loss_fn_heatmap, loss_fn_quality, steps=None):
+    def evaluate(self, dataset, loss_fn_heatmap, loss_fn_quality, train_mode="joint", steps=None):
         val_loss_avg = tf.keras.metrics.Mean()
         val_hm_loss_avg = tf.keras.metrics.Mean()
         val_q_loss_avg = tf.keras.metrics.Mean()
@@ -337,15 +352,24 @@ class TargetTrackerVer4:
             is_pos = tf.reshape(gt_quality, [-1]) > 0.0
             any_pos = tf.reduce_any(is_pos)
             
-            if any_pos:
-                pos_gt_heatmap = tf.boolean_mask(gt_heatmap, is_pos)
-                pos_pred_heatmap = tf.boolean_mask(pred_heatmap, is_pos)
-                loss_heatmap = loss_fn_heatmap(pos_gt_heatmap, pos_pred_heatmap)
-            else:
+            if train_mode == "quality_only":
                 loss_heatmap = tf.constant(0.0, dtype=tf.float32)
+            else:
+                if any_pos:
+                    pos_gt_heatmap = tf.boolean_mask(gt_heatmap, is_pos)
+                    pos_pred_heatmap = tf.boolean_mask(pred_heatmap, is_pos)
+                    loss_heatmap = loss_fn_heatmap(pos_gt_heatmap, pos_pred_heatmap)
+                else:
+                    loss_heatmap = tf.constant(0.0, dtype=tf.float32)
                 
             loss_quality = loss_fn_quality(gt_quality, pred_quality)
-            loss_value = loss_heatmap + 1.0 * loss_quality
+            
+            if train_mode == "heatmap_only":
+                loss_value = loss_heatmap
+            elif train_mode == "quality_only":
+                loss_value = loss_quality
+            else:
+                loss_value = loss_heatmap + 1.0 * loss_quality
             
             val_loss_avg.update_state(loss_value)
             val_hm_loss_avg.update_state(loss_heatmap)
@@ -359,7 +383,7 @@ class TargetTrackerVer4:
             
         return float(val_loss_avg.result()), float(val_hm_loss_avg.result()), float(val_q_loss_avg.result())
 
-    def train_epoch(self, dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_epochs, steps=None):
+    def train_epoch(self, dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_epochs, train_mode="joint", steps=None):
         epoch_loss_avg = tf.keras.metrics.Mean()
         epoch_hm_loss_avg = tf.keras.metrics.Mean()
         epoch_q_loss_avg = tf.keras.metrics.Mean()
@@ -377,15 +401,24 @@ class TargetTrackerVer4:
                 is_pos = tf.reshape(gt_quality, [-1]) > 0.0
                 any_pos = tf.reduce_any(is_pos)
                 
-                if any_pos:
-                    pos_gt_heatmap = tf.boolean_mask(gt_heatmap, is_pos)
-                    pos_pred_heatmap = tf.boolean_mask(pred_heatmap, is_pos)
-                    loss_heatmap = loss_fn_heatmap(pos_gt_heatmap, pos_pred_heatmap)
-                else:
+                if train_mode == "quality_only":
                     loss_heatmap = tf.constant(0.0, dtype=tf.float32)
+                else:
+                    if any_pos:
+                        pos_gt_heatmap = tf.boolean_mask(gt_heatmap, is_pos)
+                        pos_pred_heatmap = tf.boolean_mask(pred_heatmap, is_pos)
+                        loss_heatmap = loss_fn_heatmap(pos_gt_heatmap, pos_pred_heatmap)
+                    else:
+                        loss_heatmap = tf.constant(0.0, dtype=tf.float32)
                     
                 loss_quality = loss_fn_quality(gt_quality, pred_quality)
-                loss_value = loss_heatmap + 1.0 * loss_quality
+                
+                if train_mode == "heatmap_only":
+                    loss_value = loss_heatmap
+                elif train_mode == "quality_only":
+                    loss_value = loss_quality
+                else:
+                    loss_value = loss_heatmap + 1.0 * loss_quality
                 
             grads = tape.gradient(loss_value, self.model.trainable_variables)
             optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
@@ -402,7 +435,7 @@ class TargetTrackerVer4:
             
         return float(epoch_loss_avg.result()), float(epoch_hm_loss_avg.result()), float(epoch_q_loss_avg.result())
 
-    def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_heatmap="adaptive_wing", loss_quality="bce", output_path=None, best_train_loss_output=None, log_file=None):
+    def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_heatmap="adaptive_wing", loss_quality="bce", train_mode="joint", output_path=None, best_train_loss_output=None, log_file=None):
         if loss_heatmap == "mse":
             loss_fn_heatmap = losses.MeanSquaredError()
         elif loss_heatmap == "dice_bce":
@@ -436,15 +469,42 @@ class TargetTrackerVer4:
             loss_fn_quality = losses.LogCosh()
         else:
             raise ValueError(f"Unknown quality loss: {loss_quality}")
+            
+        # Freeze layers dynamically based on Stage 1 / Stage 2 Training Mode
+        if train_mode == "heatmap_only":
+            quality_layer_names = [
+                "quality_hm_conv", "quality_hm_pool", "quality_fusion", 
+                "quality_conv1", "quality_gn1", "quality_relu1", 
+                "quality_conv2", "quality_gn2", "quality_relu2", 
+                "quality_gap", "quality_fc1", "predicted_quality"
+            ]
+            for name in quality_layer_names:
+                try:
+                    self.model.get_layer(name).trainable = False
+                except Exception:
+                    pass
+            self.log("   [STAGE 1 - HEATMAP ONLY] Quality branch layers frozen completely.", log_file)
+        elif train_mode == "quality_only":
+            quality_layer_names = [
+                "quality_hm_conv", "quality_hm_pool", "quality_fusion", 
+                "quality_conv1", "quality_gn1", "quality_relu1", 
+                "quality_conv2", "quality_gn2", "quality_relu2", 
+                "quality_gap", "quality_fc1", "predicted_quality"
+            ]
+            for layer in self.model.layers:
+                if layer.name not in quality_layer_names:
+                    layer.trainable = False
+            self.log("   [STAGE 2 - QUALITY ONLY] Shared encoders and heatmap decoder layers frozen completely.", log_file)
+            
         optimizer = optimizers.Adam(learning_rate=lr, jit_compile=False)
         
-        self.log("Calculating initial validation loss...", log_file)
-        best_val_loss, init_val_hm, init_val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, steps=val_steps)
+        self.log(f"Calculating initial validation loss (Mode: {train_mode})...", log_file)
+        best_val_loss, init_val_hm, init_val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, train_mode=train_mode, steps=val_steps)
         best_train_loss = float('inf')
         self.log(f"Initial Validation Loss: {best_val_loss:.6f} (HM: {init_val_hm:.6f}, Q: {init_val_q:.6f})", log_file)
         
         for epoch in range(1, num_of_epochs + 1):
-            epoch_loss, epoch_hm, epoch_q = self.train_epoch(train_dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_of_epochs, steps=train_steps)
+            epoch_loss, epoch_hm, epoch_q = self.train_epoch(train_dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_of_epochs, train_mode=train_mode, steps=train_steps)
             
             if best_train_loss_output and epoch_loss < best_train_loss:
                 self.log(f"   [TRAIN IMPROVEMENT] Train loss improved from {best_train_loss:.6f} to {epoch_loss:.6f}. Saving to {best_train_loss_output}", log_file)
@@ -453,7 +513,7 @@ class TargetTrackerVer4:
                     os.makedirs(os.path.dirname(best_train_loss_output), exist_ok=True)
                 self.model.save(best_train_loss_output)
             
-            val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, steps=val_steps)
+            val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, train_mode=train_mode, steps=val_steps)
             self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} (HM: {epoch_hm:.6f}, Q: {epoch_q:.6f}) | Val Loss: {val_loss:.6f} (HM: {val_hm:.6f}, Q: {val_q:.6f})", log_file)
             
             if val_loss < best_val_loss:
@@ -538,6 +598,7 @@ def main():
     parser.add_argument("--num_of_epochs", type=int, default=10)
     parser.add_argument("--loss_heatmap", choices=["mse", "dice_bce", "focal", "focal_dice", "centernet", "centernet_dice", "adaptive_wing", "dbsz_hard", "dbsz_soft", "dbsz_relu"], default="dbsz_soft")
     parser.add_argument("--loss_quality", choices=["bce", "mse", "huber", "logcosh"], default="bce")
+    parser.add_argument("--train_mode", choices=["joint", "heatmap_only", "quality_only"], default="joint", help="Training mode: heatmap_only, quality_only, or joint")
     parser.add_argument("--output", type=str, default="outputs/tracker.keras")
     parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_best_train.keras")
     parser.add_argument("--init_keras_file", type=str, default=None, help="Path to initial model to resume from")
@@ -547,9 +608,20 @@ def main():
     
     if args.command == "train":
         import glob
-        all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "batch_*.pkl")))
-        if not all_pkls:
-            raise FileNotFoundError(f"No batch_*.pkl files in {args.dataset_dir}")
+        
+        # File-Level Prefix Filtering based on train_mode to eliminate CPU dynamic filter overheads
+        if args.train_mode == "heatmap_only":
+            all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "batch_pos_*.pkl")))
+            if not all_pkls:
+                raise FileNotFoundError(f"No batch_pos_*.pkl files found in {args.dataset_dir}. Run create_batched_dataset.py first.")
+        elif args.train_mode == "quality_only":
+            all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "batch_with_negative_*.pkl")))
+            if not all_pkls:
+                raise FileNotFoundError(f"No batch_with_negative_*.pkl files found in {args.dataset_dir}. Run create_batched_dataset.py first.")
+        else: # joint
+            all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "batch_pos_*.pkl")) + glob.glob(os.path.join(args.dataset_dir, "batch_with_negative_*.pkl")))
+            if not all_pkls:
+                raise FileNotFoundError(f"No batch_pos_*.pkl or batch_with_negative_*.pkl files found in {args.dataset_dir}.")
             
         val_files = all_pkls[:args.eval_pkl_num]
         train_files = all_pkls[args.eval_pkl_num:]
@@ -578,6 +650,7 @@ def main():
             val_steps=len(val_files),
             loss_heatmap=args.loss_heatmap,
             loss_quality=args.loss_quality,
+            train_mode=args.train_mode,
             output_path=args.output,
             best_train_loss_output=args.best_train_loss_output,
             log_file=args.log_file
