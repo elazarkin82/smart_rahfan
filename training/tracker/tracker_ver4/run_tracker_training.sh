@@ -1,6 +1,6 @@
 #!/bin/bash
 # run_tracker_training.sh
-# dice_bce focal mse logcosh huber
+# dice_bce focal focal_dice mse centernet_focal centernet_dice
 
 mkdir -p outputs
 
@@ -11,9 +11,9 @@ mkdir -p outputs
 
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/dataset \
-    --num_of_epochs 100 \
+    --num_of_epochs 10 \
     --lr 1e-3 \
-    --loss centernet_dice \
+    --loss focal_dice \
     --eval_pkl_num 1 \
     --output outputs/tracker.keras \
     --init_keras_file outputs/tracker.keras \

@@ -139,34 +139,51 @@ def main():
             s_crop = min(h_s, w_s)
             half = s_crop / 2.0
             
-            # 1. Crop Search Frame centered around true target
-            search_crop_gray = get_crop(search_frame_gray, target_2d[0], target_2d[1], s_crop)
+            # 1. Crop Search Frame with central 1/8 padding jittering
+            angle = np.random.uniform(0, 2 * np.pi)
+            distance = np.random.uniform(0, s_crop * 0.375)
+            dx = distance * np.cos(angle)
+            dy = distance * np.sin(angle)
+            
+            search_crop_gray = get_crop(search_frame_gray, target_2d[0] + dx, target_2d[1] + dy, s_crop)
             search_crop = np.expand_dims(search_crop_gray, axis=-1)
             
-            # Target local coordinate in cropped space is exactly at the center
-            local_target_2d = (half, half)
+            # Target local coordinate in cropped space is guaranteed to reside in [s_crop*0.125, s_crop*0.875]
+            local_target_2d = (half - dx, half - dy)
             
             # Dynamic Isotropic Gaussian Heatmap on the cropped space
             sigma = s_crop / 4.0
             heatmap = generate_heatmap(search_crop.shape, local_target_2d, sigma)
             
+            # Piecewise continuous quality score based on actual distance
+            if distance <= 2.0:
+                quality_score = 1.0 - distance * 0.05
+            elif distance <= 4.0:
+                quality_score = 0.9 - (distance - 2.0) * 0.10
+            elif distance <= 8.0:
+                quality_score = 0.7 - (distance - 4.0) * 0.075
+            else:
+                quality_score = 0.4 * np.exp(-(distance - 8.0) / 16.0)
+            
             sample = {
                 "reference_stack": ref_stack,               # Shape: (16, 32, 32, 1)
                 "search_frame": search_crop,                # Shape: (S_crop, S_crop, 1)
                 "ground_truth_heatmap": heatmap.astype(np.float16), # Shape: (S_crop, S_crop, 1) Float16 to save space
-                "ground_truth_quality": np.array([1.0], dtype=np.float16), # Shape: (1,)
+                "ground_truth_quality": np.array([quality_score], dtype=np.float16), # Shape: (1,)
                 "metadata": {
                     "flight_id": basename,
                     "frame_idx": frame_dict['frame_index'],
                     "target_2d": local_target_2d,
-                    "original_target_2d": target_2d,
+                    "original_target_2d": (target_2d[0] + dx, target_2d[1] + dy),
+                    "true_target_2d": local_target_2d,
+                    "original_true_target_2d": target_2d,
                     "distance": frame_dict['distance_to_target'],
+                    "shift_distance": distance,
                     "is_positive": 1
                 }
             }
             training_samples.append(sample)
             
-            # 2. Synthetic Coordinate Jittering & Quality Decay (Every 3 frames)
             frame_idx = frame_dict['frame_index']
             if frame_idx % 3 == 0:
                 angle = np.random.uniform(0, 2 * np.pi)

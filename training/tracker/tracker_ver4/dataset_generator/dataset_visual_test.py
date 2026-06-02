@@ -115,7 +115,8 @@ class DatasetVisualizer:
         self.playing = False
         self.play_delay_ms = 80  # Default playback speed (~12.5 FPS)
         self.loaded_data = None
-        self.main_tk_image = None
+        self.search_tk_image = None
+        self.heatmap_tk_image = None
         self.ref_tk_images = []
         
         # UI Setup
@@ -179,8 +180,12 @@ class DatasetVisualizer:
         self.left_panel = tk.Frame(main_view, bg="#121212")
         self.left_panel.pack(side="left", fill="both", expand=True)
         
-        self.main_image_label = tk.Label(self.left_panel, bg="#1a1a1a", bd=1, relief="solid")
-        self.main_image_label.pack(fill="both", expand=True, padx=5, pady=5)
+        # Two side-by-side panels for separate raw displays
+        self.search_image_label = tk.Label(self.left_panel, bg="#1a1a1a", bd=1, relief="solid")
+        self.search_image_label.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        
+        self.heatmap_image_label = tk.Label(self.left_panel, bg="#1a1a1a", bd=1, relief="solid")
+        self.heatmap_image_label.pack(side="left", fill="both", expand=True, padx=5, pady=5)
         
         # Right reference crop area
         right_panel = tk.Frame(main_view, bg="#1a1a1a", width=350, bd=1, relief="solid")
@@ -326,7 +331,8 @@ class DatasetVisualizer:
 
     def update_ui(self):
         if not self.loaded_data:
-            self.main_image_label.config(image='', text="No Data Loaded. Please ensure dataset / cache folder contains .pkl files.")
+            self.search_image_label.config(image='', text="No Data Loaded. Please check paths.")
+            self.heatmap_image_label.config(image='', text="No heatmap loaded.")
             self.info_label.config(text="No files found to inspect.", fg="#ff3366")
             self.detail_flight_lbl.config(text="Flight: N/A")
             self.detail_frame_lbl.config(text="Frame: N/A")
@@ -371,10 +377,10 @@ class DatasetVisualizer:
         cv2.line(img_rgb, (px, py + 8), (px, py + 22), color, 1)
         
         # Fit image dynamically into left panel, retaining aspect ratio if possible
-        panel_w = self.main_image_label.winfo_width()
-        panel_h = self.main_image_label.winfo_height()
+        panel_w = self.search_image_label.winfo_width()
+        panel_h = self.search_image_label.winfo_height()
         if panel_w < 100 or panel_h < 100: # not mapped yet
-            panel_w, panel_h = 640, 480
+            panel_w, panel_h = 480, 480
             
         # Scale to match display nicely
         scale = min(panel_w / w_raw, panel_h / h_raw)
@@ -387,8 +393,11 @@ class DatasetVisualizer:
             img_resized = img_rgb
             
         pil_img = Image.fromarray(img_resized)
-        self.main_tk_image = ImageTk.PhotoImage(image=pil_img)
-        self.main_image_label.config(image=self.main_tk_image, text='')
+        self.search_tk_image = ImageTk.PhotoImage(image=pil_img)
+        self.search_image_label.config(image=self.search_tk_image, text='')
+        
+        # In raw mode, expected heatmap is not compiled yet
+        self.heatmap_image_label.config(image='', text="[Raw Mode - No Compiled Heatmap]")
         
         # Metadata
         dist = sample["distance_to_target"]
@@ -432,40 +441,45 @@ class DatasetVisualizer:
         heatmap_color = cv2.applyColorMap(heatmap_scaled, cv2.COLORMAP_JET)
         heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
         
-        # Blend Search Frame and Heatmap overlay
-        overlay = cv2.addWeighted(search_rgb, 0.6, heatmap_color, 0.4, 0)
-        
         # Target from metadata
         meta = sample.get("metadata", {})
         target_2d = meta.get("target_2d")
         
+        # Prepare clean Search frame with target ring
+        search_vis = search_rgb.copy()
         if target_2d is not None:
             px, py = int(target_2d[0]), int(target_2d[1])
-            # Draw cyan target ring on compiled image
-            cv2.circle(overlay, (px, py), 8, (0, 230, 255), 1)
-            cv2.circle(overlay, (px, py), 1, (0, 230, 255), -1)
+            # Draw cyan target ring on search crop
+            cv2.circle(search_vis, (px, py), 8, (0, 230, 255), 1)
+            cv2.circle(search_vis, (px, py), 1, (0, 230, 255), -1)
             target_str = f"[{px}, {py}]"
         else:
             target_str = "None (Negative Sample)"
-        
-        # Scale to display canvas size
-        panel_w = self.main_image_label.winfo_width()
-        panel_h = self.main_image_label.winfo_height()
+            
+        # Scale and render clean search frame
+        panel_w = self.search_image_label.winfo_width()
+        panel_h = self.search_image_label.winfo_height()
         if panel_w < 100 or panel_h < 100:
-            panel_w, panel_h = 512, 512
+            panel_w, panel_h = 256, 256
             
-        scale = min(panel_w / w_s, panel_h / h_s)
-        disp_w = int(w_s * scale)
-        disp_h = int(h_s * scale)
+        scale_s = min(panel_w / w_s, panel_h / h_s)
+        disp_w_s = int(w_s * scale_s)
+        disp_h_s = int(h_s * scale_s)
         
-        if disp_w > 0 and disp_h > 0:
-            overlay_resized = cv2.resize(overlay, (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
+        if disp_w_s > 0 and disp_h_s > 0:
+            search_resized = cv2.resize(search_vis, (disp_w_s, disp_h_s), interpolation=cv2.INTER_LINEAR)
+            heatmap_resized = cv2.resize(heatmap_color, (disp_w_s, disp_h_s), interpolation=cv2.INTER_LINEAR)
         else:
-            overlay_resized = overlay
+            search_resized = search_vis
+            heatmap_resized = heatmap_color
             
-        pil_img = Image.fromarray(overlay_resized)
-        self.main_tk_image = ImageTk.PhotoImage(image=pil_img)
-        self.main_image_label.config(image=self.main_tk_image, text='')
+        pil_search = Image.fromarray(search_resized)
+        self.search_tk_image = ImageTk.PhotoImage(image=pil_search)
+        self.search_image_label.config(image=self.search_tk_image, text='')
+        
+        pil_heatmap = Image.fromarray(heatmap_resized)
+        self.heatmap_tk_image = ImageTk.PhotoImage(image=pil_heatmap)
+        self.heatmap_image_label.config(image=self.heatmap_tk_image, text='')
         
         # Metadata update
         filename = self.compiled_files[self.current_file_idx]

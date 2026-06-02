@@ -34,7 +34,7 @@ class KerasFCNVisualizer:
         
         self.root = root
         self.root.title("TargetTrackerVer4 - Live Inference Visualizer")
-        self.root.geometry("860x500")
+        self.root.geometry("1150x500")
         self.root.configure(bg="#121212")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -81,9 +81,10 @@ class KerasFCNVisualizer:
         self.frames_frame = tk.Frame(self.root, bg="#121212")
         self.frames_frame.pack(pady=10)
         
-        self.ref_panel, self.ref_lbl = self.create_frame_slot(self.frames_frame, "Reference Target")
-        self.curr_panel, self.curr_lbl = self.create_frame_slot(self.frames_frame, "Expected Heatmap Overlay")
-        self.pred_panel, self.pred_lbl = self.create_frame_slot(self.frames_frame, "Predicted Heatmap Overlay")
+        self.ref_panel, self.ref_lbl = self.create_frame_slot(self.frames_frame, "Reference Features")
+        self.search_panel, self.search_lbl = self.create_frame_slot(self.frames_frame, "Search Frame")
+        self.expected_heatmap_panel, self.expected_heatmap_lbl = self.create_frame_slot(self.frames_frame, "Expected Heatmap")
+        self.predicted_heatmap_panel, self.predicted_heatmap_lbl = self.create_frame_slot(self.frames_frame, "Predicted Heatmap")
         
         self.status_bar = tk.Label(self.root, text="Press [Space] for Next Sample", font=("Inter", 10), bg="#1c1c1c", fg="#aaaaaa", anchor="w", padx=15, pady=8)
         self.status_bar.pack(side="bottom", fill="x")
@@ -159,34 +160,50 @@ class KerasFCNVisualizer:
                 pred_norm = [0.5, 0.5]
             
             search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
+            search_vis = search_rgb.copy()
             
-            # Prepare expected heatmap overlay (ground-truth)
+            # Draw Expected target (cyan circle)
+            if norm_coords is not None:
+                cx = int(norm_coords[0] * 256.0)
+                cy = int(norm_coords[1] * 256.0)
+                cv2.circle(search_vis, (cx, cy), 6, (0, 230, 255), 2)
+                cv2.circle(search_vis, (cx, cy), 2, (0, 230, 255), -1)
+                
+            # Draw Predicted target (green circle)
+            pcx = int(pred_norm[0] * 256.0)
+            pcy = int(pred_norm[1] * 256.0)
+            cv2.circle(search_vis, (pcx, pcy), 6, (51, 255, 51), 2)
+            cv2.circle(search_vis, (pcx, pcy), 2, (51, 255, 51), -1)
+            
+            self.tk_img_search = ImageTk.PhotoImage(Image.fromarray(search_vis))
+            
+            # Prepare clean raw expected heatmap
             gt_hm_256 = cv2.resize(gt_heatmap[:, :, 0].astype(np.float32), (256, 256), interpolation=cv2.INTER_LINEAR)
             gt_heatmap_color = cv2.applyColorMap((gt_hm_256 * 255).astype(np.uint8), cv2.COLORMAP_JET)
             gt_heatmap_color_rgb = cv2.cvtColor(gt_heatmap_color, cv2.COLOR_BGR2RGB)
-            gt_overlay = cv2.addWeighted(search_rgb, 0.6, gt_heatmap_color_rgb, 0.4, 0)
+            self.tk_img_expected = ImageTk.PhotoImage(Image.fromarray(gt_heatmap_color_rgb))
             
-            self.tk_img_curr = self.process_and_draw(gt_overlay, norm_coords, "#00e6ff")
-            
-            # Prepare predicted heatmap overlay
+            # Prepare clean raw predicted heatmap
             heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
             heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-            overlay = cv2.addWeighted(search_rgb, 0.6, heatmap_color_rgb, 0.4, 0)
-            self.tk_img_pred = self.process_and_draw(overlay, pred_norm, "#33ff33")
+            self.tk_img_predicted = ImageTk.PhotoImage(Image.fromarray(heatmap_color_rgb))
             
             self.ref_panel.config(image=self.tk_img_ref)
-            self.curr_panel.config(image=self.tk_img_curr)
-            self.pred_panel.config(image=self.tk_img_pred)
+            self.search_panel.config(image=self.tk_img_search)
+            self.expected_heatmap_panel.config(image=self.tk_img_expected)
+            self.predicted_heatmap_panel.config(image=self.tk_img_predicted)
             
             self.ref_lbl.config(text="Target Features")
-            self.curr_lbl.config(text=curr_lbl_text, fg=curr_lbl_fg)
+            self.search_lbl.config(text=curr_lbl_text, fg=curr_lbl_fg)
             
             if target_2d is not None:
                 error = np.sqrt((pred_norm[0] - norm_x)**2 + (pred_norm[1] - norm_y)**2) * 256.0
                 error_str = f"Error: {error:.1f}px"
             else:
                 error_str = "Error: N/A"
-            self.pred_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {pred_quality:.2f}", fg="#33ff33")
+            
+            self.expected_heatmap_lbl.config(text="GT Heatmap")
+            self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {pred_quality:.2f}", fg="#33ff33")
             
             self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
             
