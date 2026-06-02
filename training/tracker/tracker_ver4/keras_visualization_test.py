@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import sys
 import argparse
 import tkinter as tk
@@ -158,11 +159,19 @@ class KerasFCNVisualizer:
                 pred_norm = [0.5, 0.5]
             
             search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
-            self.tk_img_curr = self.process_and_draw(search_rgb, norm_coords, "#00e6ff")
             
-            # Overlay heatmap on search image
+            # Prepare expected heatmap overlay (ground-truth)
+            gt_hm_256 = cv2.resize(gt_heatmap[:, :, 0].astype(np.float32), (256, 256), interpolation=cv2.INTER_LINEAR)
+            gt_heatmap_color = cv2.applyColorMap((gt_hm_256 * 255).astype(np.uint8), cv2.COLORMAP_JET)
+            gt_heatmap_color_rgb = cv2.cvtColor(gt_heatmap_color, cv2.COLOR_BGR2RGB)
+            gt_overlay = cv2.addWeighted(search_rgb, 0.6, gt_heatmap_color_rgb, 0.4, 0)
+            
+            self.tk_img_curr = self.process_and_draw(gt_overlay, norm_coords, "#00e6ff")
+            
+            # Prepare predicted heatmap overlay
             heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
-            overlay = cv2.addWeighted(search_rgb, 0.6, heatmap_color, 0.4, 0)
+            heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+            overlay = cv2.addWeighted(search_rgb, 0.6, heatmap_color_rgb, 0.4, 0)
             self.tk_img_pred = self.process_and_draw(overlay, pred_norm, "#33ff33")
             
             self.ref_panel.config(image=self.tk_img_ref)

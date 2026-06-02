@@ -198,17 +198,15 @@ def main():
                 search_crop_gray_jittered = get_crop(search_frame_gray, shifted_x, shifted_y, s_crop)
                 search_crop_jittered = np.expand_dims(search_crop_gray_jittered, axis=-1)
                 
-                # In the shifted crop, the shifted target is at the center
-                local_shifted_2d = (half, half)
-                
-                # Generate shifted heatmap centered at the shifted target coordinate in cropped space
-                heatmap_shifted = generate_heatmap(search_crop_jittered.shape, local_shifted_2d, sigma)
-                
                 # Calculate where the true target is in this shifted crop space
                 x1_shifted = int(round(shifted_x - half))
                 y1_shifted = int(round(shifted_y - half))
                 local_true_x = target_2d[0] - x1_shifted
                 local_true_y = target_2d[1] - y1_shifted
+                local_true_target = (local_true_x, local_true_y)
+                
+                # Generate shifted heatmap centered at the TRUE target coordinate in cropped space
+                heatmap_shifted = generate_heatmap(search_crop_jittered.shape, local_true_target, sigma)
                 
                 sample_jittered = {
                     "reference_stack": ref_stack,
@@ -218,7 +216,7 @@ def main():
                     "metadata": {
                         "flight_id": basename,
                         "frame_idx": frame_idx,
-                        "target_2d": local_shifted_2d,
+                        "target_2d": local_true_target,
                         "original_target_2d": (shifted_x, shifted_y),
                         "true_target_2d": (local_true_x, local_true_y),
                         "original_true_target_2d": target_2d,

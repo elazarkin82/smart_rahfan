@@ -12,7 +12,7 @@ mkdir -p outputs
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/dataset \
     --num_of_epochs 100 \
-    --lr 1e-2 \
+    --lr 1e-3 \
     --loss centernet_dice \
     --eval_pkl_num 1 \
     --output outputs/tracker.keras \
