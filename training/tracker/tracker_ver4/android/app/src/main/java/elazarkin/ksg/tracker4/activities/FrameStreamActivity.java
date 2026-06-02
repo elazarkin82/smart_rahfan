@@ -15,6 +15,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.SeekBar;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -52,7 +53,6 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private ImageView capturedImageView;
     private TextView tutorialHud;
     private TextView lblStatus;
-    private Button btnReset;
     private Button btnBack;
 
     private LinearLayout resultsPanel;
@@ -62,6 +62,17 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private TextView txtBufferStatus;
     private ImageView cropHistView;
     private ImageView cropCurrView;
+    private ImageView cropFullView;
+    
+    private TextView lblHistStack;
+    private SeekBar seekBarHistLayer;
+    private int selectedHistLayer = 0;
+
+    private float[] cachedFlatHeatmap = null;
+    private float[] cachedCurrBuffer = null;
+    private Bitmap cachedFullFrameBmp = null;
+    private float cachedPx = 0.5f;
+    private float cachedPy = 0.5f;
 
     private CameraHelper cameraHelper;
     private boolean isLoopActive = false;
@@ -78,9 +89,11 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private final ReentrantLock frameLock = new ReentrantLock();
     private final Condition frameCondition = frameLock.newCondition();
     private byte[] sharedFrameData = null;
+    private byte[] rawYPlaneBuffer = null;
     private int sharedFrameW = 0;
     private int sharedFrameH = 0;
     private int sharedFrameStride = 0;
+    private int sharedFrameRotation = 0;
     private boolean hasSharedFrame = false;
 
     private Thread workerThread = null;
@@ -99,7 +112,6 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         capturedImageView = findViewById(R.id.capturedImageView);
         tutorialHud = findViewById(R.id.tutorial_hud);
         lblStatus = findViewById(R.id.lbl_status);
-        btnReset = findViewById(R.id.btn_reset);
         btnBack = findViewById(R.id.btn_back);
 
         resultsPanel = findViewById(R.id.results_panel);
@@ -109,6 +121,22 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         txtBufferStatus = findViewById(R.id.txt_buffer_status);
         cropHistView = findViewById(R.id.cropHistView);
         cropCurrView = findViewById(R.id.cropCurrView);
+        cropFullView = findViewById(R.id.cropFullView);
+
+        lblHistStack = findViewById(R.id.lblHistStack);
+        seekBarHistLayer = findViewById(R.id.seekBarHistLayer);
+        seekBarHistLayer.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                selectedHistLayer = progress;
+                lblHistStack.setText("Hist Stack (L: " + selectedHistLayer + ")");
+                if (cachedFlatHeatmap != null && cachedCurrBuffer != null) {
+                    renderDiagnostics(cachedFlatHeatmap, cachedCurrBuffer, cachedFullFrameBmp, cachedPx, cachedPy);
+                }
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
 
         try {
             Interpreter.Options options = new Interpreter.Options();
@@ -121,19 +149,15 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
 
         btnBack.setOnClickListener(v -> finish());
-        btnReset.setOnClickListener(v -> resetTrackerToIdle());
         
         capturedImageView.setOnTouchListener((v, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
-                if (currentUiState == STATE_IDLE) {
-                    targetX = event.getX();
-                    targetY = event.getY();
-                    currentUiState = STATE_GATHERING;
-                    btnReset.setVisibility(View.VISIBLE);
-                    lblStatus.setText("Status: Gathering Reference Frames...");
-                    tutorialHud.setText("Hold steady on target...");
-                    tutorialHud.setTextColor(Color.YELLOW);
-                }
+                targetX = event.getX();
+                targetY = event.getY();
+                currentUiState = STATE_GATHERING;
+                lblStatus.setText("Status: Gathering Reference Frames...");
+                tutorialHud.setText("Hold steady on target...");
+                tutorialHud.setTextColor(Color.YELLOW);
             }
             return true;
         });
@@ -182,30 +206,42 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             return;
         }
 
+        int rotationDegrees = imageProxy.getImageInfo().getRotationDegrees();
+
         androidx.camera.core.ImageProxy.PlaneProxy[] planes = imageProxy.getPlanes();
         java.nio.ByteBuffer yBuffer = planes[0].getBuffer();
         int yRowStride = planes[0].getRowStride();
         int width = imageProxy.getWidth();
         int height = imageProxy.getHeight();
 
+        yBuffer.rewind();
         int length = yBuffer.remaining();
+        if (rawYPlaneBuffer == null || rawYPlaneBuffer.length != length) {
+            rawYPlaneBuffer = new byte[length];
+        }
+        yBuffer.get(rawYPlaneBuffer);
+
+        int rotW = (rotationDegrees == 90 || rotationDegrees == 270) ? height : width;
+        int rotH = (rotationDegrees == 90 || rotationDegrees == 270) ? width : height;
+        int rotLength = rotW * rotH;
 
         if (currentUiState == STATE_GATHERING) {
-            byte[] yPlaneData = new byte[length];
-            yBuffer.get(yPlaneData);
-            gatherReferenceFrame(yPlaneData, width, height, yRowStride);
+            byte[] rotatedData = new byte[rotLength];
+            MainActivity.rotateYPlane(rawYPlaneBuffer, rotatedData, width, height, yRowStride, rotationDegrees);
+            gatherReferenceFrame(rotatedData, rotW, rotH);
             imageProxy.close();
         } else if (currentUiState == STATE_TRACKING) {
-            // Producer: Lock, write Y-plane bytes to shared buffer, and signal the Worker Thread
+            // Producer: Lock, write rotated Y-plane bytes to shared buffer, and signal the Worker Thread
             frameLock.lock();
             try {
-                if (sharedFrameData == null || sharedFrameData.length != length) {
-                    sharedFrameData = new byte[length];
+                if (sharedFrameData == null || sharedFrameData.length != rotLength) {
+                    sharedFrameData = new byte[rotLength];
                 }
-                yBuffer.get(sharedFrameData);
-                sharedFrameW = width;
-                sharedFrameH = height;
-                sharedFrameStride = yRowStride;
+                MainActivity.rotateYPlane(rawYPlaneBuffer, sharedFrameData, width, height, yRowStride, rotationDegrees);
+                sharedFrameW = rotW;
+                sharedFrameH = rotH;
+                sharedFrameStride = rotW;
+                sharedFrameRotation = 0; // Already rotated to 0 degrees
                 hasSharedFrame = true;
                 frameCondition.signal();
             } finally {
@@ -215,8 +251,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
     }
 
-    private void gatherReferenceFrame(byte[] yPlane, int width, int height, int stride) {
-        float[] normCoords = MainActivity.mapScreenCoordsToFrame(targetX, targetY, viewFinder.getWidth(), viewFinder.getHeight(), width, height);
+    private void gatherReferenceFrame(byte[] yPlane, int width, int height) {
+        float[] normCoords = MainActivity.mapAlignedScreenCoordsToFrame(targetX, targetY, viewFinder.getWidth(), viewFinder.getHeight(), width, height);
         if (normCoords == null) {
             currentUiState = STATE_IDLE;
             return;
@@ -229,9 +265,14 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         lastTrackedX = cx;
         lastTrackedY = cy;
         
+        // Zoom range matches pipeline_config.json: from size 128 down to 4 pixels (scaled dynamically by camera height relative to 600px training size)
+        float maxCropSize = (128.0f / 600.0f) * height;
+        float minCropSize = (4.0f / 600.0f) * height;
+        
+        int stride = width; // rotated frame stride is width
+        
         for (int layer = 0; layer < 16; layer++) {
-            // Zoom range matches pipeline_config.json: from size 128 down to 4 pixels
-            float size = 128.0f - layer * ((128.0f - 4.0f) / 15.0f);
+            float size = maxCropSize - layer * ((maxCropSize - minCropSize) / 15.0f);
             float half = size / 2.0f;
             
             for (int y = 0; y < 32; y++) {
@@ -291,6 +332,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         int localW = 0;
         int localH = 0;
         int localStride = 0;
+        int localRotation = 0;
 
         while (isWorkerActive) {
             frameLock.lock();
@@ -309,6 +351,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                     localW = sharedFrameW;
                     localH = sharedFrameH;
                     localStride = sharedFrameStride;
+                    localRotation = sharedFrameRotation;
                 }
                 hasSharedFrame = false;
             } catch (InterruptedException e) {
@@ -319,12 +362,12 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
             if (localFrameData != null) {
                 // Execute heavy inference and math operations on background thread outside lock
-                processWorkerFrame(localFrameData, localW, localH, localStride);
+                processWorkerFrame(localFrameData, localW, localH, localStride, localRotation);
             }
         }
     }
 
-    private void processWorkerFrame(byte[] yPlane, int width, int height, int stride) {
+    private void processWorkerFrame(byte[] yPlane, int width, int height, int stride, int rotationDegrees) {
         if (tflite == null) return;
 
         long startTime = SystemClock.elapsedRealtime();
@@ -375,22 +418,15 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         
         float px = localCoords[0]; // relative x in [0.0, 1.0] inside the crop
         float py = localCoords[1]; // relative y in [0.0, 1.0] inside the crop
-
+        
         // Coordinate Re-projection: Map crop-relative coordinates back to camera absolute coordinates
         float halfSize = cropSize / 2.0f;
         float x_global = (lastTrackedX - halfSize) + px * cropSize;
         float y_global = (lastTrackedY - halfSize) + py * cropSize;
 
-        // Check if target is out of camera frame boundaries
-        if (x_global < 0.0f || x_global >= (float)width || y_global < 0.0f || y_global >= (float)height) {
-            new Handler(Looper.getMainLooper()).post(new Runnable() {
-                @Override
-                public void run() {
-                    handleTargetLost("Target went out of bounds.");
-                }
-            });
-            return;
-        }
+        // Clamp target position to camera frame boundaries to keep tracking running continuously
+        x_global = Math.max(0.0f, Math.min((float)width - 1.0f, x_global));
+        y_global = Math.max(0.0f, Math.min((float)height - 1.0f, y_global));
 
         // Save for next frame centering
         lastTrackedX = x_global;
@@ -402,6 +438,50 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         float gx = x_global / (float) width;
         float gy = y_global / (float) height;
 
+        // Since the frame is rotated to screen space, screen normalization is direct (1:1)
+        final float screenX_norm = gx;
+        final float screenY_norm = gy;
+
+        // Downsample the full processed frame to a small bitmap to inspect rotation/orientation
+        Bitmap tmpBmp = null;
+        try {
+            int downsampleFactor = 8;
+            int smallW = width / downsampleFactor;
+            int smallH = height / downsampleFactor;
+            tmpBmp = Bitmap.createBitmap(smallW, smallH, Bitmap.Config.ARGB_8888);
+            int[] pixels = new int[smallW * smallH];
+            for (int y = 0; y < smallH; y++) {
+                int srcY = y * downsampleFactor;
+                int rowOffset = srcY * stride;
+                for (int x = 0; x < smallW; x++) {
+                    int srcX = x * downsampleFactor;
+                    int val = yPlane[rowOffset + srcX] & 0xFF;
+                    pixels[y * smallW + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
+                }
+            }
+            tmpBmp.setPixels(pixels, 0, smallW, 0, 0, smallW, smallH);
+            
+            // Draw a small indicator on the downsampled frame showing the tracking target position
+            Canvas canvas = new Canvas(tmpBmp);
+            Paint paint = new Paint();
+            paint.setColor(Color.RED);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setAntiAlias(true);
+            float scaledX = lastTrackedX / (float) downsampleFactor;
+            float scaledY = lastTrackedY / (float) downsampleFactor;
+            canvas.drawCircle(scaledX, scaledY, 3.0f, paint);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        final Bitmap fullFrameBmp = tmpBmp;
+
+        // Save to cache for SeekBar scrolling redraws
+        cachedFlatHeatmap = flatHeatmap;
+        cachedCurrBuffer = currBuffer;
+        cachedFullFrameBmp = fullFrameBmp;
+        cachedPx = px;
+        cachedPy = py;
+
         // Post UI rendering tasks back to the UI thread
         new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
@@ -411,22 +491,18 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                 // If quality is below threshold, color the target circle in RED. If above, GREEN.
                 int circleColor = (qualityScore >= CONFIDENCE_THRESHOLD) ? Color.GREEN : Color.RED;
                 
-                // TODO: Active search recovery mode when quality score falls below threshold.
-                // Currently, we continue tracking using the last known location but draw the indicator in RED.
-                // In the future, we could dynamically expand search cropSize or sweep the camera frame.
-                
                 if (qualityScore < CONFIDENCE_THRESHOLD) {
                     lblStatus.setText(String.format("Status: Weak Lock! Quality: %.2f", qualityScore));
                 } else {
                     lblStatus.setText("Status: Active tracking");
                 }
                 
-                drawTrackingIndicator(gx, gy, circleColor);
-                renderDiagnostics(flatHeatmap, currBuffer);
+                drawTrackingIndicator(lastTrackedX, lastTrackedY, width, height, circleColor);
+                renderDiagnostics(flatHeatmap, currBuffer, fullFrameBmp, px, py);
 
                 txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
                         preDuration, infDuration, postDuration, totalDuration));
-                txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Quality: %.2f]", gx, gy, qualityScore));
+                txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Quality: %.2f]", screenX_norm, screenY_norm, qualityScore));
                 txtBufferStatus.setText("Tracking Engine: Active");
             }
         });
@@ -450,30 +526,31 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         Toast.makeText(this, "Target Lost: " + reason, Toast.LENGTH_SHORT).show();
     }
 
-    private void drawTrackingIndicator(float tx, float ty, int color) {
-        int viewW = capturedImageView.getWidth();
-        int viewH = capturedImageView.getHeight();
-        if (viewW <= 0 || viewH <= 0) return;
+    private void drawTrackingIndicator(float cx, float cy, int imgW, int imgH, int color) {
+        if (imgW <= 0 || imgH <= 0) return;
 
-        Bitmap overlayBitmap = Bitmap.createBitmap(viewW, viewH, Bitmap.Config.ARGB_8888);
+        Bitmap overlayBitmap = Bitmap.createBitmap(imgW, imgH, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(overlayBitmap);
         Paint paint = new Paint();
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(6.0f);
+        
+        // Scale circle indicator sizes relative to the camera frame width
+        float strokeW = (6.0f / 720.0f) * imgW;
+        float circleR = (25.0f / 720.0f) * imgW;
+        float innerR = (6.0f / 720.0f) * imgW;
+        
+        paint.setStrokeWidth(strokeW);
         paint.setAntiAlias(true);
         
-        float screenX = tx * viewW;
-        float screenY = ty * viewH;
-        
         paint.setColor(color);
-        canvas.drawCircle(screenX, screenY, 25.0f, paint);
+        canvas.drawCircle(cx, cy, circleR, paint);
         paint.setStyle(Paint.Style.FILL);
-        canvas.drawCircle(screenX, screenY, 6.0f, paint);
+        canvas.drawCircle(cx, cy, innerR, paint);
         
         capturedImageView.setImageBitmap(overlayBitmap);
     }
 
-    private void renderDiagnostics(float[] heatmap, float[] curr) {
+    private void renderDiagnostics(float[] heatmap, float[] curr, Bitmap fullFrameBmp, float px, float py) {
         // 1. Render outputHeatmap (Jet color mapping)
         Bitmap hmBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
         int[] hmColors = new int[256 * 256];
@@ -495,24 +572,46 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             currColors[i] = 0xFF000000 | (val << 16) | (val << 8) | val;
         }
         currBitmap.setPixels(currColors, 0, 256, 0, 0, 256, 256);
+        
+        // Draw a small red indicator showing the predicted target position inside search crop
+        Canvas canvasCurr = new Canvas(currBitmap);
+        Paint paintCurr = new Paint();
+        paintCurr.setColor(Color.RED);
+        paintCurr.setStyle(Paint.Style.FILL);
+        paintCurr.setAntiAlias(true);
+        canvasCurr.drawCircle(px * 256.0f, py * 256.0f, 6.0f, paintCurr);
+        
         cropCurrView.setImageBitmap(currBitmap);
 
-        // 3. Render cropHistView (the locked target reference template layer 0)
+        // 3. Render cropHistView (the locked target reference template layer)
         Bitmap histBitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888);
         int[] histColors = new int[32 * 32];
         for (int y = 0; y < 32; y++) {
             for (int x = 0; x < 32; x++) {
-                int val = (int)(refStackInput[0][0][y][x][0] * 255.0f);
+                int val = (int)(refStackInput[0][selectedHistLayer][y][x][0] * 255.0f);
                 histColors[y * 32 + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
             }
         }
         histBitmap.setPixels(histColors, 0, 32, 0, 0, 32, 32);
+        
+        // Draw a small red indicator at the center of the reference crop template (the target origin)
+        Canvas canvasHist = new Canvas(histBitmap);
+        Paint paintHist = new Paint();
+        paintHist.setColor(Color.RED);
+        paintHist.setStyle(Paint.Style.FILL);
+        paintHist.setAntiAlias(true);
+        canvasHist.drawCircle(16.0f, 16.0f, 1.5f, paintHist);
+        
         cropHistView.setImageBitmap(histBitmap);
+
+        // 4. Render cropFullView (the downsampled full processed frame)
+        if (fullFrameBmp != null) {
+            cropFullView.setImageBitmap(fullFrameBmp);
+        }
     }
 
     private void resetTrackerToIdle() {
         currentUiState = STATE_IDLE;
-        btnReset.setVisibility(View.GONE);
         resultsPanel.setVisibility(View.GONE);
         
         tutorialHud.setText("Tap screen to lock on target");

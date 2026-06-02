@@ -4,6 +4,7 @@
 #include <android/log.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #define LOG_TAG "Tracker3Lite_NDK"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -17,6 +18,52 @@ Java_elazarkin_ksg_tracker4_MainActivity_stringFromJNI(
         jobject /* this */) {
     std::string hello = "Hello from C++ Tracker3-Lite NDK (16KB aligned)";
     return env->NewStringUTF(hello.c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_elazarkin_ksg_tracker4_MainActivity_rotateYPlane(
+        JNIEnv* env,
+        jclass clazz,
+        jbyteArray srcArray,
+        jbyteArray destArray,
+        jint srcW,
+        jint srcH,
+        jint rowStride,
+        jint rotationDegrees) {
+    jbyte* src = env->GetByteArrayElements(srcArray, nullptr);
+    jbyte* dest = env->GetByteArrayElements(destArray, nullptr);
+    
+    if (src && dest) {
+        uint8_t* s = (uint8_t*)src;
+        uint8_t* d = (uint8_t*)dest;
+        
+        if (rotationDegrees == 90) {
+            for (int y = 0; y < srcH; ++y) {
+                for (int x = 0; x < srcW; ++x) {
+                    d[x * srcH + (srcH - 1 - y)] = s[y * rowStride + x];
+                }
+            }
+        } else if (rotationDegrees == 180) {
+            for (int y = 0; y < srcH; ++y) {
+                for (int x = 0; x < srcW; ++x) {
+                    d[(srcH - 1 - y) * srcW + (srcW - 1 - x)] = s[y * rowStride + x];
+                }
+            }
+        } else if (rotationDegrees == 270) {
+            for (int y = 0; y < srcH; ++y) {
+                for (int x = 0; x < srcW; ++x) {
+                    d[(srcW - 1 - x) * srcH + y] = s[y * rowStride + x];
+                }
+            }
+        } else {
+            for (int y = 0; y < srcH; ++y) {
+                std::memcpy(d + y * srcW, s + y * rowStride, srcW);
+            }
+        }
+    }
+    
+    if (src) env->ReleaseByteArrayElements(srcArray, src, JNI_ABORT);
+    if (dest) env->ReleaseByteArrayElements(destArray, dest, 0);
 }
 
 JNIEXPORT void JNICALL

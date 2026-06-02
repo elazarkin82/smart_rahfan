@@ -54,6 +54,19 @@ public class MainActivity extends AppCompatActivity {
     );
 
     /**
+     * Native JNI pre-processing function that rotates the Y-plane byte array
+     * according to camera rotation.
+     */
+    public static native void rotateYPlane(
+            byte[] src,
+            byte[] dest,
+            int width,
+            int height,
+            int stride,
+            int rotationDegrees
+    );
+
+    /**
      * Native JNI post-processing function that calculates the noise-immune Local Refined Argmax Centroid on the predicted heatmap.
      */
     public static native float[] calculateLocalRefinedArgmaxCentroid(
@@ -62,9 +75,69 @@ public class MainActivity extends AppCompatActivity {
 
     /**
      * Maps screen touch coordinates (viewX, viewY) relative to the PreviewView
-     * into normalized [0, 1] coordinates inside the captured frame Bitmap using FIT_CENTER.
+     * into normalized [0, 1] coordinates inside the captured frame Bitmap using FIT_CENTER,
+     * taking camera sensor rotation degrees into account.
      */
-    public static float[] mapScreenCoordsToFrame(float viewX, float viewY, int viewWidth, int viewHeight, int imgWidth, int imgHeight) {
+    public static float[] mapScreenCoordsToFrame(float viewX, float viewY, int viewWidth, int viewHeight, int imgWidth, int imgHeight, int rotationDegrees) {
+        if (viewWidth <= 0 || viewHeight <= 0 || imgWidth <= 0 || imgHeight <= 0) return null;
+        
+        // 1. Determine effective image dimensions on the portrait screen based on camera rotation
+        int effectiveImgW = (rotationDegrees == 90 || rotationDegrees == 270) ? imgHeight : imgWidth;
+        int effectiveImgH = (rotationDegrees == 90 || rotationDegrees == 270) ? imgWidth : imgHeight;
+        
+        float viewRatio = (float) viewWidth / viewHeight;
+        float imgRatio = (float) effectiveImgW / effectiveImgH;
+        
+        float scaleX = 1.0f;
+        float scaleY = 1.0f;
+        float offsetX = 0.0f;
+        float offsetY = 0.0f;
+        
+        if (imgRatio > viewRatio) { // Fit Width, height is letterboxed
+            float actualHeight = viewWidth / imgRatio;
+            offsetY = (viewHeight - actualHeight) / 2.0f;
+            scaleX = 1.0f / viewWidth;
+            scaleY = 1.0f / actualHeight;
+        } else { // Fit Height, width is letterboxed
+            float actualWidth = viewHeight * imgRatio;
+            offsetX = (viewWidth - actualWidth) / 2.0f;
+            scaleX = 1.0f / actualWidth;
+            scaleY = 1.0f / viewHeight;
+        }
+        
+        // 2. Map screen coordinate to normalized displayed image space [0.0, 1.0]
+        float normX = (viewX - offsetX) * scaleX;
+        float normY = (viewY - offsetY) * scaleY;
+        
+        if (normX < 0.0f || normX > 1.0f || normY < 0.0f || normY > 1.0f) {
+            return null;
+        }
+        
+        // 3. Rotate normalized displayed coordinates back to the sensor coordinate space
+        float sensorX_norm;
+        float sensorY_norm;
+        if (rotationDegrees == 90) {
+            sensorX_norm = normY;
+            sensorY_norm = 1.0f - normX;
+        } else if (rotationDegrees == 180) {
+            sensorX_norm = 1.0f - normX;
+            sensorY_norm = 1.0f - normY;
+        } else if (rotationDegrees == 270) {
+            sensorX_norm = 1.0f - normY;
+            sensorY_norm = normX;
+        } else {
+            sensorX_norm = normX;
+            sensorY_norm = normY;
+        }
+        
+        return new float[]{ sensorX_norm, sensorY_norm };
+    }
+
+    /**
+     * Maps screen touch coordinates (viewX, viewY) relative to the PreviewView
+     * into normalized [0, 1] coordinates inside the already rotated/aligned frame.
+     */
+    public static float[] mapAlignedScreenCoordsToFrame(float viewX, float viewY, int viewWidth, int viewHeight, int imgWidth, int imgHeight) {
         if (viewWidth <= 0 || viewHeight <= 0 || imgWidth <= 0 || imgHeight <= 0) return null;
         
         float viewRatio = (float) viewWidth / viewHeight;
@@ -78,22 +151,22 @@ public class MainActivity extends AppCompatActivity {
         if (imgRatio > viewRatio) { // Fit Width, height is letterboxed
             float actualHeight = viewWidth / imgRatio;
             offsetY = (viewHeight - actualHeight) / 2.0f;
-            scaleX = (float) imgWidth / viewWidth;
-            scaleY = (float) imgHeight / actualHeight;
+            scaleX = 1.0f / viewWidth;
+            scaleY = 1.0f / actualHeight;
         } else { // Fit Height, width is letterboxed
             float actualWidth = viewHeight * imgRatio;
             offsetX = (viewWidth - actualWidth) / 2.0f;
-            scaleX = (float) imgWidth / actualWidth;
-            scaleY = (float) imgHeight / viewHeight;
+            scaleX = 1.0f / actualWidth;
+            scaleY = 1.0f / viewHeight;
         }
         
-        float bmpX = (viewX - offsetX) * scaleX;
-        float bmpY = (viewY - offsetY) * scaleY;
+        float normX = (viewX - offsetX) * scaleX;
+        float normY = (viewY - offsetY) * scaleY;
         
-        if (bmpX >= 0 && bmpX < imgWidth && bmpY >= 0 && bmpY < imgHeight) {
-            return new float[]{ bmpX / imgWidth, bmpY / imgHeight };
+        if (normX < 0.0f || normX > 1.0f || normY < 0.0f || normY > 1.0f) {
+            return null;
         }
-        return null;
+        return new float[]{ normX, normY };
     }
 
     public native String stringFromJNI();

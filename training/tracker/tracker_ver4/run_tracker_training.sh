@@ -51,7 +51,7 @@ python3 tracker_model.py train \
     --dataset_dir dataset_generator/dataset \
     --num_of_epochs 10 \
     --lr 1e-3 \
-    --loss_heatmap dbsz_relu \
+    --loss_heatmap dbsz_hard \
     --loss_quality bce \
     --train_mode joint \
     --eval_pkl_num 1 \
