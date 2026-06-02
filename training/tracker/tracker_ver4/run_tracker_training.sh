@@ -9,10 +9,24 @@
 #   - dice_bce      : Combination of Soft Dice Coefficient and Binary Cross Entropy
 #   - focal         : Binary Focal Loss (focuses on hard/misclassified pixels)
 #   - focal_dice    : Combination of Focal Loss and Soft Dice Loss
-#   - centernet     : Penalty-reduced Focal Loss from CenterNet (highly robust to imbalance)
+#   - centernet     : CenterNet Penalty-reduced Focal Loss (suppresses background penalty)
 #   - centernet_dice: Combination of CenterNet Focal Loss and Soft Dice Loss
 #   - adaptive_wing : State-of-the-art Adaptive Wing Loss for exact heatmap regression
-#                     (highly recommended for extremely sharp and stable target locks!)
+#
+#   - dbsz_hard     : Dynamic Balanced Semantic Zone Loss (Hard Threshold masking)
+#                     - Uses tf.cast thresholds (Peak: >=0.5 L1, Background: <=0.01 L2)
+#                     - Completely neglects the transition zone (weight = 0.0)
+#                     - Perfectly balances peak and background 50-50
+#
+#   - dbsz_soft     : Dynamic Balanced Semantic Zone Loss (Soft Polynomial weighting)
+#                     - Uses power scaling: w_high = target^4, w_low = (1-target)^16
+#                     - Transition zone naturally decays to near-zero smoothly
+#                     - Perfectly balanced, continuous, and highly recommended!
+#
+#   - dbsz_relu     : Dynamic Balanced Semantic Zone Loss (Continuous ReLU balanced MSE)
+#                     - Defines active zones via Relu(target - 0.5) and Relu(0.2 - target)
+#                     - Dynamically scales by balance factors k1 and k
+#                     - Calculates continuous MSE loss at the end
 #
 # Quality Loss Options (--loss_quality):
 #   - bce           : Binary Crossentropy (standard classification/regression entropy)
@@ -27,11 +41,11 @@ mkdir -p outputs
 # create_batched_dataset.py step.
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/dataset \
-    --num_of_epochs 2 \
+    --num_of_epochs 100 \
     --lr 1e-3 \
-    --loss_heatmap adaptive_wing \
+    --loss_heatmap dbsz_soft \
     --loss_quality bce \
-    --eval_pkl_num 30 \
+    --eval_pkl_num 1 \
     --output outputs/tracker.keras \
     --init_keras_file outputs/tracker.keras \
     --best_train_loss_output outputs/tracker_best_train_loss.keras \

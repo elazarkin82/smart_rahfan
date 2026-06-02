@@ -9,6 +9,51 @@ import numpy as np
 # =====================================================================
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
+def dbsz_hard_loss(y_true, y_pred):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    
+    mask_high = tf.cast(y_true >= 0.5, tf.float32)
+    mask_low = tf.cast(y_true <= 0.01, tf.float32)
+    
+    n_high = tf.reduce_sum(mask_high) + 1e-5
+    n_low = tf.reduce_sum(mask_low) + 1e-5
+    
+    loss_high = tf.reduce_sum(mask_high * tf.abs(y_true - y_pred)) / n_high
+    loss_low = tf.reduce_sum(mask_low * tf.square(y_true - y_pred)) / n_low
+    
+    return loss_high + loss_low
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+def dbsz_soft_loss(y_true, y_pred):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    
+    w_high = tf.pow(y_true, 4.0)
+    w_low = tf.pow(1.0 - y_true, 16.0)
+    
+    loss_high = tf.reduce_sum(w_high * tf.abs(y_true - y_pred)) / (tf.reduce_sum(w_high) + 1e-5)
+    loss_low = tf.reduce_sum(w_low * tf.square(y_true - y_pred)) / (tf.reduce_sum(w_low) + 1e-5)
+    
+    return loss_high + loss_low
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+def dbsz_relu_loss(y_true, y_pred):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    
+    w_high = tf.nn.relu(y_true - 0.5)
+    w_low = tf.nn.relu(0.2 - y_true)
+    
+    k1 = 1.0 / (tf.reduce_sum(w_high) + 1e-5)
+    k = 1.0 / (tf.reduce_sum(w_low) + 1e-5)
+    
+    loss_high = k1 * tf.reduce_sum(w_high * tf.square(y_true - y_pred))
+    loss_low = k * tf.reduce_sum(w_low * tf.square(y_true - y_pred))
+    
+    return loss_high + loss_low
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
 def adaptive_wing_loss(y_true, y_pred, alpha=2.1, omega=14.0, epsilon=1.0, theta=0.5):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
@@ -372,6 +417,12 @@ class TargetTrackerVer4:
             loss_fn_heatmap = centernet_dice_loss
         elif loss_heatmap == "adaptive_wing":
             loss_fn_heatmap = adaptive_wing_loss
+        elif loss_heatmap == "dbsz_hard":
+            loss_fn_heatmap = dbsz_hard_loss
+        elif loss_heatmap == "dbsz_soft":
+            loss_fn_heatmap = dbsz_soft_loss
+        elif loss_heatmap == "dbsz_relu":
+            loss_fn_heatmap = dbsz_relu_loss
         else:
             raise ValueError(f"Unknown heatmap loss: {loss_heatmap}")
             
@@ -385,7 +436,7 @@ class TargetTrackerVer4:
             loss_fn_quality = losses.LogCosh()
         else:
             raise ValueError(f"Unknown quality loss: {loss_quality}")
-        optimizer = optimizers.Adam(learning_rate=lr)
+        optimizer = optimizers.Adam(learning_rate=lr, jit_compile=False)
         
         self.log("Calculating initial validation loss...", log_file)
         best_val_loss, init_val_hm, init_val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, steps=val_steps)
@@ -485,7 +536,7 @@ def main():
     parser.add_argument("--eval_pkl_num", type=int, default=4, help="Number of PKLs for validation")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_of_epochs", type=int, default=10)
-    parser.add_argument("--loss_heatmap", choices=["mse", "dice_bce", "focal", "focal_dice", "centernet", "centernet_dice", "adaptive_wing"], default="adaptive_wing")
+    parser.add_argument("--loss_heatmap", choices=["mse", "dice_bce", "focal", "focal_dice", "centernet", "centernet_dice", "adaptive_wing", "dbsz_hard", "dbsz_soft", "dbsz_relu"], default="dbsz_soft")
     parser.add_argument("--loss_quality", choices=["bce", "mse", "huber", "logcosh"], default="bce")
     parser.add_argument("--output", type=str, default="outputs/tracker.keras")
     parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_best_train.keras")
