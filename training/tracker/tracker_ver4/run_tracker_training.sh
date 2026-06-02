@@ -41,9 +41,9 @@ mkdir -p outputs
 # create_batched_dataset.py step.
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/dataset \
-    --num_of_epochs 100 \
+    --num_of_epochs 10 \
     --lr 1e-3 \
-    --loss_heatmap dbsz_soft \
+    --loss_heatmap dbsz_relu \
     --loss_quality bce \
     --eval_pkl_num 1 \
     --output outputs/tracker.keras \
