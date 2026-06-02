@@ -29,6 +29,8 @@
         "stack_target_size": 32,
         "crop_max_size": 128,
         "crop_min_size": 4,
-        "heatmap_sigma": 15.0
+        "heatmap_sigma": 15.0,
+        "heatmap_relative_sigma": 0.0625,
+        "negative_sample_ratio": 0.20
     }
 }

@@ -9,6 +9,31 @@ import numpy as np
 # =====================================================================
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
+def adaptive_wing_loss(y_true, y_pred, alpha=2.1, omega=14.0, epsilon=1.0, theta=0.5):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    
+    diff = tf.abs(y_true - y_pred)
+    exponent = alpha - y_true
+    
+    diff_clipped = tf.maximum(diff, 1e-7)
+    ratio = diff_clipped / epsilon
+    ratio_pow = tf.pow(ratio, exponent)
+    
+    loss_small = omega * tf.math.log1p(ratio_pow)
+    
+    theta_ratio = theta / epsilon
+    theta_ratio_pow = tf.pow(theta_ratio, exponent)
+    theta_ratio_pow_minus_1 = tf.pow(theta_ratio, exponent - 1.0)
+    
+    s = (omega / epsilon) * exponent * theta_ratio_pow_minus_1 / (1.0 + theta_ratio_pow)
+    C = s * theta - omega * tf.math.log1p(theta_ratio_pow)
+    
+    loss_large = s * diff - C
+    loss = tf.where(diff < theta, loss_small, loss_large)
+    return tf.reduce_mean(loss)
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
 def dice_bce_loss(y_true, y_pred, bce_weight=1.0, dice_weight=1.0):
     y_true_f = tf.reshape(y_true, [-1])
     y_pred_f = tf.reshape(y_pred, [-1])
@@ -101,17 +126,17 @@ class TargetTrackerVer4:
         # Expand
         if expansion > 1:
             x = layers.Conv2D(expansion * in_channels, (1, 1), padding="same", use_bias=False, name=f"{name_prefix}_expand")(x)
-            x = layers.BatchNormalization(name=f"{name_prefix}_expand_bn")(x)
+            x = layers.GroupNormalization(groups=8, name=f"{name_prefix}_expand_gn")(x)
             x = layers.ReLU(6.0, name=f"{name_prefix}_expand_relu")(x)
             
         # Depthwise
         x = layers.DepthwiseConv2D((3, 3), strides=strides, padding="same", use_bias=False, name=f"{name_prefix}_dw")(x)
-        x = layers.BatchNormalization(name=f"{name_prefix}_dw_bn")(x)
+        x = layers.GroupNormalization(groups=8, name=f"{name_prefix}_dw_gn")(x)
         x = layers.ReLU(6.0, name=f"{name_prefix}_dw_relu")(x)
         
         # Project
         x = layers.Conv2D(filters, (1, 1), padding="same", use_bias=False, name=f"{name_prefix}_project")(x)
-        x = layers.BatchNormalization(name=f"{name_prefix}_project_bn")(x)
+        x = layers.GroupNormalization(groups=8, name=f"{name_prefix}_project_gn")(x)
         
         if strides == 1 and in_channels == filters:
             x = layers.Add(name=f"{name_prefix}_add")([inputs, x])
@@ -123,7 +148,7 @@ class TargetTrackerVer4:
         
         # Init conv (strides=2) -> (128, 128, 16)
         x1 = layers.Conv2D(16, (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-        x1 = layers.BatchNormalization(name="sb_init_bn")(x1)
+        x1 = layers.GroupNormalization(groups=8, name="sb_init_gn")(x1)
         x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
         
         # IR Block 1 (strides=2) -> (64, 64, 24)
@@ -137,7 +162,7 @@ class TargetTrackerVer4:
         
         # Final Expand -> (16, 16, 128)
         x = layers.Conv2D(128, (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-        x = layers.BatchNormalization(name="sb_final_bn")(x)
+        x = layers.GroupNormalization(groups=8, name="sb_final_gn")(x)
         x = layers.ReLU(6.0, name="sb_final_relu")(x)
         
         return models.Model(inputs, [x1, x2, x3, x], name="search_feature_extractor")
@@ -153,7 +178,7 @@ class TargetTrackerVer4:
         
         # Conv 1
         x = layers.Conv2D(32, (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x) # -> (16, 16, 32)
-        x = layers.BatchNormalization(name="ref_init_bn")(x)
+        x = layers.GroupNormalization(groups=8, name="ref_init_gn")(x)
         x = layers.ReLU(6.0, name="ref_init_relu")(x)
         
         # IR Block
@@ -161,7 +186,7 @@ class TargetTrackerVer4:
         
         # Final Expand to match search feature channels
         x = layers.Conv2D(128, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-        x = layers.BatchNormalization(name="ref_final_bn")(x)
+        x = layers.GroupNormalization(groups=8, name="ref_final_gn")(x)
         x = layers.ReLU(6.0, name="ref_final_relu")(x)
         
         # Return spatial features of shape (8, 8, 128) for spatial cross-attention
@@ -263,7 +288,17 @@ class TargetTrackerVer4:
             predictions = self.model(inputs, training=False)
             pred_heatmap, pred_quality = predictions
             
-            loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
+            # Mask out negative samples from the heatmap loss calculation
+            is_pos = tf.reshape(gt_quality, [-1]) > 0.0
+            any_pos = tf.reduce_any(is_pos)
+            
+            if any_pos:
+                pos_gt_heatmap = tf.boolean_mask(gt_heatmap, is_pos)
+                pos_pred_heatmap = tf.boolean_mask(pred_heatmap, is_pos)
+                loss_heatmap = loss_fn_heatmap(pos_gt_heatmap, pos_pred_heatmap)
+            else:
+                loss_heatmap = tf.constant(0.0, dtype=tf.float32)
+                
             loss_quality = loss_fn_quality(gt_quality, pred_quality)
             loss_value = loss_heatmap + 1.0 * loss_quality
             
@@ -293,7 +328,17 @@ class TargetTrackerVer4:
                 predictions = self.model(inputs, training=True)
                 pred_heatmap, pred_quality = predictions
                 
-                loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
+                # Mask out negative samples from the heatmap loss calculation
+                is_pos = tf.reshape(gt_quality, [-1]) > 0.0
+                any_pos = tf.reduce_any(is_pos)
+                
+                if any_pos:
+                    pos_gt_heatmap = tf.boolean_mask(gt_heatmap, is_pos)
+                    pos_pred_heatmap = tf.boolean_mask(pred_heatmap, is_pos)
+                    loss_heatmap = loss_fn_heatmap(pos_gt_heatmap, pos_pred_heatmap)
+                else:
+                    loss_heatmap = tf.constant(0.0, dtype=tf.float32)
+                    
                 loss_quality = loss_fn_quality(gt_quality, pred_quality)
                 loss_value = loss_heatmap + 1.0 * loss_quality
                 
@@ -312,23 +357,34 @@ class TargetTrackerVer4:
             
         return float(epoch_loss_avg.result()), float(epoch_hm_loss_avg.result()), float(epoch_q_loss_avg.result())
 
-    def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_name="centernet_dice", output_path=None, best_train_loss_output=None, log_file=None):
-        if loss_name == "mse":
+    def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_heatmap="adaptive_wing", loss_quality="bce", output_path=None, best_train_loss_output=None, log_file=None):
+        if loss_heatmap == "mse":
             loss_fn_heatmap = losses.MeanSquaredError()
-        elif loss_name == "dice_bce":
+        elif loss_heatmap == "dice_bce":
             loss_fn_heatmap = dice_bce_loss
-        elif loss_name == "focal":
+        elif loss_heatmap == "focal":
             loss_fn_heatmap = focal_loss
-        elif loss_name == "focal_dice":
+        elif loss_heatmap == "focal_dice":
             loss_fn_heatmap = focal_dice_loss
-        elif loss_name == "centernet":
+        elif loss_heatmap == "centernet":
             loss_fn_heatmap = centernet_focal_loss
-        elif loss_name == "centernet_dice":
+        elif loss_heatmap == "centernet_dice":
             loss_fn_heatmap = centernet_dice_loss
+        elif loss_heatmap == "adaptive_wing":
+            loss_fn_heatmap = adaptive_wing_loss
         else:
-            raise ValueError(f"Unknown loss: {loss_name}")
+            raise ValueError(f"Unknown heatmap loss: {loss_heatmap}")
             
-        loss_fn_quality = losses.BinaryCrossentropy()
+        if loss_quality == "bce":
+            loss_fn_quality = losses.BinaryCrossentropy()
+        elif loss_quality == "mse":
+            loss_fn_quality = losses.MeanSquaredError()
+        elif loss_quality == "huber":
+            loss_fn_quality = losses.Huber()
+        elif loss_quality == "logcosh":
+            loss_fn_quality = losses.LogCosh()
+        else:
+            raise ValueError(f"Unknown quality loss: {loss_quality}")
         optimizer = optimizers.Adam(learning_rate=lr)
         
         self.log("Calculating initial validation loss...", log_file)
@@ -429,7 +485,8 @@ def main():
     parser.add_argument("--eval_pkl_num", type=int, default=4, help="Number of PKLs for validation")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_of_epochs", type=int, default=10)
-    parser.add_argument("--loss", choices=["mse", "dice_bce", "focal", "focal_dice", "centernet", "centernet_dice"], default="centernet_dice")
+    parser.add_argument("--loss_heatmap", choices=["mse", "dice_bce", "focal", "focal_dice", "centernet", "centernet_dice", "adaptive_wing"], default="adaptive_wing")
+    parser.add_argument("--loss_quality", choices=["bce", "mse", "huber", "logcosh"], default="bce")
     parser.add_argument("--output", type=str, default="outputs/tracker.keras")
     parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_best_train.keras")
     parser.add_argument("--init_keras_file", type=str, default=None, help="Path to initial model to resume from")
@@ -468,7 +525,8 @@ def main():
             num_of_epochs=args.num_of_epochs,
             train_steps=len(train_files),
             val_steps=len(val_files),
-            loss_name=args.loss,
+            loss_heatmap=args.loss_heatmap,
+            loss_quality=args.loss_quality,
             output_path=args.output,
             best_train_loss_output=args.best_train_loss_output,
             log_file=args.log_file

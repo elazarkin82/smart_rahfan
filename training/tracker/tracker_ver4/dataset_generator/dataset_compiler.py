@@ -92,6 +92,8 @@ def main():
     min_sz = compiler_cfg['crop_min_size']
     tgt_sz = compiler_cfg['stack_target_size']
     sigma = compiler_cfg['heatmap_sigma']
+    relative_sigma = compiler_cfg.get('heatmap_relative_sigma', None)
+    neg_sample_ratio = compiler_cfg.get('negative_sample_ratio', 1.0)
     
     processed_count = 0
     
@@ -152,8 +154,11 @@ def main():
             local_target_2d = (half - dx, half - dy)
             
             # Dynamic Isotropic Gaussian Heatmap on the cropped space
-            sigma = s_crop / 4.0
-            heatmap = generate_heatmap(search_crop.shape, local_target_2d, sigma)
+            if relative_sigma is not None:
+                sample_sigma = s_crop * relative_sigma
+            else:
+                sample_sigma = sigma
+            heatmap = generate_heatmap(search_crop.shape, local_target_2d, sample_sigma)
             
             # Piecewise continuous quality score based on actual distance
             if distance <= 2.0:
@@ -223,7 +228,7 @@ def main():
                 local_true_target = (local_true_x, local_true_y)
                 
                 # Generate shifted heatmap centered at the TRUE target coordinate in cropped space
-                heatmap_shifted = generate_heatmap(search_crop_jittered.shape, local_true_target, sigma)
+                heatmap_shifted = generate_heatmap(search_crop_jittered.shape, local_true_target, sample_sigma)
                 
                 sample_jittered = {
                     "reference_stack": ref_stack,
@@ -245,7 +250,7 @@ def main():
                 training_samples.append(sample_jittered)
             
             # 2b. Negative Pair: target from flight i is NOT present in flight j
-            if neg_flight_data is not None and len(neg_flight_data) > 1:
+            if neg_flight_data is not None and len(neg_flight_data) > 1 and np.random.uniform(0, 1) < neg_sample_ratio:
                 neg_k = (k % (len(neg_flight_data) - 1)) + 1
                 neg_frame_dict = neg_flight_data[neg_k]
                 
