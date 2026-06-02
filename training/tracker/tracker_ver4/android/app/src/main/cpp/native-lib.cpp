@@ -20,13 +20,16 @@ Java_elazarkin_ksg_tracker4_MainActivity_stringFromJNI(
 }
 
 JNIEXPORT void JNICALL
-Java_elazarkin_ksg_tracker4_MainActivity_downsampleSearchFrame(
+Java_elazarkin_ksg_tracker4_MainActivity_downsampleSearchCrop(
         JNIEnv* env,
         jclass clazz,
         jbyteArray yPlane,
         jint srcW,
         jint srcH,
         jint rowStride,
+        jfloat cx,
+        jfloat cy,
+        jfloat cropSize,
         jfloatArray outBuffer) {
         
     jbyte* yData = env->GetByteArrayElements(yPlane, nullptr);
@@ -38,57 +41,50 @@ Java_elazarkin_ksg_tracker4_MainActivity_downsampleSearchFrame(
         return;
     }
     
-    // Area-Averaging Downsampling to 256x256 (Grayscale 1-Channel)
+    float halfSize = cropSize / 2.0f;
+    float srcX_start = cx - halfSize;
+    float srcY_start = cy - halfSize;
+    
+    // Bilinear Interpolated Resizing to 256x256 (Grayscale 1-Channel)
     for (int outY = 0; outY < 256; ++outY) {
         for (int outX = 0; outX < 256; ++outX) {
             int baseIdx = outY * 256 + outX;
             
-            float srcX_start = (float)outX * (float)srcW / 256.0f;
-            float srcX_end = (float)(outX + 1) * (float)srcW / 256.0f;
-            float srcY_start = (float)outY * (float)srcH / 256.0f;
-            float srcY_end = (float)(outY + 1) * (float)srcH / 256.0f;
+            // Map output index to local crop coordinates
+            float cropX = ((float)outX / 255.0f) * cropSize;
+            float cropY = ((float)outY / 255.0f) * cropSize;
             
-            int x_start = std::max(0, (int)srcX_start);
-            int x_end = std::min(srcW, (int)std::ceil(srcX_end));
-            int y_start = std::max(0, (int)srcY_start);
-            int y_end = std::min(srcH, (int)std::ceil(srcY_end));
+            // Map local crop coordinates to absolute source frame coordinates
+            float sx = srcX_start + cropX;
+            float sy = srcY_start + cropY;
             
-            if (x_end <= x_start) x_end = x_start + 1;
-            if (y_end <= y_start) y_end = y_start + 1;
-            if (x_end > srcW) x_end = srcW;
-            if (y_end > srcH) y_end = srcH;
+            int x0 = (int)std::floor(sx);
+            int y0 = (int)std::floor(sy);
+            int x1 = x0 + 1;
+            int y1 = y0 + 1;
             
-            double sumY = 0.0;
-            double totalWeight = 0.0;
+            float dx = sx - (float)x0;
+            float dy = sy - (float)y0;
             
-            for (int sy = y_start; sy < y_end; ++sy) {
-                float y_overlap = 1.0f;
-                if (sy == y_start) {
-                    y_overlap = (float)(sy + 1) - srcY_start;
-                } else if (sy == y_end - 1) {
-                    y_overlap = srcY_end - (float)sy;
-                }
-                
-                for (int sx = x_start; sx < x_end; ++sx) {
-                    float x_overlap = 1.0f;
-                    if (sx == x_start) {
-                        x_overlap = (float)(sx + 1) - srcX_start;
-                    } else if (sx == x_end - 1) {
-                        x_overlap = srcX_end - (float)sx;
-                    }
-                    
-                    float weight = x_overlap * y_overlap;
-                    uint8_t pixel = (uint8_t) yData[sy * rowStride + sx];
-                    sumY += (pixel / 255.0f) * weight;
-                    totalWeight += weight;
-                }
-            }
+            // Apply boundary replication padding
+            int x0_c = std::max(0, std::min((int)srcW - 1, x0));
+            int x1_c = std::max(0, std::min((int)srcW - 1, x1));
+            int y0_c = std::max(0, std::min((int)srcH - 1, y0));
+            int y1_c = std::max(0, std::min((int)srcH - 1, y1));
             
-            if (totalWeight > 0.0) {
-                out[baseIdx] = (float)(sumY / totalWeight);
-            } else {
-                out[baseIdx] = 0.0f;
-            }
+            // Fetch four neighbor pixels
+            uint8_t p00 = (uint8_t)yData[y0_c * rowStride + x0_c];
+            uint8_t p10 = (uint8_t)yData[y0_c * rowStride + x1_c];
+            uint8_t p01 = (uint8_t)yData[y1_c * rowStride + x0_c];
+            uint8_t p11 = (uint8_t)yData[y1_c * rowStride + x1_c];
+            
+            // Perform Bilinear Interpolation
+            float val = (1.0f - dx) * (1.0f - dy) * p00 +
+                        dx * (1.0f - dy) * p10 +
+                        (1.0f - dx) * dy * p01 +
+                        dx * dy * p11;
+                        
+            out[baseIdx] = val / 255.0f;
         }
     }
     
@@ -97,34 +93,53 @@ Java_elazarkin_ksg_tracker4_MainActivity_downsampleSearchFrame(
 }
 
 JNIEXPORT jfloatArray JNICALL
-Java_elazarkin_ksg_tracker4_MainActivity_calculateCenterOfMass(
+Java_elazarkin_ksg_tracker4_MainActivity_calculateLocalRefinedArgmaxCentroid(
         JNIEnv* env,
         jclass clazz,
-        jfloatArray heatmap,
-        jfloat threshold) {
+        jfloatArray heatmap) {
         
     jfloat* hm = env->GetFloatArrayElements(heatmap, nullptr);
     if (!hm) return nullptr;
     
+    // 1. Find absolute global peak (argmax)
+    float max_val = -1.0f;
+    int max_x = 128;
+    int max_y = 128;
+    
+    for (int y = 0; y < 256; ++y) {
+        for (int x = 0; x < 256; ++x) {
+            float val = hm[y * 256 + x];
+            if (val > max_val) {
+                max_val = val;
+                max_x = x;
+                max_y = y;
+            }
+        }
+    }
+    
+    // 2. Compute Center of Mass strictly within a local 5x5 window
     double sum_x = 0.0;
     double sum_y = 0.0;
     double total_mass = 0.0;
     
-    // Spatial integration over 256x256 grid
-    for (int y = 0; y < 256; ++y) {
-        for (int x = 0; x < 256; ++x) {
-            float val = hm[y * 256 + x];
-            if (val > threshold) {
-                sum_x += x * val;
-                sum_y += y * val;
-                total_mass += val;
-            }
+    for (int dy = -2; dy <= 2; ++dy) {
+        int sy = max_y + dy;
+        if (sy < 0 || sy >= 256) continue;
+        
+        for (int dx = -2; dx <= 2; ++dx) {
+            int sx = max_x + dx;
+            if (sx < 0 || sx >= 256) continue;
+            
+            float val = hm[sy * 256 + sx];
+            sum_x += sx * val;
+            sum_y += sy * val;
+            total_mass += val;
         }
     }
     
     env->ReleaseFloatArrayElements(heatmap, hm, JNI_ABORT); // read-only
     
-    // Prepare output array
+    // 3. Construct and return result array
     jfloatArray result = env->NewFloatArray(2);
     if (!result) return nullptr;
     
@@ -133,8 +148,8 @@ Java_elazarkin_ksg_tracker4_MainActivity_calculateCenterOfMass(
         res[0] = (float)(sum_x / total_mass) / 256.0f;
         res[1] = (float)(sum_y / total_mass) / 256.0f;
     } else {
-        res[0] = 0.5f;
-        res[1] = 0.5f;
+        res[0] = (float)max_x / 256.0f;
+        res[1] = (float)max_y / 256.0f;
     }
     
     env->SetFloatArrayRegion(result, 0, 2, res);

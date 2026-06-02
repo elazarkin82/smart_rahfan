@@ -143,3 +143,26 @@ python3 create_batched_dataset.py --batch_size 4
 ./run_tracker_training.sh
 ```
 This trains the Siamese-Attention network on the globally shuffled batch files.
+
+---
+
+## Android Client Implementation
+
+The Android application is located in `android/` and features a high-performance, real-time Siamese tracking client.
+
+### Architectural Highlights
+1. **Producer-Consumer (Double-Buffering) Engine**:
+   - CameraX frame analysis runs asynchronously as a Producer. It writes raw Y-plane bytes to a shared buffer and instantly closes the image proxy, ensuring the camera stream never blocks (maintains 30+ FPS UI smoothness).
+   - A dedicated background `TrackerWorkerThread` (Consumer) waits for new frames. It pops the freshest frame from the buffer, skipping older unused frames to prevent lag accumulation (guarantees zero-lag real-time inference).
+2. **JNI C++ Square Cropping & Interpolation**:
+   - Standard camera frames are rectangular (e.g. 16:9). To avoid scale and aspect ratio distortions, the JNI C++ layer extracts a local square crop of size $\min(W, H)$ centered on the **previous tracked coordinate**.
+   - The crop is resized to $256 \times 256$ using high-quality bilinear interpolation and dynamic boundary replication padding.
+3. **Local Refined Argmax Centroiding**:
+   - In JNI C++, we locate the absolute peak in the predicted $256 \times 256$ heatmap (immune to far-away background noise). We then compute the sub-pixel Center of Mass strictly within a local $5 \times 5$ window centered around the peak.
+4. **Dynamic Lock Coloring & Diagnostics**:
+   - The target circle remains active at all times. It is colored **GREEN** when the quality score is $\ge 0.20$, and **RED** when the quality falls below $0.20$ (indicating a weak lock).
+   - Shows live multi-channel diagnostic views: predicted Jet heatmap, locked target reference crop, and the current search window.
+
+> [!TIP]
+> **TODO: Active Search Recovery Mode**
+> When the quality score falls below the threshold (circle turns RED), the client should ideally trigger an active search recovery sequence (e.g. expanding the square search crop size or scanning the frame grid). This is documented as a future enhancement both here and inside `FrameStreamActivity.java`.

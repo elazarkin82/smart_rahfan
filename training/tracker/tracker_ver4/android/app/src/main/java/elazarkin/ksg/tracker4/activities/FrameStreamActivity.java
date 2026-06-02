@@ -33,6 +33,8 @@ import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.Condition;
 
 public class FrameStreamActivity extends AppCompatActivity implements CameraHelper.FrameProcessor {
 
@@ -72,6 +74,22 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
     private Interpreter tflite;
 
+    // Asynchronous Producer-Consumer Threading & Locking Fields
+    private final ReentrantLock frameLock = new ReentrantLock();
+    private final Condition frameCondition = frameLock.newCondition();
+    private byte[] sharedFrameData = null;
+    private int sharedFrameW = 0;
+    private int sharedFrameH = 0;
+    private int sharedFrameStride = 0;
+    private boolean hasSharedFrame = false;
+
+    private Thread workerThread = null;
+    private volatile boolean isWorkerActive = false;
+
+    // Tracking position state in absolute camera frame pixels
+    private float lastTrackedX = 0.0f;
+    private float lastTrackedY = 0.0f;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -93,7 +111,9 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         cropCurrView = findViewById(R.id.cropCurrView);
 
         try {
-            tflite = new Interpreter(loadModelFile());
+            Interpreter.Options options = new Interpreter.Options();
+            options.setNumThreads(4);
+            tflite = new Interpreter(loadModelFile(), options);
             lblStatus.setText("Status: Engine loaded successfully");
         } catch (Exception e) {
             e.printStackTrace();
@@ -168,16 +188,31 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         int width = imageProxy.getWidth();
         int height = imageProxy.getHeight();
 
-        byte[] yPlaneData = new byte[yBuffer.remaining()];
-        yBuffer.get(yPlaneData);
+        int length = yBuffer.remaining();
 
         if (currentUiState == STATE_GATHERING) {
+            byte[] yPlaneData = new byte[length];
+            yBuffer.get(yPlaneData);
             gatherReferenceFrame(yPlaneData, width, height, yRowStride);
+            imageProxy.close();
         } else if (currentUiState == STATE_TRACKING) {
-            processNextFrame(yPlaneData, width, height, yRowStride);
+            // Producer: Lock, write Y-plane bytes to shared buffer, and signal the Worker Thread
+            frameLock.lock();
+            try {
+                if (sharedFrameData == null || sharedFrameData.length != length) {
+                    sharedFrameData = new byte[length];
+                }
+                yBuffer.get(sharedFrameData);
+                sharedFrameW = width;
+                sharedFrameH = height;
+                sharedFrameStride = yRowStride;
+                hasSharedFrame = true;
+                frameCondition.signal();
+            } finally {
+                frameLock.unlock();
+            }
+            imageProxy.close();
         }
-        
-        imageProxy.close();
     }
 
     private void gatherReferenceFrame(byte[] yPlane, int width, int height, int stride) {
@@ -189,9 +224,14 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         
         float cx = normCoords[0] * width;
         float cy = normCoords[1] * height;
+
+        // Initialize tracking position state
+        lastTrackedX = cx;
+        lastTrackedY = cy;
         
         for (int layer = 0; layer < 16; layer++) {
-            float size = 128.0f - layer * ((128.0f - 16.0f) / 15.0f);
+            // Zoom range matches pipeline_config.json: from size 128 down to 4 pixels
+            float size = 128.0f - layer * ((128.0f - 4.0f) / 15.0f);
             float half = size / 2.0f;
             
             for (int y = 0; y < 32; y++) {
@@ -216,14 +256,88 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         lblStatus.setText("Status: Active tracking");
     }
 
-    private void processNextFrame(byte[] yPlane, int width, int height, int stride) {
+    private void startWorkerThread() {
+        if (workerThread != null) return;
+        isWorkerActive = true;
+        workerThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                workerLoop();
+            }
+        }, "TrackerWorkerThread");
+        workerThread.start();
+    }
+
+    private void stopWorkerThread() {
+        isWorkerActive = false;
+        if (workerThread != null) {
+            frameLock.lock();
+            try {
+                frameCondition.signalAll();
+            } finally {
+                frameLock.unlock();
+            }
+            try {
+                workerThread.join(500);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            workerThread = null;
+        }
+    }
+
+    private void workerLoop() {
+        byte[] localFrameData = null;
+        int localW = 0;
+        int localH = 0;
+        int localStride = 0;
+
+        while (isWorkerActive) {
+            frameLock.lock();
+            try {
+                while (isWorkerActive && !hasSharedFrame) {
+                    frameCondition.await();
+                }
+                if (!isWorkerActive) return;
+
+                // Swap/copy frame bytes under lock to local buffers
+                if (sharedFrameData != null) {
+                    if (localFrameData == null || localFrameData.length != sharedFrameData.length) {
+                        localFrameData = new byte[sharedFrameData.length];
+                    }
+                    System.arraycopy(sharedFrameData, 0, localFrameData, 0, sharedFrameData.length);
+                    localW = sharedFrameW;
+                    localH = sharedFrameH;
+                    localStride = sharedFrameStride;
+                }
+                hasSharedFrame = false;
+            } catch (InterruptedException e) {
+                return;
+            } finally {
+                frameLock.unlock();
+            }
+
+            if (localFrameData != null) {
+                // Execute heavy inference and math operations on background thread outside lock
+                processWorkerFrame(localFrameData, localW, localH, localStride);
+            }
+        }
+    }
+
+    private void processWorkerFrame(byte[] yPlane, int width, int height, int stride) {
         if (tflite == null) return;
 
         long startTime = SystemClock.elapsedRealtime();
 
+        // Calculate search crop size: min(width, height)
+        float cropSize = (float) Math.min(width, height);
+        
         float[] currBuffer = new float[256 * 256];
         long preStart = SystemClock.elapsedRealtime();
-        MainActivity.downsampleSearchFrame(yPlane, width, height, stride, currBuffer);
+        
+        // JNI extracts square crop around lastTrackedX, lastTrackedY, resizes to 256x256, and normalizes
+        MainActivity.downsampleSearchCrop(yPlane, width, height, stride, lastTrackedX, lastTrackedY, cropSize, currBuffer);
+        
         long preDuration = SystemClock.elapsedRealtime() - preStart;
 
         float[][][][] currInput = new float[1][256][256][1];
@@ -245,39 +359,77 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         long infDuration = SystemClock.elapsedRealtime() - infStart;
 
         float qualityScore = outputQuality[0][0];
+        
+        // Flatten predicted heatmap for JNI processing
         float[] flatHeatmap = new float[256 * 256];
-        for (int y = 0; y < 256; y++) {
-            for (int x = 0; x < 256; x++) {
-                float val = outputHeatmap[0][y][x][0];
-                flatHeatmap[y * 256 + x] = val;
+        for (int y = 0; y < 256; ++y) {
+            for (int x = 0; x < 256; ++x) {
+                flatHeatmap[y * 256 + x] = outputHeatmap[0][y][x][0];
             }
         }
 
-        if (qualityScore < CONFIDENCE_THRESHOLD) {
-            handleTargetLost("Low quality score: " + String.format("%.2f", qualityScore));
+        long postStart = SystemClock.elapsedRealtime();
+        // Calculate noise-immune sub-pixel centroid
+        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(flatHeatmap);
+        long postDuration = SystemClock.elapsedRealtime() - postStart;
+        
+        float px = localCoords[0]; // relative x in [0.0, 1.0] inside the crop
+        float py = localCoords[1]; // relative y in [0.0, 1.0] inside the crop
+
+        // Coordinate Re-projection: Map crop-relative coordinates back to camera absolute coordinates
+        float halfSize = cropSize / 2.0f;
+        float x_global = (lastTrackedX - halfSize) + px * cropSize;
+        float y_global = (lastTrackedY - halfSize) + py * cropSize;
+
+        // Check if target is out of camera frame boundaries
+        if (x_global < 0.0f || x_global >= (float)width || y_global < 0.0f || y_global >= (float)height) {
+            new Handler(Looper.getMainLooper()).post(new Runnable() {
+                @Override
+                public void run() {
+                    handleTargetLost("Target went out of bounds.");
+                }
+            });
             return;
         }
 
-        long postStart = SystemClock.elapsedRealtime();
-        float[] predCoords = MainActivity.calculateCenterOfMass(flatHeatmap, 0.1f);
-        long postDuration = SystemClock.elapsedRealtime() - postStart;
+        // Save for next frame centering
+        lastTrackedX = x_global;
+        lastTrackedY = y_global;
+
         long totalDuration = SystemClock.elapsedRealtime() - startTime;
 
-        float px = predCoords[0]; 
-        float py = predCoords[1]; 
+        // Convert absolute camera coordinates to normalized [0, 1] relative to camera frame
+        float gx = x_global / (float) width;
+        float gy = y_global / (float) height;
 
-        if (px < 0.0f || px > 1.0f || py < 0.0f || py > 1.0f) {
-            handleTargetLost("Target went out of bounds.");
-            return;
-        }
+        // Post UI rendering tasks back to the UI thread
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override
+            public void run() {
+                if (currentUiState != STATE_TRACKING) return;
+                
+                // If quality is below threshold, color the target circle in RED. If above, GREEN.
+                int circleColor = (qualityScore >= CONFIDENCE_THRESHOLD) ? Color.GREEN : Color.RED;
+                
+                // TODO: Active search recovery mode when quality score falls below threshold.
+                // Currently, we continue tracking using the last known location but draw the indicator in RED.
+                // In the future, we could dynamically expand search cropSize or sweep the camera frame.
+                
+                if (qualityScore < CONFIDENCE_THRESHOLD) {
+                    lblStatus.setText(String.format("Status: Weak Lock! Quality: %.2f", qualityScore));
+                } else {
+                    lblStatus.setText("Status: Active tracking");
+                }
+                
+                drawTrackingIndicator(gx, gy, circleColor);
+                renderDiagnostics(flatHeatmap, currBuffer);
 
-        drawTrackingIndicator(px, py);
-        renderDiagnostics(flatHeatmap, currBuffer);
-
-        txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
-                preDuration, infDuration, postDuration, totalDuration));
-        txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Quality: %.2f]", px, py, qualityScore));
-        txtBufferStatus.setText("Tracking Engine: Active");
+                txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
+                        preDuration, infDuration, postDuration, totalDuration));
+                txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Quality: %.2f]", gx, gy, qualityScore));
+                txtBufferStatus.setText("Tracking Engine: Active");
+            }
+        });
     }
 
     private void handleTargetLost(String reason) {
@@ -298,7 +450,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         Toast.makeText(this, "Target Lost: " + reason, Toast.LENGTH_SHORT).show();
     }
 
-    private void drawTrackingIndicator(float tx, float ty) {
+    private void drawTrackingIndicator(float tx, float ty, int color) {
         int viewW = capturedImageView.getWidth();
         int viewH = capturedImageView.getHeight();
         if (viewW <= 0 || viewH <= 0) return;
@@ -313,7 +465,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         float screenX = tx * viewW;
         float screenY = ty * viewH;
         
-        paint.setColor(Color.GREEN);
+        paint.setColor(color);
         canvas.drawCircle(screenX, screenY, 25.0f, paint);
         paint.setStyle(Paint.Style.FILL);
         canvas.drawCircle(screenX, screenY, 6.0f, paint);
@@ -322,6 +474,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     }
 
     private void renderDiagnostics(float[] heatmap, float[] curr) {
+        // 1. Render outputHeatmap (Jet color mapping)
         Bitmap hmBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
         int[] hmColors = new int[256 * 256];
         for (int i = 0; i < 256 * 256; i++) {
@@ -334,6 +487,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         hmBitmap.setPixels(hmColors, 0, 256, 0, 0, 256, 256);
         heatmapImageView.setImageBitmap(hmBitmap);
 
+        // 2. Render cropCurrView (the current active search crop)
         Bitmap currBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
         int[] currColors = new int[256 * 256];
         for (int i = 0; i < 256 * 256; i++) {
@@ -342,6 +496,18 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
         currBitmap.setPixels(currColors, 0, 256, 0, 0, 256, 256);
         cropCurrView.setImageBitmap(currBitmap);
+
+        // 3. Render cropHistView (the locked target reference template layer 0)
+        Bitmap histBitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888);
+        int[] histColors = new int[32 * 32];
+        for (int y = 0; y < 32; y++) {
+            for (int x = 0; x < 32; x++) {
+                int val = (int)(refStackInput[0][0][y][x][0] * 255.0f);
+                histColors[y * 32 + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
+            }
+        }
+        histBitmap.setPixels(histColors, 0, 32, 0, 0, 32, 32);
+        cropHistView.setImageBitmap(histBitmap);
     }
 
     private void resetTrackerToIdle() {
@@ -372,6 +538,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
     @Override
     protected void onPause() {
+        stopWorkerThread();
         super.onPause();
         isLoopActive = false;
     }
@@ -379,6 +546,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     @Override
     protected void onResume() {
         super.onResume();
+        startWorkerThread();
         if (cameraHelper != null && cameraHelper.hasCameraPermission() && !isLoopActive) {
             isLoopActive = true;
         }
@@ -387,6 +555,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     @Override
     protected void onDestroy() {
         isLoopActive = false;
+        stopWorkerThread();
         if (tflite != null) {
             tflite.close();
         }
