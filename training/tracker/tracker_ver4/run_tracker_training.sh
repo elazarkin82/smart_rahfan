@@ -10,7 +10,7 @@ mkdir -p outputs
 # --dataset_dir dataset_generator/dataset \
 
 python3 tracker_model.py train \
-    --dataset_dir temp \
+    --dataset_dir dataset_generator/dataset \
     --num_of_epochs 100 \
     --lr 1e-2 \
     --loss centernet_dice \

@@ -19,7 +19,7 @@ class KerasFCNVisualizer:
         if not os.path.exists(self.dataset_dir):
             raise FileNotFoundError(f"Dataset directory '{self.dataset_dir}' does not exist.")
             
-        self.pickle_files = [f for f in os.listdir(self.dataset_dir) if f.startswith('train_') and f.endswith('.pkl')]
+        self.pickle_files = [f for f in os.listdir(self.dataset_dir) if f.endswith('.pkl')]
         if not self.pickle_files:
             raise FileNotFoundError(f"No pickle files found in '{self.dataset_dir}'.")
             
@@ -47,13 +47,14 @@ class KerasFCNVisualizer:
 
     def process_and_draw(self, img_256, coords_norm, circle_color):
         pil_img = Image.fromarray(img_256)
-        draw = ImageDraw.Draw(pil_img)
-        r = 6
-        x_px = int(coords_norm[0] * 256.0)
-        y_px = int(coords_norm[1] * 256.0)
-        
-        draw.ellipse([x_px - r, y_px - r, x_px + r, y_px + r], outline=circle_color, width=2)
-        draw.ellipse([x_px - 2, y_px - 2, x_px + 2, y_px + 2], fill=circle_color)
+        if coords_norm is not None:
+            draw = ImageDraw.Draw(pil_img)
+            r = 6
+            x_px = int(coords_norm[0] * 256.0)
+            y_px = int(coords_norm[1] * 256.0)
+            
+            draw.ellipse([x_px - r, y_px - r, x_px + r, y_px + r], outline=circle_color, width=2)
+            draw.ellipse([x_px - 2, y_px - 2, x_px + 2, y_px + 2], fill=circle_color)
         
         return ImageTk.PhotoImage(pil_img)
         
@@ -111,13 +112,21 @@ class KerasFCNVisualizer:
             search_raw = sample["search_frame"]    # (H, W, 1)
             gt_heatmap = sample["ground_truth_heatmap"]
             meta = sample["metadata"]
-            target_2d = meta["target_2d"]
+            target_2d = meta.get("target_2d")
             
             # Prepare Target Label
             # Scale target_2d to normalized coordinates
             h_raw, w_raw = search_raw.shape[:2]
-            norm_x = target_2d[0] / w_raw
-            norm_y = target_2d[1] / h_raw
+            if target_2d is not None:
+                norm_x = target_2d[0] / w_raw
+                norm_y = target_2d[1] / h_raw
+                norm_coords = [norm_x, norm_y]
+                curr_lbl_text = f"GT: [{norm_x:.2f}, {norm_y:.2f}]"
+                curr_lbl_fg = "#00e6ff"
+            else:
+                norm_coords = None
+                curr_lbl_text = "GT: None (Negative)"
+                curr_lbl_fg = "#ff3366"
             
             # Show the largest reference crop (layer 0) scaled up
             ref_layer_0 = ref_stack[0, :, :, 0] # (16, 16)
@@ -149,7 +158,7 @@ class KerasFCNVisualizer:
                 pred_norm = [0.5, 0.5]
             
             search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
-            self.tk_img_curr = self.process_and_draw(search_rgb, [norm_x, norm_y], "#00e6ff")
+            self.tk_img_curr = self.process_and_draw(search_rgb, norm_coords, "#00e6ff")
             
             # Overlay heatmap on search image
             heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
@@ -161,10 +170,14 @@ class KerasFCNVisualizer:
             self.pred_panel.config(image=self.tk_img_pred)
             
             self.ref_lbl.config(text="Target Features")
-            self.curr_lbl.config(text=f"GT: [{norm_x:.2f}, {norm_y:.2f}]", fg="#00e6ff")
+            self.curr_lbl.config(text=curr_lbl_text, fg=curr_lbl_fg)
             
-            error = np.sqrt((pred_norm[0] - norm_x)**2 + (pred_norm[1] - norm_y)**2) * 256.0
-            self.pred_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\nError: {error:.1f}px\nQuality: {pred_quality:.2f}", fg="#33ff33")
+            if target_2d is not None:
+                error = np.sqrt((pred_norm[0] - norm_x)**2 + (pred_norm[1] - norm_y)**2) * 256.0
+                error_str = f"Error: {error:.1f}px"
+            else:
+                error_str = "Error: N/A"
+            self.pred_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {pred_quality:.2f}", fg="#33ff33")
             
             self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
             

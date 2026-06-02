@@ -250,10 +250,14 @@ class TargetTrackerVer4:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(message + "\n")
 
-    def evaluate(self, dataset, loss_fn_heatmap, loss_fn_quality):
+    def evaluate(self, dataset, loss_fn_heatmap, loss_fn_quality, steps=None):
         val_loss_avg = tf.keras.metrics.Mean()
+        val_hm_loss_avg = tf.keras.metrics.Mean()
+        val_q_loss_avg = tf.keras.metrics.Mean()
         import tqdm
-        for inputs, targets in tqdm.tqdm(dataset, desc="Evaluating", leave=False):
+        
+        progress_bar = tqdm.tqdm(dataset, desc="Evaluating", total=steps, leave=False)
+        for inputs, targets in progress_bar:
             gt_heatmap = targets["predicted_heatmap"]
             gt_quality = targets["predicted_quality"]
             predictions = self.model(inputs, training=False)
@@ -264,12 +268,23 @@ class TargetTrackerVer4:
             loss_value = loss_heatmap + 1.0 * loss_quality
             
             val_loss_avg.update_state(loss_value)
-        return float(val_loss_avg.result())
+            val_hm_loss_avg.update_state(loss_heatmap)
+            val_q_loss_avg.update_state(loss_quality)
+            
+            progress_bar.set_postfix(
+                val_loss=float(val_loss_avg.result()),
+                val_hm=float(val_hm_loss_avg.result()),
+                val_q=float(val_q_loss_avg.result())
+            )
+            
+        return float(val_loss_avg.result()), float(val_hm_loss_avg.result()), float(val_q_loss_avg.result())
 
-    def train_epoch(self, dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_epochs):
+    def train_epoch(self, dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_epochs, steps=None):
         epoch_loss_avg = tf.keras.metrics.Mean()
+        epoch_hm_loss_avg = tf.keras.metrics.Mean()
+        epoch_q_loss_avg = tf.keras.metrics.Mean()
         import tqdm
-        progress_bar = tqdm.tqdm(dataset, desc=f"Epoch {epoch:03d}/{num_epochs:03d}", leave=False)
+        progress_bar = tqdm.tqdm(dataset, desc=f"Epoch {epoch:03d}/{num_epochs:03d}", total=steps, leave=False)
         
         for inputs, targets in progress_bar:
             gt_heatmap = targets["predicted_heatmap"]
@@ -286,11 +301,18 @@ class TargetTrackerVer4:
             optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
             
             epoch_loss_avg.update_state(loss_value)
-            progress_bar.set_postfix(loss=float(loss_value), hm=float(loss_heatmap), q=float(loss_quality))
+            epoch_hm_loss_avg.update_state(loss_heatmap)
+            epoch_q_loss_avg.update_state(loss_quality)
             
-        return float(epoch_loss_avg.result())
+            progress_bar.set_postfix(
+                loss=float(epoch_loss_avg.result()),
+                hm=float(epoch_hm_loss_avg.result()),
+                q=float(epoch_q_loss_avg.result())
+            )
+            
+        return float(epoch_loss_avg.result()), float(epoch_hm_loss_avg.result()), float(epoch_q_loss_avg.result())
 
-    def train(self, train_dataset, val_dataset, lr, num_of_epochs, loss_name="centernet_dice", output_path=None, best_train_loss_output=None, log_file=None):
+    def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_name="centernet_dice", output_path=None, best_train_loss_output=None, log_file=None):
         if loss_name == "mse":
             loss_fn_heatmap = losses.MeanSquaredError()
         elif loss_name == "dice_bce":
@@ -310,12 +332,12 @@ class TargetTrackerVer4:
         optimizer = optimizers.Adam(learning_rate=lr)
         
         self.log("Calculating initial validation loss...", log_file)
-        best_val_loss = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality)
+        best_val_loss, init_val_hm, init_val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, steps=val_steps)
         best_train_loss = float('inf')
-        self.log(f"Initial Validation Loss: {best_val_loss:.6f}", log_file)
+        self.log(f"Initial Validation Loss: {best_val_loss:.6f} (HM: {init_val_hm:.6f}, Q: {init_val_q:.6f})", log_file)
         
         for epoch in range(1, num_of_epochs + 1):
-            epoch_loss = self.train_epoch(train_dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_of_epochs)
+            epoch_loss, epoch_hm, epoch_q = self.train_epoch(train_dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_of_epochs, steps=train_steps)
             
             if best_train_loss_output and epoch_loss < best_train_loss:
                 self.log(f"   [TRAIN IMPROVEMENT] Train loss improved from {best_train_loss:.6f} to {epoch_loss:.6f}. Saving to {best_train_loss_output}", log_file)
@@ -324,8 +346,8 @@ class TargetTrackerVer4:
                     os.makedirs(os.path.dirname(best_train_loss_output), exist_ok=True)
                 self.model.save(best_train_loss_output)
             
-            val_loss = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality)
-            self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} | Val Loss: {val_loss:.6f}", log_file)
+            val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, steps=val_steps)
+            self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} (HM: {epoch_hm:.6f}, Q: {epoch_q:.6f}) | Val Loss: {val_loss:.6f} (HM: {val_hm:.6f}, Q: {val_q:.6f})", log_file)
             
             if val_loss < best_val_loss:
                 self.log(f"   [VAL IMPROVEMENT] Val loss improved from {best_val_loss:.6f} to {val_loss:.6f}. Saving model...", log_file)
@@ -444,6 +466,8 @@ def main():
             val_dataset=val_ds,
             lr=args.lr,
             num_of_epochs=args.num_of_epochs,
+            train_steps=len(train_files),
+            val_steps=len(val_files),
             loss_name=args.loss,
             output_path=args.output,
             best_train_loss_output=args.best_train_loss_output,

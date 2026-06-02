@@ -437,12 +437,16 @@ class DatasetVisualizer:
         
         # Target from metadata
         meta = sample.get("metadata", {})
-        target_2d = meta.get("target_2d", [w_s//2, h_s//2])
-        px, py = int(target_2d[0]), int(target_2d[1])
+        target_2d = meta.get("target_2d")
         
-        # Draw cyan target ring on compiled image
-        cv2.circle(overlay, (px, py), 8, (0, 230, 255), 1)
-        cv2.circle(overlay, (px, py), 1, (0, 230, 255), -1)
+        if target_2d is not None:
+            px, py = int(target_2d[0]), int(target_2d[1])
+            # Draw cyan target ring on compiled image
+            cv2.circle(overlay, (px, py), 8, (0, 230, 255), 1)
+            cv2.circle(overlay, (px, py), 1, (0, 230, 255), -1)
+            target_str = f"[{px}, {py}]"
+        else:
+            target_str = "None (Negative Sample)"
         
         # Scale to display canvas size
         panel_w = self.main_image_label.winfo_width()
@@ -468,12 +472,12 @@ class DatasetVisualizer:
         dist = meta.get("distance", 0.0)
         
         hud_text = f"Compiled Frames  |  File: {filename}  |  Sample: {self.current_frame_idx+1} / {len(self.loaded_data)}  |  " \
-                   f"Target 2d: [{px}, {py}]  |  Dist: {dist:.1f}m"
+                   f"Target 2d: {target_str}  |  Dist: {dist:.1f}m"
         self.info_label.config(text=hud_text, fg="#00e6ff")
         
         self.detail_flight_lbl.config(text=f"File: {filename}")
         self.detail_frame_lbl.config(text=f"Sample: {self.current_frame_idx+1} / {len(self.loaded_data)}")
-        self.detail_pos2d_lbl.config(text=f"Target 2D: [{px}, {py}]")
+        self.detail_pos2d_lbl.config(text=f"Target 2D: {target_str}")
         self.detail_dist_lbl.config(text=f"Distance: {dist:.2f} m")
         self.detail_pos3d_lbl.config(text="Target 3D: [Compiled]")
         
