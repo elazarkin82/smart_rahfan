@@ -146,7 +146,10 @@ def main():
             
             sensor_mgr.move_to(start_point)
             
-            # Clear old frames, then tick to get exactly 1 frame at start_point
+            # First tick moves the camera actor to start_point on the server
+            world.tick()
+            
+            # Clear stale frames, then tick a second time to render while stationary
             clear_queues(sensor_mgr)
             fid_start = world.tick()
             
@@ -228,7 +231,10 @@ def main():
                     
                     sensor_mgr.move_to(base_t)
                     
-                    # In synchronous mode, TICK forces the engine to step and render EXACTLY this transform!
+                    # First tick moves the camera actor on the server
+                    world.tick()
+                    
+                    # Second tick renders the frame while the camera is stationary at base_t
                     fid_step = world.tick()
                     rgb_arr, d_arr, trans = sensor_mgr.get_sync_data(frame_id=fid_step, timeout=2.0)
                     

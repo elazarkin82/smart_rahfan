@@ -19,6 +19,6 @@ docker run --rm -it \
     -e DISPLAY=$DISPLAY \
     ${VOLUMES} \
     smart-rahfan-carla:latest \
-    /bin/bash ./CarlaUE4.sh -vulkan -quality-level=Low -RenderOffScreen
+    /bin/bash ./CarlaUE4.sh -vulkan -RenderOffScreen
     
 #/bin/bash ./CarlaUE4.sh -vulkan -quality-level=Low -RenderOffScreen
