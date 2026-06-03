@@ -114,10 +114,12 @@ def main():
             
         # 1. Reference Initialization (from frame 0)
         frame_0 = flight_data[0]
+        flight_max_sz = frame_0.get("crop_max_size", max_sz)
+        flight_min_sz = frame_0.get("crop_min_size", min_sz)
         ref_stack = build_reference_stack(
             frame_0['image_gray'], 
             frame_0['target_2d'], 
-            layers, max_sz, min_sz, tgt_sz
+            layers, flight_max_sz, flight_min_sz, tgt_sz
         )
         
         # 2. Training Pairs (frames 1..N)
