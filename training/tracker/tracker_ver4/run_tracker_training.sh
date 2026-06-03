@@ -50,15 +50,16 @@ mkdir -p outputs
 #
 # --c_bg 3.0: Sets the background suppression factor to 3x for DBSZ losses
 #             to reduce background noise and false positives in real-world environments.
+# --dataset_dir: Can receive multiple space-separated directories (e.g. carla + real data)
 python3 tracker_model.py train \
-    --dataset_dir dataset_generator/dataset \
+    --dataset_dir dataset_generator/dataset_carla dataset_generator/dataset \
     --num_of_epochs 10 \
-    --lr 1e-3 \
+    --lr 1e-4 \
     --loss_heatmap dbsz_relu \
     --loss_quality bce \
     --train_mode joint \
     --c_bg 3.0 \
-    --eval_pkl_num 	300 \
+    --eval_pkl_num 	30 \
     --output outputs/tracker.keras \
     --init_keras_file outputs/tracker.keras \
     --best_train_loss_output outputs/tracker_best_train_loss.keras \

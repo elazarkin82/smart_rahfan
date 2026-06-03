@@ -595,7 +595,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="TargetTrackerVer4 Training CLI")
     parser.add_argument("command", choices=["train"])
-    parser.add_argument("--dataset_dir", required=True, help="Path to dataset PKL dir")
+    parser.add_argument("--dataset_dir", nargs="+", required=True, help="One or more paths to dataset PKL directories")
     parser.add_argument("--batch_size", type=int, default=16, help="Training batch size (ignored, defined by dataset files)")
     parser.add_argument("--eval_pkl_num", type=int, default=4, help="Number of PKLs for validation")
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -615,18 +615,22 @@ def main():
         import glob
         
         # File-Level Prefix Filtering based on train_mode to eliminate CPU dynamic filter overheads
-        if args.train_mode == "heatmap_only":
-            all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "batch_pos_*.pkl")))
-            if not all_pkls:
-                raise FileNotFoundError(f"No batch_pos_*.pkl files found in {args.dataset_dir}. Run create_batched_dataset.py first.")
-        elif args.train_mode == "quality_only":
-            all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "batch_with_negative_*.pkl")))
-            if not all_pkls:
-                raise FileNotFoundError(f"No batch_with_negative_*.pkl files found in {args.dataset_dir}. Run create_batched_dataset.py first.")
-        else: # joint
-            all_pkls = sorted(glob.glob(os.path.join(args.dataset_dir, "batch_pos_*.pkl")) + glob.glob(os.path.join(args.dataset_dir, "batch_with_negative_*.pkl")))
-            if not all_pkls:
-                raise FileNotFoundError(f"No batch_pos_*.pkl or batch_with_negative_*.pkl files found in {args.dataset_dir}.")
+        all_pkls = []
+        for d in args.dataset_dir:
+            if args.train_mode == "heatmap_only":
+                all_pkls.extend(glob.glob(os.path.join(d, "batch_pos_*.pkl")))
+            elif args.train_mode == "quality_only":
+                all_pkls.extend(glob.glob(os.path.join(d, "batch_with_negative_*.pkl")))
+            else: # joint
+                all_pkls.extend(glob.glob(os.path.join(d, "batch_pos_*.pkl")) + glob.glob(os.path.join(d, "batch_with_negative_*.pkl")))
+                
+        all_pkls = sorted(all_pkls)
+        if not all_pkls:
+            raise FileNotFoundError(f"No batch files found matching train_mode '{args.train_mode}' in specified directories: {args.dataset_dir}")
+            
+        # Shuffle deterministically with a fixed seed to mix datasets for train/val split
+        import random
+        random.Random(42).shuffle(all_pkls)
             
         val_files = all_pkls[:args.eval_pkl_num]
         train_files = all_pkls[args.eval_pkl_num:]

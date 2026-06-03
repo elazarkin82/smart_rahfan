@@ -139,6 +139,13 @@ Our custom shuffling script (`create_batched_dataset.py`) loads all compiled fli
 * **`batch_with_negative_*.pkl`**: Contains exactly **50% positive** and **50% negative** (background only) samples. This perfectly balanced class distribution is ideal for training the Quality classifier in Stage 2.
 This file-level split entirely eliminates CPU filtering overhead during training, reduces disk I/O, and guarantees zero data pollution.
 
+### 5. Deterministic Dataset Shuffling & Evaluation Splits
+To ensure that the validation set (the evaluation files slice `--eval_pkl_num`) contains a balanced representation of all specified directories (e.g. both Carla simulation and real physical data), the combined file list is **deterministically shuffled** using a fixed seed (`42`) before splitting:
+```python
+random.Random(42).shuffle(all_pkls)
+```
+This guarantees a homogeneous mixture of sources in both training and evaluation, while preserving absolute reproducibility across training runs.
+
 ---
 
 ## Decoupled Two-Stage Training Pipeline
@@ -172,9 +179,10 @@ python3 dataset_generator/create_batched_dataset.py --batch_size 4
 Generates the pure positive `batch_pos_*.pkl` and the perfectly balanced 50-50 mixed `batch_with_negative_*.pkl` files in `dataset_generator/dataset/`.
 
 ### Step 3: Run Stage 1 (Heatmap Only)
+To train on multiple datasets, pass them as space-separated paths to `--dataset_dir`:
 ```bash
 python3 tracker_model.py train \
-    --dataset_dir dataset_generator/dataset \
+    --dataset_dir dataset_generator/dataset_carla dataset_generator/dataset \
     --train_mode heatmap_only \
     --loss_heatmap dbsz_soft \
     --output outputs/tracker.keras
@@ -184,7 +192,7 @@ python3 tracker_model.py train \
 Loads the pre-trained weights from Stage 1, freezes them, and trains only the Quality classification branch:
 ```bash
 python3 tracker_model.py train \
-    --dataset_dir dataset_generator/dataset \
+    --dataset_dir dataset_generator/dataset_carla dataset_generator/dataset \
     --train_mode quality_only \
     --init_keras_file outputs/tracker.keras \
     --output outputs/tracker.keras
