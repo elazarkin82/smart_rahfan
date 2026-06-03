@@ -18,16 +18,20 @@ To prevent the loss of fine-grained spatial information through the network's sp
 * **Skip Connection 3 (`128x128`)**: Concatenates `sb_init` `(128, 128, 16)` to supply precise high-frequency details.
 This dramatically enhances tracking precision, sharpens the predicted heatmaps, and ensures fast and reliable training convergence.
 
-### 3. Continuous Hybrid Losses (focal_dice & centernet_dice)
-The heatmap can be trained using continuous-safe custom losses:
+### 3. Continuous Hybrid & DBSZ Losses (with Background Suppression)
+The heatmap can be trained using continuous-safe custom losses or Dynamic Balanced Semantic Zone (DBSZ) losses:
+* **DBSZ Losses (`dbsz_hard`, `dbsz_soft`, `dbsz_relu`)**: These losses dynamically divide the heatmap into high-confidence peak zones and low-confidence background zones, balancing the training gradients.
+* **Background Suppression Weight (`--c_bg`)**: To suppress real-world camera noise and false-positive activations in the background (black regions of the heatmap), a controlled weight multiplier $C_{bg}$ (default: `3.0`) is applied directly to the background loss component:
+  $$\mathcal{L}_{\text{DBSZ}} = \mathcal{L}_{\text{high}} + C_{bg} \cdot \mathcal{L}_{\text{low}}$$
+  Setting $C_{bg}$ to `3.0` penalizes background activations 3 times harder, forcing the network to keep the background flat and dark.
 * **`centernet_dice` (Default)**: A weighted combination of a soft, continuous version of **CenterNet Penalty-Reduced Focal Loss** and **Soft Dice Loss (Square Form)**:
   $$\mathcal{L} = w_f \cdot \mathcal{L}_{\text{CenterNet}} + w_d \cdot \mathcal{L}_{\text{Dice}}$$
-  * **CenterNet Penalty-Reduced Focal Loss**: Suppresses background penalties near the peak using a Gaussian-discounted weight $(1 - Y)^{\beta}$, letting the network easily learn high-confidence coordinates around the target without vanishing gradients.
-  * **Soft Dice Loss (Square Form)**: Measures global intersection-over-union, preventing the network from predicting flat zero heatmaps.
 * **`focal_dice`**: Combines standard continuous Sigmoid Focal Loss and Soft Dice Loss.
 
 ### 4. Heatmap-Guided Quality Score Branch
-* **Output 1 (Localization Heatmap)**: Predicts a continuous Gaussian heatmap centered at the target location.
+* **Output 1 (Localization Heatmap)**: Predicts a continuous Gaussian heatmap centered at the target location. Updated from a saturating `sigmoid` function to a non-saturating **ReLU Activation + Max-Only Normalization** layer:
+  $$\hat{Z} = \frac{\text{ReLU}(Z)}{\max(\text{ReLU}(Z)) + 10^{-7}}$$
+  This preserves the exact relative linear shape/geometry of the predicted Gaussian peak (preventing logits like 6 and 20 from flattening to 1.0), yielding high sub-pixel centroid accuracy during local Center of Mass calculations.
 * **Output 2 (Localization Quality Score)**: A continuous scalar value ($0.0$ to $1.0$) indicating tracking confidence.
 * **Heatmap-Guided Design**: Instead of classifying quality solely from intermediate features, the predicted `output_heatmap` is downsampled to `(16, 16, 8)` and concatenated directly with the `fused_features` `(16, 16, 128)`. This lets the quality branch directly analyze the confidence, structure, and clarity of the predicted localization peak!
 * **Deeper CNN Architecture**: Uses 2 layers of 2D convolutions with Group Normalization and ReLU activations to preserve spatial layout before applying Global Average Pooling (GAP) and Dense layers, yielding high-capacity confidence classification.
