@@ -5,6 +5,8 @@ import argparse
 import pickle
 import glob
 import math
+import json
+import hashlib
 import tkinter as tk
 from tkinter import ttk, messagebox
 import cv2
@@ -19,6 +21,8 @@ class VideoDatasetGeneratorV2:
         
         # Ensure directories exist
         os.makedirs(self.cache_dir, exist_ok=True)
+        self.thumbnail_dir = os.path.join(self.cache_dir, "thumbnails")
+        os.makedirs(self.thumbnail_dir, exist_ok=True)
         
         # Window properties
         self.root.title("TargetTrackerVer4 - Video Dataset Generator V2 (Step-by-Step)")
@@ -49,6 +53,7 @@ class VideoDatasetGeneratorV2:
         
         self.state = "idle"         # "idle", "tracking", "tracked", "preview"
         self.current_frame_idx = 0
+        self.tracking_start_frame = None
         
         # Discrete tracking coordinates
         self.recorded_frames = []   # List of frame indices sampled (e.g. [120, 130, 140])
@@ -65,6 +70,10 @@ class VideoDatasetGeneratorV2:
         self.canvas_w = 100
         self.canvas_h = 100
         
+        # Preloaded thumbnail PhotoImages
+        self.thumbnail_images = {}
+        self.load_thumbnail_cache()
+        
         # Set default styling
         self.setup_styles()
         
@@ -75,12 +84,142 @@ class VideoDatasetGeneratorV2:
         self.root.bind("<Escape>", lambda e: self.toggle_fullscreen())
         self.root.bind("<space>", lambda e: self.on_space_pressed())
         
-        # Load first video if any exist
+        # Initial refresh
         self.refresh_cache_list()
-        if self.video_paths:
-            self.select_video(0)
-        else:
-            self.update_status("No videos found in directory. Please specify a directory with videos.", "#ff3366")
+        self.refresh_video_tree()
+        
+        # No auto-loading first video, open instantly with empty state
+        self.update_status("Select a video from the list to start tracking.", "#00e6ff")
+        self.render_placeholder_frame()
+
+    def load_thumbnail_cache(self):
+        """Loads or builds the persistent thumbnail cache mapping full paths to hashed PNG files."""
+        json_path = os.path.join(self.thumbnail_dir, "thumbnails.json")
+        mapping = {}
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    mapping = json.load(f)
+            except Exception as e:
+                print(f"[Thumbnail Cache] Warning: Failed to load thumbnails.json: {e}")
+                
+        updated = False
+        print("[Thumbnail Cache] Scanning video list and loading thumbnails...")
+        
+        for path in self.video_paths:
+            abs_path = os.path.abspath(path)
+            # Use path hash to avoid collisions with same-name files in different dirs
+            path_hash = hashlib.md5(abs_path.encode('utf-8')).hexdigest()
+            thumb_filename = f"{path_hash}.png"
+            thumb_path = os.path.join(self.thumbnail_dir, thumb_filename)
+            
+            # Check if cache mapping exists and image file exists
+            if abs_path in mapping and os.path.exists(thumb_path):
+                # Load existing image
+                try:
+                    img = Image.open(thumb_path)
+                    self.thumbnail_images[path] = ImageTk.PhotoImage(img)
+                except Exception as e:
+                    print(f"[Thumbnail Cache] Error loading {thumb_filename}: {e}")
+            else:
+                # Generate new thumbnail
+                print(f"[Thumbnail Cache] Extracting frame 0 from: {os.path.basename(path)}")
+                cap = cv2.VideoCapture(path)
+                ret, frame = cap.read()
+                cap.release()
+                
+                if ret:
+                    try:
+                        # Convert to RGB and resize to standard compact icon (e.g. 56x42)
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        pil_img = Image.fromarray(rgb_frame)
+                        pil_img.thumbnail((56, 42))
+                        
+                        # Pad thumbnail to exactly 56x42 to maintain treeview row alignment
+                        w, h = pil_img.size
+                        pad_img = Image.new("RGB", (56, 42), "#121212")
+                        pad_img.paste(pil_img, ((56 - w) // 2, (42 - h) // 2))
+                        
+                        # Save thumbnail
+                        pad_img.save(thumb_path, "PNG")
+                        self.thumbnail_images[path] = ImageTk.PhotoImage(pad_img)
+                        mapping[abs_path] = thumb_filename
+                        updated = True
+                    except Exception as e:
+                        print(f"[Thumbnail Cache] Error processing {os.path.basename(path)}: {e}")
+                else:
+                    # Missing/unreadable video placeholder
+                    placeholder = Image.new("RGB", (56, 42), "#ff3366")
+                    self.thumbnail_images[path] = ImageTk.PhotoImage(placeholder)
+                    
+        if updated:
+            try:
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(mapping, f, indent=4)
+            except Exception as e:
+                print(f"[Thumbnail Cache] Error saving thumbnails.json: {e}")
+
+    def get_processed_videos(self):
+        """Scans all compiled cache pickle files to find video files that have already been processed,
+        using a lightweight index cache JSON to avoid loading large pickle files on startup."""
+        processed = set()
+        index_path = os.path.join(self.cache_dir, "processed_index.json")
+        index_data = {}
+        
+        if os.path.exists(index_path):
+            try:
+                with open(index_path, 'r', encoding='utf-8') as f:
+                    index_data = json.load(f)
+            except Exception as e:
+                print(f"[Cache Index] Warning: Failed to load processed_index.json: {e}")
+                
+        existing_flights = glob.glob(os.path.join(self.cache_dir, "flight_*.pkl"))
+        updated = False
+        
+        for flight_path in existing_flights:
+            flight_name = os.path.basename(flight_path)
+            
+            # If flight is already in the index mapping, retrieve from index
+            if flight_name in index_data:
+                v_name = index_data[flight_name]
+                if v_name:
+                    processed.add(v_name)
+            else:
+                # If not indexed, load once and index it
+                print(f"[Cache Index] Reading flight metadata for: {flight_name}...")
+                try:
+                    with open(flight_path, 'rb') as f:
+                        flight_data = pickle.load(f)
+                    if flight_data and len(flight_data) > 0:
+                        v_name = flight_data[0].get("video_name")
+                        if v_name:
+                            processed.add(v_name)
+                            index_data[flight_name] = v_name
+                        else:
+                            index_data[flight_name] = ""
+                        updated = True
+                    else:
+                        index_data[flight_name] = ""
+                        updated = True
+                except Exception as e:
+                    print(f"[Cache Index] Error reading {flight_name}: {e}")
+                    
+        # Clean up any deleted flights from the index to keep it clean
+        flight_names = {os.path.basename(p) for p in existing_flights}
+        keys_to_delete = [k for k in index_data if k not in flight_names]
+        if keys_to_delete:
+            for k in keys_to_delete:
+                del index_data[k]
+            updated = True
+            
+        if updated:
+            try:
+                with open(index_path, 'w', encoding='utf-8') as f:
+                    json.dump(index_data, f, indent=4)
+            except Exception as e:
+                print(f"[Cache Index] Error saving processed_index.json: {e}")
+                
+        return processed
 
     def setup_styles(self):
         style = ttk.Style()
@@ -91,6 +230,21 @@ class VideoDatasetGeneratorV2:
         style.configure("TButton", background="#2a2a2a", foreground="#ffffff", font=("Helvetica", 10, "bold"), borderwidth=0, focuscolor="none")
         style.map("TButton", background=[("active", "#3a3a3a"), ("disabled", "#1a1a1a")], foreground=[("disabled", "#555555")])
         style.configure("TCombobox", fieldbackground="#1e1e1e", background="#2d2d2d", foreground="#ffffff", darkcolor="#1e1e1e")
+        
+        # Configure treeview colors for dark mode and row spacing
+        style.configure("Treeview", 
+                        background="#121212", 
+                        fieldbackground="#121212", 
+                        foreground="#ffffff", 
+                        rowheight=48, 
+                        borderwidth=0, 
+                        highlightthickness=0)
+        style.map("Treeview", 
+                  background=[("selected", "#00e6ff")], 
+                  foreground=[("selected", "#121212")])
+
+    def update_status(self, text, color="#ffffff"):
+        self.status_lbl.config(text=text, fg=color)
 
     def build_ui(self):
         # 1. Main Header
@@ -109,28 +263,24 @@ class VideoDatasetGeneratorV2:
         workspace.pack(side="top", fill="both", expand=True, padx=10, pady=10)
         
         # Left Panel (Video List & Config)
-        left_panel = tk.Frame(workspace, bg="#1e1e1e", width=260, bd=1, relief="solid")
+        left_panel = tk.Frame(workspace, bg="#1e1e1e", width=265, bd=1, relief="solid")
         left_panel.pack(side="left", fill="y", padx=5)
         left_panel.pack_propagate(False)
         
         list_lbl = tk.Label(left_panel, text="Videos List", font=("Helvetica", 11, "bold"), bg="#1e1e1e", fg="#00e6ff")
         list_lbl.pack(pady=(10, 2))
         
-        # Scrollable Listbox (Videos)
-        list_container = tk.Frame(left_panel, bg="#1e1e1e")
+        # Treeview Scrollable List container for Videos
+        list_container = tk.Frame(left_panel, bg="#121212")
         list_container.pack(fill="both", expand=True, padx=10, pady=2)
         
         scrollbar = tk.Scrollbar(list_container, orient="vertical")
-        self.listbox = tk.Listbox(list_container, bg="#121212", fg="#ffffff", selectbackground="#00e6ff", selectforeground="#121212", bd=0, highlightthickness=0, yscrollcommand=scrollbar.set, font=("Helvetica", 9))
-        scrollbar.config(command=self.listbox.yview)
+        self.video_tree = ttk.Treeview(list_container, show="tree", selectmode="browse", yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.video_tree.yview)
         scrollbar.pack(side="right", fill="y")
-        self.listbox.pack(side="left", fill="both", expand=True)
-        self.listbox.bind("<<ListboxSelect>>", self.on_listbox_select)
+        self.video_tree.pack(side="left", fill="both", expand=True)
+        self.video_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         
-        # Populate Listbox
-        for path in self.video_paths:
-            self.listbox.insert(tk.END, os.path.basename(path))
-            
         # Cache List Label
         cache_lbl = tk.Label(left_panel, text="Cache List", font=("Helvetica", 11, "bold"), bg="#1e1e1e", fg="#00e6ff")
         cache_lbl.pack(pady=(10, 2))
@@ -250,27 +400,34 @@ class VideoDatasetGeneratorV2:
         self.speed_slider.set(150)
         self.speed_slider.pack(side="bottom")
 
-    def toggle_fullscreen(self):
-        state = not self.root.attributes('-fullscreen')
-        self.root.attributes('-fullscreen', state)
+    def refresh_video_tree(self):
+        """Clears and repopulates the Video Treeview displaying thumbnails and checkmarks for processed flights."""
+        # Clear existing items
+        for child in self.video_tree.get_children():
+            self.video_tree.delete(child)
+            
+        processed_set = self.get_processed_videos()
+        
+        for idx, path in enumerate(self.video_paths):
+            basename = os.path.basename(path)
+            
+            # Prepend checkmark if already processed
+            display_name = f"✓ {basename}" if basename in processed_set else basename
+            
+            # Insert item with thumbnail icon
+            self.video_tree.insert(
+                '', 
+                'end', 
+                iid=str(idx), 
+                image=self.thumbnail_images[path], 
+                text=display_name
+            )
 
-    def on_speed_changed(self, val):
-        delay = int(val)
-        self.speed_lbl.config(text=f"Preview Delay: {delay} ms")
-
-    def update_status(self, text, color="#ffffff"):
-        self.status_lbl.config(text=text, fg=color)
-
-    def refresh_cache_list(self):
-        self.cache_listbox.delete(0, tk.END)
-        existing_flights = sorted(glob.glob(os.path.join(self.cache_dir, "flight_*.pkl")))
-        for path in existing_flights:
-            self.cache_listbox.insert(tk.END, os.path.basename(path))
-
-    def on_listbox_select(self, event):
-        selection = self.listbox.curselection()
+    def on_tree_select(self, event):
+        selection = self.video_tree.selection()
         if selection:
-            self.select_video(selection[0])
+            idx = int(selection[0])
+            self.select_video(idx)
 
     def select_video(self, idx):
         if self.playback_timer:
@@ -338,6 +495,7 @@ class VideoDatasetGeneratorV2:
         # Reset State
         self.state = "idle"
         self.current_frame_idx = 0
+        self.tracking_start_frame = None
         self.recorded_frames = []
         self.recorded_coords = []
         
@@ -358,7 +516,33 @@ class VideoDatasetGeneratorV2:
     def on_canvas_resize(self, event):
         self.canvas_w = event.width
         self.canvas_h = event.height
-        self.render_frames()
+        if self.current_video_idx == -1:
+            self.render_placeholder_frame()
+        else:
+            self.render_frames()
+
+    def render_placeholder_frame(self):
+        """Displays a clean dark placeholder on the canvas when no video is loaded on startup."""
+        self.main_canvas.delete("all")
+        bg = Image.new("RGB", (self.canvas_w, self.canvas_h), "#1a1a1a")
+        
+        # Draw placeholder text
+        draw = ImageDraw.Draw(bg)
+        placeholder_text = "Select a video from the list to start tracking."
+        # Use simple coordinate layout since font size varies
+        draw.text((self.canvas_w // 2 - 120, self.canvas_h // 2), placeholder_text, fill="#888888")
+        
+        self.main_tk_image = ImageTk.PhotoImage(image=bg)
+        self.main_canvas.create_image(0, 0, anchor="nw", image=self.main_tk_image)
+        
+        # Side Canvas placeholder
+        side_w = self.side_canvas.winfo_width()
+        side_h = self.side_canvas.winfo_height()
+        if side_w < 10 or side_h < 10:
+            side_w, side_h = 220, 150
+        side_bg = Image.new("RGB", (side_w, side_h), "#121212")
+        self.side_tk_image = ImageTk.PhotoImage(image=side_bg)
+        self.side_canvas.create_image(0, 0, anchor="nw", image=self.side_tk_image)
 
     def render_frames(self):
         if not self.frames_rgb:
@@ -490,6 +674,7 @@ class VideoDatasetGeneratorV2:
             self.state = "tracking"
             self.recorded_frames = []
             self.recorded_coords = []
+            self.tracking_start_frame = self.current_frame_idx  # Keep starting frame
             
             self.btn_start_stop.config(text="■ Stop Tracking")
             self.btn_reset.config(state="disabled")
@@ -498,7 +683,7 @@ class VideoDatasetGeneratorV2:
             
             # Disable timeline seek bar and sidebar config
             self.seek_slider.config(state="disabled")
-            self.listbox.config(state="disabled")
+            self.video_tree.config(selectmode="none") # Disable Treeview selection
             self.step_combo.config(state="disabled")
             self.crop_combo.config(state="disabled")
             
@@ -514,7 +699,7 @@ class VideoDatasetGeneratorV2:
         
         # Re-enable controls
         self.seek_slider.config(state="normal")
-        self.listbox.config(state="normal")
+        self.video_tree.config(selectmode="browse")
         self.step_combo.config(state="normal")
         self.crop_combo.config(state="normal")
         
@@ -599,15 +784,21 @@ class VideoDatasetGeneratorV2:
         self.state = "idle"
         self.recorded_frames = []
         self.recorded_coords = []
-        self.current_frame_idx = 0
-        self.seek_slider.set(0)
+        
+        # Instead of resetting to frame 0, return to tracking_start_frame (or 0 if none)
+        if self.tracking_start_frame is not None:
+            self.current_frame_idx = self.tracking_start_frame
+        else:
+            self.current_frame_idx = 0
+            
+        self.seek_slider.set(self.current_frame_idx)
         
         self.btn_save.config(state="disabled")
         self.btn_preview.config(state="disabled")
         self.btn_reset.config(state="disabled")
         
         self.render_frames()
-        self.update_status("Tracking reset. Find start frame and click Start Tracking.", "#00e6ff")
+        self.update_status("Tracking reset. Click Start Tracking to try again.", "#00e6ff")
 
     def save_cache(self):
         if self.state not in ["tracked", "preview"] or len(self.recorded_frames) < 2:
@@ -631,7 +822,6 @@ class VideoDatasetGeneratorV2:
         output_path = os.path.join(self.cache_dir, output_filename)
         
         # Prepare data structure matching CARLA dataset compiler format
-        # E.g. list of dictionaries
         flight_data = []
         num_saved_frames = len(self.recorded_frames)
         
@@ -675,16 +865,49 @@ class VideoDatasetGeneratorV2:
                 
             messagebox.showinfo("Success", f"Flight saved successfully as {output_filename}!")
             
+            # Update index cache directly to avoid loading the pickle in get_processed_videos
+            index_path = os.path.join(self.cache_dir, "processed_index.json")
+            index_data = {}
+            if os.path.exists(index_path):
+                try:
+                    with open(index_path, 'r', encoding='utf-8') as f:
+                        index_data = json.load(f)
+                except Exception:
+                    pass
+            index_data[output_filename] = os.path.basename(self.video_paths[self.current_video_idx])
+            try:
+                with open(index_path, 'w', encoding='utf-8') as f:
+                    json.dump(index_data, f, indent=4)
+            except Exception:
+                pass
+                
             # Refresh Cache List Box
             self.refresh_cache_list()
             
-            # Reset tracking on the current video
+            # Refresh Video List treeview (to update checkmark ✓)
+            self.refresh_video_tree()
+            
+            # Reset tracking on the current video (retaining tracking_start_frame)
             self.reset_tracking()
             
             # Show saved message
             self.update_status(f"Saved successfully as {output_filename}. Ready for another tracking on current video.", "#00ff66")
         except Exception as e:
             messagebox.showerror("Error Saving", f"Failed to save pickle file: {e}")
+
+    def refresh_cache_list(self):
+        self.cache_listbox.delete(0, tk.END)
+        existing_flights = sorted(glob.glob(os.path.join(self.cache_dir, "flight_*.pkl")))
+        for path in existing_flights:
+            self.cache_listbox.insert(tk.END, os.path.basename(path))
+
+    def toggle_fullscreen(self):
+        state = not self.root.attributes('-fullscreen')
+        self.root.attributes('-fullscreen', state)
+
+    def on_speed_changed(self, val):
+        delay = int(val)
+        self.speed_lbl.config(text=f"Preview Delay: {delay} ms")
 
     def on_cache_listbox_select(self, event):
         selection = self.cache_listbox.curselection()
