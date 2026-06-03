@@ -269,7 +269,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         lastTrackedY = cy;
         
         // Zoom range matches pipeline_config.json: from size 128 down to 4 pixels (scaled dynamically by camera height relative to 600px training size)
-        float maxCropSize = (128.0f / 600.0f) * height;
+        float maxCropSize = (512.0f / 600.0f) * height;
         float minCropSize = (4.0f / 600.0f) * height;
         
         int stride = width; // rotated frame stride is width
