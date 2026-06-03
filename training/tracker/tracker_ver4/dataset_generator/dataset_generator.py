@@ -74,7 +74,6 @@ def main():
     client, world = client_mgr.connect()
     
     maps = config['carla']['maps']
-    random.shuffle(maps)
     weathers = config['carla']['weather_presets']
     
     flights_generated = len(existing_flights)
@@ -82,14 +81,19 @@ def main():
     debug_interval = config['generation']['debug_interval']
     
     sensor_mgr = None
-    last_map_load_flight = -1
+    current_loaded_map = None
     
     print(f"Starting Dataset Generation. Goal: {num_flights_target} flights.")
     
     try:
         while flights_generated < num_flights_target:
-            # Load a random map every 10 flights to save loading time
-            if (flights_generated % 10 == 0 and flights_generated != last_map_load_flight) or sensor_mgr is None:
+            # Determine target map based on sequential chunking
+            num_maps = len(maps)
+            flights_per_map = max(1, num_flights_target // num_maps)
+            map_idx = min(flights_generated // flights_per_map, num_maps - 1)
+            target_map = maps[map_idx]
+            
+            if current_loaded_map != target_map or sensor_mgr is None:
                 if sensor_mgr:
                     sensor_mgr.destroy()
                     
@@ -98,10 +102,16 @@ def main():
                         print("Error: No valid maps left to load!")
                         return
                         
-                    target_map = random.choice(maps)
+                    # Re-calculate in case the maps list shrank due to dynamic removal of invalid maps
+                    num_maps = len(maps)
+                    flights_per_map = max(1, num_flights_target // num_maps)
+                    map_idx = min(flights_generated // flights_per_map, num_maps - 1)
+                    target_map = maps[map_idx]
+                    
                     print(f"--- Loading Map: {target_map} ---")
                     try:
                         world = client_mgr.load_world(target_map)
+                        current_loaded_map = target_map
                         break
                     except RuntimeError as e:
                         print(f"Map '{target_map}' not found or crashed. Removing from rotation.")
@@ -120,8 +130,6 @@ def main():
                     continue
                 sensor_mgr.spawn_cameras(sp[0])
                 world.tick() # Initial tick to spawn
-                
-                last_map_load_flight = flights_generated
                 
             client_mgr.set_weather(random.choice(weathers))
             world.tick()
