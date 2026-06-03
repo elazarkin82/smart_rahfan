@@ -9,7 +9,7 @@ import numpy as np
 # =====================================================================
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
-def dbsz_hard_loss(y_true, y_pred):
+def dbsz_hard_loss(y_true, y_pred, c_bg=1.0):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     
@@ -22,10 +22,10 @@ def dbsz_hard_loss(y_true, y_pred):
     loss_high = tf.reduce_sum(mask_high * tf.abs(y_true - y_pred)) / n_high
     loss_low = tf.reduce_sum(mask_low * tf.square(y_true - y_pred)) / n_low
     
-    return loss_high + loss_low
+    return loss_high + c_bg * loss_low
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
-def dbsz_soft_loss(y_true, y_pred):
+def dbsz_soft_loss(y_true, y_pred, c_bg=1.0):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     
@@ -35,10 +35,10 @@ def dbsz_soft_loss(y_true, y_pred):
     loss_high = tf.reduce_sum(w_high * tf.abs(y_true - y_pred)) / (tf.reduce_sum(w_high) + 1e-5)
     loss_low = tf.reduce_sum(w_low * tf.square(y_true - y_pred)) / (tf.reduce_sum(w_low) + 1e-5)
     
-    return loss_high + loss_low
+    return loss_high + c_bg * loss_low
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
-def dbsz_relu_loss(y_true, y_pred):
+def dbsz_relu_loss(y_true, y_pred, c_bg=1.0):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     
@@ -51,7 +51,7 @@ def dbsz_relu_loss(y_true, y_pred):
     loss_high = k1 * tf.reduce_sum(w_high * tf.square(y_true - y_pred))
     loss_low = k * tf.reduce_sum(w_low * tf.square(y_true - y_pred))
     
-    return loss_high + loss_low
+    return loss_high + c_bg * loss_low
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 def adaptive_wing_loss(y_true, y_pred, alpha=2.1, omega=14.0, epsilon=1.0, theta=0.5):
@@ -293,8 +293,12 @@ class TargetTrackerVer4:
         x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up4")(x)
         x = self._inverted_residual_block(x, expansion=2, filters=8, strides=1, name_prefix="decoder_ir4")
         
-        # Final prediction heatmap
-        output_heatmap = layers.Conv2D(1, (3, 3), padding="same", activation="sigmoid", name="predicted_heatmap")(x)
+        # Final prediction heatmap (ReLU activation + Max-Only Normalization)
+        output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
+        output_heatmap = layers.Lambda(
+            lambda val: val / (tf.reduce_max(val, axis=[1, 2], keepdims=True) + 1e-7),
+            name="predicted_heatmap"
+        )(output_heatmap_raw)
         
         # 4. Heatmap-Guided Classification Branch for Output 2: Quality Score
         # Downsample predicted heatmap to (16, 16, 8) to match fused features spatial dimensions
@@ -435,7 +439,7 @@ class TargetTrackerVer4:
             
         return float(epoch_loss_avg.result()), float(epoch_hm_loss_avg.result()), float(epoch_q_loss_avg.result())
 
-    def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_heatmap="adaptive_wing", loss_quality="bce", train_mode="joint", output_path=None, best_train_loss_output=None, log_file=None):
+    def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_heatmap="adaptive_wing", loss_quality="bce", train_mode="joint", c_bg=3.0, output_path=None, best_train_loss_output=None, log_file=None):
         if loss_heatmap == "mse":
             loss_fn_heatmap = losses.MeanSquaredError()
         elif loss_heatmap == "dice_bce":
@@ -451,11 +455,11 @@ class TargetTrackerVer4:
         elif loss_heatmap == "adaptive_wing":
             loss_fn_heatmap = adaptive_wing_loss
         elif loss_heatmap == "dbsz_hard":
-            loss_fn_heatmap = dbsz_hard_loss
+            loss_fn_heatmap = lambda y_true, y_pred: dbsz_hard_loss(y_true, y_pred, c_bg=c_bg)
         elif loss_heatmap == "dbsz_soft":
-            loss_fn_heatmap = dbsz_soft_loss
+            loss_fn_heatmap = lambda y_true, y_pred: dbsz_soft_loss(y_true, y_pred, c_bg=c_bg)
         elif loss_heatmap == "dbsz_relu":
-            loss_fn_heatmap = dbsz_relu_loss
+            loss_fn_heatmap = lambda y_true, y_pred: dbsz_relu_loss(y_true, y_pred, c_bg=c_bg)
         else:
             raise ValueError(f"Unknown heatmap loss: {loss_heatmap}")
             
@@ -599,6 +603,7 @@ def main():
     parser.add_argument("--loss_heatmap", choices=["mse", "dice_bce", "focal", "focal_dice", "centernet", "centernet_dice", "adaptive_wing", "dbsz_hard", "dbsz_soft", "dbsz_relu"], default="dbsz_soft")
     parser.add_argument("--loss_quality", choices=["bce", "mse", "huber", "logcosh"], default="bce")
     parser.add_argument("--train_mode", choices=["joint", "heatmap_only", "quality_only"], default="joint", help="Training mode: heatmap_only, quality_only, or joint")
+    parser.add_argument("--c_bg", type=float, default=3.0, help="Background suppression weight factor for DBSZ losses")
     parser.add_argument("--output", type=str, default="outputs/tracker.keras")
     parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_best_train.keras")
     parser.add_argument("--init_keras_file", type=str, default=None, help="Path to initial model to resume from")
@@ -651,6 +656,7 @@ def main():
             loss_heatmap=args.loss_heatmap,
             loss_quality=args.loss_quality,
             train_mode=args.train_mode,
+            c_bg=args.c_bg,
             output_path=args.output,
             best_train_loss_output=args.best_train_loss_output,
             log_file=args.log_file

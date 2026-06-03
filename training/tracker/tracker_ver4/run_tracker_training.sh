@@ -47,14 +47,18 @@ mkdir -p outputs
 
 # Note: Batch size is determined by how the dataset was batched during the 
 # create_batched_dataset.py step.
+#
+# --c_bg 3.0: Sets the background suppression factor to 3x for DBSZ losses
+#             to reduce background noise and false positives in real-world environments.
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/dataset \
     --num_of_epochs 10 \
     --lr 1e-3 \
-    --loss_heatmap dbsz_hard \
+    --loss_heatmap dbsz_relu \
     --loss_quality bce \
     --train_mode joint \
-    --eval_pkl_num 1 \
+    --c_bg 3.0 \
+    --eval_pkl_num 	300 \
     --output outputs/tracker.keras \
     --init_keras_file outputs/tracker.keras \
     --best_train_loss_output outputs/tracker_best_train_loss.keras \
