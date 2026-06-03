@@ -80,8 +80,11 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private float targetX = 0.0f;
     private float targetY = 0.0f;
     
-    // Ver4 Inputs: 1 channel grayscale
-    private float[][][][][] refStackInput = new float[1][16][32][32][1];
+    // Ver4 Inputs: 1 channel grayscale (direct ByteBuffers to maintain tensor dimensions)
+    private java.nio.ByteBuffer refStackInputBuffer = java.nio.ByteBuffer.allocateDirect(16 * 32 * 32 * 4).order(java.nio.ByteOrder.nativeOrder());
+    private java.nio.ByteBuffer searchBuffer = java.nio.ByteBuffer.allocateDirect(256 * 256 * 4).order(java.nio.ByteOrder.nativeOrder());
+    private java.nio.ByteBuffer outputHeatmapBuffer = java.nio.ByteBuffer.allocateDirect(256 * 256 * 4).order(java.nio.ByteOrder.nativeOrder());
+    private java.nio.ByteBuffer outputQualityBuffer = java.nio.ByteBuffer.allocateDirect(4).order(java.nio.ByteOrder.nativeOrder());
 
     private Interpreter tflite;
 
@@ -271,6 +274,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         
         int stride = width; // rotated frame stride is width
         
+        refStackInputBuffer.rewind();
+        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
         for (int layer = 0; layer < 16; layer++) {
             float size = maxCropSize - layer * ((maxCropSize - minCropSize) / 15.0f);
             float half = size / 2.0f;
@@ -284,7 +289,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                     int iy = (int) Math.max(0, Math.min(height - 1, srcY));
                     
                     int pixel = yPlane[iy * stride + ix] & 0xFF;
-                    refStackInput[0][layer][y][x][0] = pixel / 255.0f;
+                    refFloatBuffer.put(layer * 32 * 32 + y * 32 + x, pixel / 255.0f);
                 }
             }
         }
@@ -378,51 +383,49 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         float[] currBuffer = new float[256 * 256];
         long preStart = SystemClock.elapsedRealtime();
         
-        // JNI extracts square crop around lastTrackedX, lastTrackedY, resizes to 256x256, and normalizes
-        MainActivity.downsampleSearchCrop(yPlane, width, height, stride, lastTrackedX, lastTrackedY, cropSize, currBuffer);
+        float cx = (float) width / 2.0f;
+        float cy = (float) height / 2.0f;
+        
+        // JNI extracts square crop around static frame center (cx, cy)
+        MainActivity.downsampleSearchCrop(yPlane, width, height, stride, cx, cy, cropSize, currBuffer);
         
         long preDuration = SystemClock.elapsedRealtime() - preStart;
 
-        float[][][][] currInput = new float[1][256][256][1];
-        for (int i = 0; i < 256 * 256; i++) {
-            int y = i / 256;
-            int x = i % 256;
-            currInput[0][y][x][0] = currBuffer[i];
-        }
+        searchBuffer.rewind();
+        searchBuffer.asFloatBuffer().put(currBuffer);
+        
+        outputHeatmapBuffer.rewind();
+        outputQualityBuffer.rewind();
 
-        Object[] inputs = new Object[]{ refStackInput, currInput };
-        float[][][][] outputHeatmap = new float[1][256][256][1];
-        float[][] outputQuality = new float[1][1];
+        Object[] inputs = new Object[]{ refStackInputBuffer, searchBuffer };
         Map<Integer, Object> outputs = new HashMap<>();
-        outputs.put(0, outputHeatmap);
-        outputs.put(1, outputQuality);
+        outputs.put(0, outputHeatmapBuffer);
+        outputs.put(1, outputQualityBuffer);
 
         long infStart = SystemClock.elapsedRealtime();
         tflite.runForMultipleInputsOutputs(inputs, outputs);
         long infDuration = SystemClock.elapsedRealtime() - infStart;
 
-        float qualityScore = outputQuality[0][0];
-        
-        // Flatten predicted heatmap for JNI processing
-        float[] flatHeatmap = new float[256 * 256];
-        for (int y = 0; y < 256; ++y) {
-            for (int x = 0; x < 256; ++x) {
-                flatHeatmap[y * 256 + x] = outputHeatmap[0][y][x][0];
-            }
-        }
+        float[] outputHeatmap = new float[256 * 256];
+        outputHeatmapBuffer.rewind();
+        outputHeatmapBuffer.asFloatBuffer().get(outputHeatmap);
+
+        float qualityScore = outputQualityBuffer.getFloat(0);
 
         long postStart = SystemClock.elapsedRealtime();
         // Calculate noise-immune sub-pixel centroid
-        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(flatHeatmap);
+        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(outputHeatmap);
         long postDuration = SystemClock.elapsedRealtime() - postStart;
         
         float px = localCoords[0]; // relative x in [0.0, 1.0] inside the crop
         float py = localCoords[1]; // relative y in [0.0, 1.0] inside the crop
         
-        // Coordinate Re-projection: Map crop-relative coordinates back to camera absolute coordinates
+        // Coordinate Re-projection: Map crop-relative coordinates back to camera absolute coordinates using static center
         float halfSize = cropSize / 2.0f;
-        float x_global = (lastTrackedX - halfSize) + px * cropSize;
-        float y_global = (lastTrackedY - halfSize) + py * cropSize;
+        float srcX_start = cx - halfSize;
+        float srcY_start = cy - halfSize;
+        float x_global = srcX_start + px * cropSize;
+        float y_global = srcY_start + py * cropSize;
 
         // Clamp target position to camera frame boundaries to keep tracking running continuously
         x_global = Math.max(0.0f, Math.min((float)width - 1.0f, x_global));
@@ -476,7 +479,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         final Bitmap fullFrameBmp = tmpBmp;
 
         // Save to cache for SeekBar scrolling redraws
-        cachedFlatHeatmap = flatHeatmap;
+        cachedFlatHeatmap = outputHeatmap;
         cachedCurrBuffer = currBuffer;
         cachedFullFrameBmp = fullFrameBmp;
         cachedPx = px;
@@ -498,7 +501,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                 }
                 
                 drawTrackingIndicator(lastTrackedX, lastTrackedY, width, height, circleColor);
-                renderDiagnostics(flatHeatmap, currBuffer, fullFrameBmp, px, py);
+                renderDiagnostics(outputHeatmap, currBuffer, fullFrameBmp, px, py);
 
                 txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
                         preDuration, infDuration, postDuration, totalDuration));
@@ -586,9 +589,10 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         // 3. Render cropHistView (the locked target reference template layer)
         Bitmap histBitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888);
         int[] histColors = new int[32 * 32];
+        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
         for (int y = 0; y < 32; y++) {
             for (int x = 0; x < 32; x++) {
-                int val = (int)(refStackInput[0][selectedHistLayer][y][x][0] * 255.0f);
+                int val = (int)(refFloatBuffer.get(selectedHistLayer * 32 * 32 + y * 32 + x) * 255.0f);
                 histColors[y * 32 + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
             }
         }

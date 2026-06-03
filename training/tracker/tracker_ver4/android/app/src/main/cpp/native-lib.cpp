@@ -184,6 +184,9 @@ Java_elazarkin_ksg_tracker4_MainActivity_calculateLocalRefinedArgmaxCentroid(
         }
     }
     
+    LOGD("JNI Argmax search: max_val=%f, max_x=%d, max_y=%d", max_val, max_x, max_y);
+    LOGD("JNI Centroid window: sum_x=%f, sum_y=%f, total_mass=%f", sum_x, sum_y, total_mass);
+    
     env->ReleaseFloatArrayElements(heatmap, hm, JNI_ABORT); // read-only
     
     // 3. Construct and return result array
@@ -198,6 +201,8 @@ Java_elazarkin_ksg_tracker4_MainActivity_calculateLocalRefinedArgmaxCentroid(
         res[0] = (float)max_x / 256.0f;
         res[1] = (float)max_y / 256.0f;
     }
+    
+    LOGD("JNI Return: res[0]=%f, res[1]=%f", res[0], res[1]);
     
     env->SetFloatArrayRegion(result, 0, 2, res);
     return result;
