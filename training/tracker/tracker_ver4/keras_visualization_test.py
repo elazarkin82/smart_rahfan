@@ -10,8 +10,11 @@ import cv2
 from PIL import Image, ImageDraw, ImageTk
 
 class KerasFCNVisualizer:
-    def __init__(self, root, dataset_dir, model_path):
+    def __init__(self, root, dataset_dir, model_path, threshold=0.5, min_blob_size=30):
         import tensorflow as tf
+        
+        self.threshold = threshold
+        self.min_blob_size = min_blob_size
         
         print(f"Loading Keras TargetTrackerVer4 from {model_path}...")
         self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
@@ -69,7 +72,7 @@ class KerasFCNVisualizer:
         panel = tk.Label(container, bg="#1a1a1a", bd=1, relief="solid", width=256, height=256)
         panel.pack()
         
-        coord_lbl = tk.Label(container, text="[N/A]", font=("Consolas", 10), bg="#121212", fg="#888888", pady=5)
+        coord_lbl = tk.Label(container, text="[N/A]", font=("Consolas", 10), bg="#121212", fg="#888888", pady=5, height=3)
         coord_lbl.pack()
         
         return panel, coord_lbl
@@ -148,6 +151,40 @@ class KerasFCNVisualizer:
             
             # Local Refined Argmax Centroid Method for sub-pixel prediction
             heatmap = pred_heatmap[:, :, 0]
+            
+            # Apply threshold filter (noise gate)
+            heatmap = np.where(heatmap >= self.threshold, heatmap, 0.0)
+            
+            # Apply connected component (blob size) filter
+            if self.min_blob_size > 0:
+                h, w = heatmap.shape
+                visited = np.zeros((h, w), dtype=bool)
+                for y in range(h):
+                    for x in range(w):
+                        if heatmap[y, x] > 0.0 and not visited[y, x]:
+                            blob_pixels = []
+                            queue = [(y, x)]
+                            visited[y, x] = True
+                            head = 0
+                            while head < len(queue):
+                                cy, cx = queue[head]
+                                head += 1
+                                blob_pixels.append((cy, cx))
+                                
+                                for dy in [-1, 0, 1]:
+                                    for dx in [-1, 0, 1]:
+                                        if dy == 0 and dx == 0:
+                                            continue
+                                        ny, nx = cy + dy, cx + dx
+                                        if 0 <= ny < h and 0 <= nx < w:
+                                            if heatmap[ny, nx] > 0.0 and not visited[ny, nx]:
+                                                visited[ny, nx] = True
+                                                queue.append((ny, nx))
+                            
+                            if len(blob_pixels) < self.min_blob_size:
+                                for cy, cx in blob_pixels:
+                                    heatmap[cy, cx] = 0.0
+            
             flat_idx = np.argmax(heatmap)
             y_max, x_max = np.unravel_index(flat_idx, heatmap.shape)
             
@@ -229,10 +266,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_dir", default="dataset/")
     parser.add_argument("--model_path", required=True)
+    parser.add_argument("--threshold", type=float, default=0.5, help="Heatmap noise threshold")
+    parser.add_argument("--min_blob_size", type=int, default=30, help="Minimum connected component size to keep")
     args = parser.parse_args()
     
     root = tk.Tk()
-    app = KerasFCNVisualizer(root, args.dataset_dir, args.model_path)
+    app = KerasFCNVisualizer(
+        root, 
+        args.dataset_dir, 
+        args.model_path, 
+        threshold=args.threshold, 
+        min_blob_size=args.min_blob_size
+    )
     root.mainloop()
 
 if __name__ == "__main__":
