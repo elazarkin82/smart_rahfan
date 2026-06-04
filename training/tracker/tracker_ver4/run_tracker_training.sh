@@ -51,6 +51,7 @@ mkdir -p outputs
 # --c_bg 3.0: Sets the background suppression factor to 3x for DBSZ losses
 #             to reduce background noise and false positives in real-world environments.
 # --dataset_dir: Can receive multiple space-separated directories (e.g. carla + real data)
+# --loss_heatmap dbsz_relu: (Default) Uses the Relu-based DBSZ loss for flat background suppression.
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/dataset_carla dataset_generator/dataset \
     --num_of_epochs 50 \

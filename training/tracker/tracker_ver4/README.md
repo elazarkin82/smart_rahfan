@@ -2,6 +2,37 @@
 
 This sub-project introduces a state-of-the-art **Lightweight Siamese-Attention** tracking architecture using a **Multi-Scale Reference Stack**, supported by a **Continuous Localization Quality** estimation branch.
 
+### Hardware & Operating Context Focus
+* **Edge Hardware Constraints**: The architecture is designed to run efficiently on low-resource single-board computers (SBCs) such as the **Rockchip Radxa Zero 3W** or **Raspberry Pi**, balancing tracking precision with low-latency execution (aiming for 20-30 FPS).
+* **Static Target Tracking**: Designed specifically to track static objects/landmarks on the terrain **without any predefined or known pattern**.
+* **3D Geometry Invariance**: Robustly maintains target lock as the apparent target geometry undergoes significant transformations due to camera approach/zoom (scale/FOV changes), translation (sideways drift), and 3D rotations (Pitch, Roll, and Yaw).
+
+---
+
+## Architectural Configuration (`model.conf`)
+
+To facilitate rapid optimization and hardware-specific tuning, the network architecture is fully parameterized via a local config file [model.conf](file:///home/elazarkin/work/projects/ksg/smart_rahfan/training/tracker/tracker_ver4/model.conf).
+
+### Configuration Options
+* **`reference_backbone` & `search_backbone`**:
+  * `mini_mnv2` (Recommended default for stack): Custom shallow MobileNetV2 with capped channel widths optimized for small inputs.
+  * `mnv2_nano` (Recommended default for search): Ultra-lightweight MobileNetV2 with low FLOP footprint.
+  * `mnv1`: Standard MobileNetV1.
+  * `mnv2`: Full MobileNetV2.
+  * `yolo5`: CSPDarknet-style backbone.
+  * `custom_legacy`: The original tracker_ver4 backbones.
+* **`width_multiplier`**: Capping or scaling factor for backbone channel widths (default: `0.5`).
+* **`attention_mechanism`**:
+  * `depthwise_corr` (Recommended default): SiamFC-style depthwise cross-correlation. Zero learnable parameters, highly parallelizable, and extremely fast on CPUs.
+  * `dot_cross`: Standard single-head dot-product cross-attention.
+  * `linear_cross`: Linearized cross-attention with $O(N)$ spatial complexity.
+  * `multi_head_cross`: Multi-head cross-attention.
+* **`decoder_type`**:
+  * `fpn_add` (Recommended default): FPN-style decoder with skip-add connections, minimizing RAM bandwidth overhead.
+  * `unet`: Classic U-Net decoder with skip-concatenations.
+  * `pixel_shuffle`: Sub-pixel convolution decoder.
+  * `light_naive`: Fast transposed convs without skip connections.
+
 ---
 
 ## Key Architectural Features

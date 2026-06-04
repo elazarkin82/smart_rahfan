@@ -420,8 +420,8 @@ class DatasetVisualizer:
         ref_target = ref_frame["target_2d"]
         
         layers = self.config.get("compiler", {}).get("stack_layers", 16)
-        max_sz = self.config.get("compiler", {}).get("crop_max_size", 128)
-        min_sz = self.config.get("compiler", {}).get("crop_min_size", 4)
+        max_sz = ref_frame.get("crop_max_size", self.config.get("compiler", {}).get("crop_max_size", 128))
+        min_sz = ref_frame.get("crop_min_size", self.config.get("compiler", {}).get("crop_min_size", 4))
         tgt_sz = self.config.get("compiler", {}).get("stack_target_size", 16)
         
         ref_stack = build_reference_stack(ref_gray, ref_target, layers, max_sz, min_sz, tgt_sz)
