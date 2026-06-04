@@ -93,7 +93,7 @@ def main():
     tgt_sz = compiler_cfg['stack_target_size']
     sigma = compiler_cfg['heatmap_sigma']
     relative_sigma = compiler_cfg.get('heatmap_relative_sigma', None)
-    neg_sample_ratio = compiler_cfg.get('negative_sample_ratio', 1.0)
+    neg_sample_ratio = compiler_cfg.get('synthetic_negative_ratio', compiler_cfg.get('negative_sample_ratio', 0.20))
     
     processed_count = 0
     
@@ -143,6 +143,33 @@ def main():
             s_crop = min(h_s, w_s)
             half = s_crop / 2.0
             
+            if target_2d is None:
+                # Natural negative frame (target is not in frame)
+                search_crop_gray = get_crop(search_frame_gray, w_s / 2.0, h_s / 2.0, s_crop)
+                search_crop = np.expand_dims(search_crop_gray, axis=-1)
+                
+                heatmap = np.zeros(search_crop.shape, dtype=np.float16)
+                
+                sample = {
+                    "reference_stack": ref_stack,
+                    "search_frame": search_crop,
+                    "ground_truth_heatmap": heatmap,
+                    "ground_truth_quality": np.array([0.0], dtype=np.float16),
+                    "metadata": {
+                        "flight_id": basename,
+                        "frame_idx": frame_dict['frame_index'],
+                        "target_2d": None,
+                        "original_target_2d": None,
+                        "true_target_2d": None,
+                        "original_true_target_2d": None,
+                        "distance": frame_dict['distance_to_target'],
+                        "shift_distance": 0.0,
+                        "is_positive": 0
+                    }
+                }
+                training_samples.append(sample)
+                continue
+                
             # 1. Crop Search Frame with central 1/8 padding jittering
             angle = np.random.uniform(0, 2 * np.pi)
             distance = np.random.uniform(0, s_crop * 0.375)
