@@ -750,19 +750,10 @@ class TargetTrackerVer4:
             predictions = self.model(inputs, training=False)
             pred_heatmap, pred_quality = predictions
             
-            # Mask out negative samples from the heatmap loss calculation
-            is_pos = tf.reshape(gt_quality, [-1]) > 0.0
-            any_pos = tf.reduce_any(is_pos)
-            
             if train_mode == "quality_only":
                 loss_heatmap = tf.constant(0.0, dtype=tf.float32)
             else:
-                if any_pos:
-                    pos_gt_heatmap = tf.boolean_mask(gt_heatmap, is_pos)
-                    pos_pred_heatmap = tf.boolean_mask(pred_heatmap, is_pos)
-                    loss_heatmap = loss_fn_heatmap(pos_gt_heatmap, pos_pred_heatmap)
-                else:
-                    loss_heatmap = tf.constant(0.0, dtype=tf.float32)
+                loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
                 
             loss_quality = loss_fn_quality(gt_quality, pred_quality)
             
@@ -799,19 +790,10 @@ class TargetTrackerVer4:
                 predictions = self.model(inputs, training=True)
                 pred_heatmap, pred_quality = predictions
                 
-                # Mask out negative samples from the heatmap loss calculation
-                is_pos = tf.reshape(gt_quality, [-1]) > 0.0
-                any_pos = tf.reduce_any(is_pos)
-                
                 if train_mode == "quality_only":
                     loss_heatmap = tf.constant(0.0, dtype=tf.float32)
                 else:
-                    if any_pos:
-                        pos_gt_heatmap = tf.boolean_mask(gt_heatmap, is_pos)
-                        pos_pred_heatmap = tf.boolean_mask(pred_heatmap, is_pos)
-                        loss_heatmap = loss_fn_heatmap(pos_gt_heatmap, pos_pred_heatmap)
-                    else:
-                        loss_heatmap = tf.constant(0.0, dtype=tf.float32)
+                    loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
                     
                 loss_quality = loss_fn_quality(gt_quality, pred_quality)
                 
@@ -1026,11 +1008,9 @@ def main():
         # File-Level Prefix Filtering based on train_mode to eliminate CPU dynamic filter overheads
         all_pkls = []
         for d in args.dataset_dir:
-            if args.train_mode == "heatmap_only":
-                all_pkls.extend(glob.glob(os.path.join(d, "batch_pos_*.pkl")))
-            elif args.train_mode == "quality_only":
+            if args.train_mode == "quality_only":
                 all_pkls.extend(glob.glob(os.path.join(d, "batch_with_negative_*.pkl")))
-            else: # joint
+            else: # joint and heatmap_only load both positive and negative batches
                 all_pkls.extend(glob.glob(os.path.join(d, "batch_pos_*.pkl")) + glob.glob(os.path.join(d, "batch_with_negative_*.pkl")))
                 
         all_pkls = sorted(all_pkls)
