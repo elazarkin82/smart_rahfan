@@ -6,7 +6,17 @@ import numpy as np
 import configparser
 
 # Save the original GroupNormalization
-_OriginalGroupNormalization = layers.GroupNormalization
+if hasattr(layers, 'GroupNormalization'):
+    _OriginalGroupNormalization = layers.GroupNormalization
+else:
+    try:
+        import tensorflow_addons as tfa
+        _OriginalGroupNormalization = tfa.layers.GroupNormalization
+    except ImportError:
+        class _OriginalGroupNormalization(layers.Layer):
+            def __init__(self, groups=8, **kwargs):
+                super().__init__(**kwargs)
+                self.groups = groups
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 class SafeGroupNormalization(_OriginalGroupNormalization):
@@ -896,6 +906,9 @@ class TargetTrackerVer4:
                 if os.path.dirname(best_train_loss_output):
                     os.makedirs(os.path.dirname(best_train_loss_output), exist_ok=True)
                 self.model.save(best_train_loss_output)
+                best_train_h5 = os.path.splitext(best_train_loss_output)[0] + ".h5"
+                self.log(f"   [TRAIN IMPROVEMENT] Saving alternate H5 format to {best_train_h5}", log_file)
+                self.model.save(best_train_h5)
             
             val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, train_mode=train_mode, steps=val_steps)
             self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} (HM: {epoch_hm:.6f}, Q: {epoch_q:.6f}) | Val Loss: {val_loss:.6f} (HM: {val_hm:.6f}, Q: {val_q:.6f})", log_file)
@@ -907,6 +920,9 @@ class TargetTrackerVer4:
                     if os.path.dirname(output_path):
                         os.makedirs(os.path.dirname(output_path), exist_ok=True)
                     self.model.save(output_path)
+                    output_h5 = os.path.splitext(output_path)[0] + ".h5"
+                    self.log(f"   [VAL IMPROVEMENT] Saving alternate H5 format to {output_h5}", log_file)
+                    self.model.save(output_h5)
 
 # =====================================================================
 # Dataset Pipeline

@@ -41,6 +41,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
     private static final int CAMERA_PERMISSION_REQUEST_CODE = 1002;
     private static final float CONFIDENCE_THRESHOLD = 0.20f;
+    private static final float HEATMAP_THRESHOLD = 0.50f;
+    private static final int MIN_BLOB_SIZE = 30;
 
     private static final int STATE_IDLE = 0;
     private static final int STATE_GATHERING = 1;
@@ -414,7 +416,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         long postStart = SystemClock.elapsedRealtime();
         // Calculate noise-immune sub-pixel centroid
-        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(outputHeatmap);
+        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(outputHeatmap, HEATMAP_THRESHOLD, MIN_BLOB_SIZE);
         long postDuration = SystemClock.elapsedRealtime() - postStart;
         
         float px = localCoords[0]; // relative x in [0.0, 1.0] inside the crop

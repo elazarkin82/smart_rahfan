@@ -54,13 +54,13 @@ mkdir -p outputs
 # --loss_heatmap dbsz_relu: (Default) Uses the Relu-based DBSZ loss for flat background suppression.
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/dataset_carla dataset_generator/dataset \
-    --num_of_epochs 50 \
+    --num_of_epochs 10 \
     --lr 1e-3 \
     --loss_heatmap dbsz_relu \
     --loss_quality bce \
     --train_mode joint \
     --c_bg 12.0 \
-    --eval_pkl_num 	300 \
+    --eval_pkl_num 	3 \
     --output outputs/tracker.keras \
     --init_keras_file outputs/tracker.keras \
     --best_train_loss_output outputs/tracker_best_train_loss.keras \

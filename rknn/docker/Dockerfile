@@ -32,13 +32,15 @@ RUN pip install --no-cache-dir --upgrade pip && \
     flatbuffers==2.0 \
     tqdm
 
-# Document how to install RKNN-Toolkit2 Wheel:
-# 1. Download the rknn-toolkit2 repository: git clone https://github.com/rockchip-linux/rknn-toolkit2.git
-# 2. Find the wheel file matching your python version (e.g., cp310 for Python 3.10) in the doc/wheel/ directory
-# 3. Copy the wheel file to the same folder as this Dockerfile and uncomment the following lines:
-#
-# COPY rknn_toolkit2-2.0.0b0-cp310-cp310-linux_x86_64.whl /tmp/
-# RUN pip install /tmp/rknn_toolkit2-*.whl && rm /tmp/rknn_toolkit2-*.whl
+# Copy the packages folder cloned by build.sh
+COPY rknn-toolkit2/rknn-toolkit2/packages/ /tmp/rknn_packages/
+
+# Dynamically detect python version and install the matching RKNN-Toolkit2 wheel
+RUN pip install /tmp/rknn_packages/rknn_toolkit2-*-$(python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")-*.whl && \
+    rm -rf /tmp/rknn_packages
+
+# Install tf2onnx at the end of the Dockerfile to preserve build cache, ensuring numpy remains in version 1.x
+RUN pip install --no-cache-dir tf2onnx "numpy<2"
 
 # Set working directory
 WORKDIR /workspace
