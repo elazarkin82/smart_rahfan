@@ -1,9 +1,9 @@
-# RKNN Model Conversion Configuration
+# RKNN Model Conversion Configuration (Keras)
 
 model:
-  name: "tracker_ver4"
-  onnx_model_path: "../training/tracker/tracker_ver4/tracker.onnx"
-  output_rknn_path: "./outputs/tracker_ver4.rknn"
+  name: "tracker_ver4_keras"
+  keras_model_path: "../../training/tracker/tracker_ver4/outputs/tracker.h5"
+  output_rknn_path: "./outputs/tracker_keras.rknn"
 
 rknn_config:
   # Target platform for Radxa Zero 3 (RK3566)
@@ -13,10 +13,6 @@ rknn_config:
   optimization_level: 3
   
   # Normalization parameters (mean and std values) for inputs.
-  # Format: [[mean_c1, mean_c2...], [std_c1, std_c2...]]
-  # Note: The model inputs are grayscale (1 channel), so we configure single channel values.
-  # For reference_stack (16, 32, 32, 1) and search_frame (256, 256, 1)
-  # The inputs are typically normalized between 0.0 and 1.0 (mean=0, std=255) or similar.
   mean_values: [[0], [0]]
   std_values: [[255], [255]]
 
@@ -33,9 +29,15 @@ quantization:
   # Quantized dtype: 'asymmetric_quantized-8' (INT8)
   quantized_dtype: "asymmetric_quantized-8"
 
-# Model Input Specifications
+# Input tensor details
 inputs:
   - name: "reference_stack"
     shape: [16, 32, 32, 1]
   - name: "search_frame"
     shape: [256, 256, 1]
+
+# Custom Keras layers/objects to load before converting to ONNX
+custom_objects:
+  - name: "SafeGroupNormalization"
+    module: "tracker_model"
+    path: "../../training/tracker/tracker_ver4"

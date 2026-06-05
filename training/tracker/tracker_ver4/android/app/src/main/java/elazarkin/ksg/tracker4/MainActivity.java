@@ -70,7 +70,9 @@ public class MainActivity extends AppCompatActivity {
      * Native JNI post-processing function that calculates the noise-immune Local Refined Argmax Centroid on the predicted heatmap.
      */
     public static native float[] calculateLocalRefinedArgmaxCentroid(
-            float[] heatmap
+            float[] heatmap,
+            float threshold,
+            int minBlobSize
     );
 
     /**
