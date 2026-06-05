@@ -7,22 +7,22 @@ import configparser
 
 # Save the original GroupNormalization
 if hasattr(layers, 'GroupNormalization'):
-    _OriginalGroupNormalization = layers.GroupNormalization
+    GroupNormClass = layers.GroupNormalization
 else:
     try:
         import tensorflow_addons as tfa
-        _OriginalGroupNormalization = tfa.layers.GroupNormalization
+        GroupNormClass = tfa.layers.GroupNormalization
     except ImportError:
-        class _OriginalGroupNormalization(layers.Layer):
+        class GroupNormClass(layers.Layer):
             def __init__(self, groups=8, **kwargs):
                 super().__init__(**kwargs)
                 self.groups = groups
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
-class SafeGroupNormalization(_OriginalGroupNormalization):
+class SafeGroupNormalization(GroupNormClass):
     def __init__(self, groups=8, **kwargs):
         self.requested_groups = groups
-        super(SafeGroupNormalization, self).__init__(groups=groups, **kwargs)
+        super().__init__(groups=groups, **kwargs)
         
     def build(self, input_shape):
         channels = input_shape[-1]
@@ -34,10 +34,58 @@ class SafeGroupNormalization(_OriginalGroupNormalization):
                         g = candidate
                         break
         self.groups = g
-        super(SafeGroupNormalization, self).build(input_shape)
+        super().build(input_shape)
 
-# Shadow the original GroupNormalization with our safe version
-layers.GroupNormalization = SafeGroupNormalization
+def get_safe_groups(channels, requested_groups=8):
+    if channels is None or requested_groups is None:
+        return 8
+    if channels % requested_groups == 0:
+        return requested_groups
+    for candidate in range(requested_groups, 0, -1):
+        if channels % candidate == 0:
+            return candidate
+    return 1
+
+def _GroupNormalization(channels, name=None, **kwargs):
+    g = get_safe_groups(channels)
+    return GroupNormClass(groups=g, name=name, **kwargs)
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+class DepthwiseCorrelationFusion(layers.Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        
+    def call(self, inputs):
+        search_feat, ref_feat = inputs
+        def corr_single(x):
+            s, r = x
+            s = tf.expand_dims(s, 0)
+            r = tf.expand_dims(r, -1)
+            out = tf.nn.depthwise_conv2d(s, r, strides=[1, 1, 1, 1], padding="SAME")
+            return out[0]
+        return tf.map_fn(corr_single, [search_feat, ref_feat], fn_output_signature=tf.float32)
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+class DepthToSpace(layers.Layer):
+    def __init__(self, block_size=2, **kwargs):
+        super().__init__(**kwargs)
+        self.block_size = block_size
+        
+    def call(self, inputs):
+        return tf.nn.depth_to_space(inputs, self.block_size)
+        
+    def get_config(self):
+        config = super().get_config()
+        config.update({"block_size": self.block_size})
+        return config
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+class HeatmapNormalization(layers.Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        
+    def call(self, inputs):
+        return inputs / (tf.reduce_max(inputs, axis=[1, 2], keepdims=True) + 1e-7)
 
 def load_model_config(config_path="model.conf"):
     config = configparser.ConfigParser()
@@ -301,17 +349,17 @@ class TargetTrackerVer4:
         # Expand
         if expansion > 1:
             x = layers.Conv2D(expansion * in_channels, (1, 1), padding="same", use_bias=False, name=f"{name_prefix}_expand")(x)
-            x = layers.GroupNormalization(groups=8, name=f"{name_prefix}_expand_gn")(x)
+            x = _GroupNormalization(expansion * in_channels, name=f"{name_prefix}_expand_gn")(x)
             x = layers.ReLU(6.0, name=f"{name_prefix}_expand_relu")(x)
             
         # Depthwise
         x = layers.DepthwiseConv2D((3, 3), strides=strides, padding="same", use_bias=False, name=f"{name_prefix}_dw")(x)
-        x = layers.GroupNormalization(groups=8, name=f"{name_prefix}_dw_gn")(x)
+        x = _GroupNormalization(expansion * in_channels, name=f"{name_prefix}_dw_gn")(x)
         x = layers.ReLU(6.0, name=f"{name_prefix}_dw_relu")(x)
         
         # Project
         x = layers.Conv2D(filters, (1, 1), padding="same", use_bias=False, name=f"{name_prefix}_project")(x)
-        x = layers.GroupNormalization(groups=8, name=f"{name_prefix}_project_gn")(x)
+        x = _GroupNormalization(filters, name=f"{name_prefix}_project_gn")(x)
         
         if strides == 1 and in_channels == filters:
             x = layers.Add(name=f"{name_prefix}_add")([inputs, x])
@@ -330,7 +378,7 @@ class TargetTrackerVer4:
         if bb_type == "mnv2_nano":
             # 1. Stride 2 -> (128, 128, 16)
             x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = layers.GroupNormalization(groups=8, name="sb_init_gn")(x1)
+            x1 = _GroupNormalization(scale_filters(16), name="sb_init_gn")(x1)
             x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
             
             # 2. Stride 4 -> (64, 64, 16)
@@ -344,49 +392,49 @@ class TargetTrackerVer4:
             
             # Final Expand to attention channels (e.g. 64)
             x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = layers.GroupNormalization(groups=8, name="sb_final_gn")(x)
+            x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
             x = layers.ReLU(6.0, name="sb_final_relu")(x)
             
         elif bb_type == "mnv1":
             # MobileNetV1 style with skip connections
             # Stride 2 -> (128, 128, 16)
             x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = layers.GroupNormalization(groups=8, name="sb_init_gn")(x1)
+            x1 = _GroupNormalization(scale_filters(16), name="sb_init_gn")(x1)
             x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
             
             # Stride 4 -> (64, 64, 24)
             x = layers.DepthwiseConv2D((3, 3), strides=2, padding="same", use_bias=False, name="sb_dw1")(x1)
-            x = layers.GroupNormalization(groups=8, name="sb_dw1_gn")(x)
+            x = _GroupNormalization(scale_filters(16), name="sb_dw1_gn")(x)
             x = layers.ReLU(6.0, name="sb_dw1_relu")(x)
             x2 = layers.Conv2D(scale_filters(24), (1, 1), padding="same", use_bias=False, name="sb_pw1")(x)
-            x2 = layers.GroupNormalization(groups=8, name="sb_pw1_gn")(x2)
+            x2 = _GroupNormalization(scale_filters(24), name="sb_pw1_gn")(x2)
             x2 = layers.ReLU(6.0, name="sb_pw1_relu")(x2)
             
             # Stride 8 -> (32, 32, 32)
             x = layers.DepthwiseConv2D((3, 3), strides=2, padding="same", use_bias=False, name="sb_dw2")(x2)
-            x = layers.GroupNormalization(groups=8, name="sb_dw2_gn")(x)
+            x = _GroupNormalization(scale_filters(24), name="sb_dw2_gn")(x)
             x = layers.ReLU(6.0, name="sb_dw2_relu")(x)
             x3 = layers.Conv2D(scale_filters(32), (1, 1), padding="same", use_bias=False, name="sb_pw2")(x)
-            x3 = layers.GroupNormalization(groups=8, name="sb_pw2_gn")(x3)
+            x3 = _GroupNormalization(scale_filters(32), name="sb_pw2_gn")(x3)
             x3 = layers.ReLU(6.0, name="sb_pw2_relu")(x3)
             
             # Stride 16 -> (16, 16, 64)
             x = layers.DepthwiseConv2D((3, 3), strides=2, padding="same", use_bias=False, name="sb_dw3")(x3)
-            x = layers.GroupNormalization(groups=8, name="sb_dw3_gn")(x)
+            x = _GroupNormalization(scale_filters(32), name="sb_dw3_gn")(x)
             x = layers.ReLU(6.0, name="sb_dw3_relu")(x)
             x4 = layers.Conv2D(scale_filters(64), (1, 1), padding="same", use_bias=False, name="sb_pw3")(x)
-            x4 = layers.GroupNormalization(groups=8, name="sb_pw3_gn")(x4)
+            x4 = _GroupNormalization(scale_filters(64), name="sb_pw3_gn")(x4)
             x4 = layers.ReLU(6.0, name="sb_pw3_relu")(x4)
             
             # Final Expand
             x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = layers.GroupNormalization(groups=8, name="sb_final_gn")(x)
+            x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
             x = layers.ReLU(6.0, name="sb_final_relu")(x)
             
         elif bb_type == "mnv2":
             # Full MobileNetV2
             x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = layers.GroupNormalization(groups=8, name="sb_init_gn")(x1)
+            x1 = _GroupNormalization(scale_filters(16), name="sb_init_gn")(x1)
             x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
             
             x2 = self._inverted_residual_block(x1, expansion=2, filters=scale_filters(24), strides=2, name_prefix="sb_ir1")
@@ -394,40 +442,40 @@ class TargetTrackerVer4:
             x4 = self._inverted_residual_block(x3, expansion=4, filters=scale_filters(64), strides=2, name_prefix="sb_ir3")
             
             x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = layers.GroupNormalization(groups=8, name="sb_final_gn")(x)
+            x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
             x = layers.ReLU(6.0, name="sb_final_relu")(x)
             
         elif bb_type == "yolo5":
             # YOLOv5-style CSP blocks
             # Stride 2 -> (128, 128, 16)
             x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = layers.GroupNormalization(groups=8, name="sb_init_gn")(x1)
+            x1 = _GroupNormalization(scale_filters(16), name="sb_init_gn")(x1)
             x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
             
             # Stride 4 -> (64, 64, 24)
             x2 = layers.Conv2D(scale_filters(24), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ir1_conv")(x1)
-            x2 = layers.GroupNormalization(groups=8, name="sb_ir1_gn")(x2)
+            x2 = _GroupNormalization(scale_filters(24), name="sb_ir1_gn")(x2)
             x2 = layers.ReLU(6.0, name="sb_ir1_relu")(x2)
             
             # Stride 8 -> (32, 32, 32)
             x3 = layers.Conv2D(scale_filters(32), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ir2_conv")(x2)
-            x3 = layers.GroupNormalization(groups=8, name="sb_ir2_gn")(x3)
+            x3 = _GroupNormalization(scale_filters(32), name="sb_ir2_gn")(x3)
             x3 = layers.ReLU(6.0, name="sb_ir2_relu")(x3)
             
             # Stride 16 -> (16, 16, 64)
             x4 = layers.Conv2D(scale_filters(64), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ir3_conv")(x3)
-            x4 = layers.GroupNormalization(groups=8, name="sb_ir3_gn")(x4)
+            x4 = _GroupNormalization(scale_filters(64), name="sb_ir3_gn")(x4)
             x4 = layers.ReLU(6.0, name="sb_ir3_relu")(x4)
             
             # Final Expand
             x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = layers.GroupNormalization(groups=8, name="sb_final_gn")(x)
+            x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
             x = layers.ReLU(6.0, name="sb_final_relu")(x)
             
         else: # custom_legacy
             # Init conv (strides=2) -> (128, 128, 16)
             x1 = layers.Conv2D(16, (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = layers.GroupNormalization(groups=8, name="sb_init_gn")(x1)
+            x1 = _GroupNormalization(16, name="sb_init_gn")(x1)
             x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
             
             # IR Block 1 (strides=2) -> (64, 64, 24)
@@ -441,7 +489,7 @@ class TargetTrackerVer4:
             
             # Final Expand -> (16, 16, 128)
             x = layers.Conv2D(128, (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = layers.GroupNormalization(groups=8, name="sb_final_gn")(x)
+            x = _GroupNormalization(128, name="sb_final_gn")(x)
             x = layers.ReLU(6.0, name="sb_final_relu")(x)
             
         return models.Model(inputs, [x1, x2, x3, x], name="search_feature_extractor")
@@ -463,7 +511,7 @@ class TargetTrackerVer4:
             
         if bb_type == "mini_mnv2":
             x = layers.Conv2D(scale_filters(16), (3, 3), strides=1, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_init_gn")(x)
+            x = _GroupNormalization(scale_filters(16), name="ref_init_gn")(x)
             x = layers.ReLU(6.0, name="ref_init_relu")(x)
             
             x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(24), strides=2, name_prefix="ref_ir1")
@@ -471,64 +519,64 @@ class TargetTrackerVer4:
             
             out_channels = scale_filters(128)
             x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_final_gn")(x)
+            x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
             x = layers.ReLU(6.0, name="ref_final_relu")(x)
             
         elif bb_type == "mnv1":
             x = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_init_gn")(x)
+            x = _GroupNormalization(scale_filters(16), name="ref_init_gn")(x)
             x = layers.ReLU(6.0, name="ref_init_relu")(x)
             
             x = layers.DepthwiseConv2D((3, 3), strides=2, padding="same", use_bias=False, name="ref_dw1")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_dw1_gn")(x)
+            x = _GroupNormalization(scale_filters(16), name="ref_dw1_gn")(x)
             x = layers.ReLU(6.0, name="ref_dw1_relu")(x)
             x = layers.Conv2D(scale_filters(32), (1, 1), padding="same", use_bias=False, name="ref_pw1")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_pw1_gn")(x)
+            x = _GroupNormalization(scale_filters(32), name="ref_pw1_gn")(x)
             x = layers.ReLU(6.0, name="ref_pw1_relu")(x)
             
             out_channels = scale_filters(128)
             x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_final_gn")(x)
+            x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
             x = layers.ReLU(6.0, name="ref_final_relu")(x)
             
         elif bb_type == "mnv2":
             x = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_init_gn")(x)
+            x = _GroupNormalization(scale_filters(16), name="ref_init_gn")(x)
             x = layers.ReLU(6.0, name="ref_init_relu")(x)
             
             x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(32), strides=2, name_prefix="ref_ir1")
             
             out_channels = scale_filters(128)
             x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_final_gn")(x)
+            x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
             x = layers.ReLU(6.0, name="ref_final_relu")(x)
             
         elif bb_type == "yolo5":
             x = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_init_gn")(x)
+            x = _GroupNormalization(scale_filters(16), name="ref_init_gn")(x)
             x = layers.ReLU(6.0, name="ref_init_relu")(x)
             
             c_half = scale_filters(16)
             x1 = layers.Conv2D(c_half, (1, 1), padding="same", use_bias=False, name="ref_csp1")(x)
             x2 = layers.Conv2D(c_half, (1, 1), padding="same", use_bias=False, name="ref_csp2")(x)
             x1 = layers.Conv2D(c_half, (3, 3), strides=2, padding="same", use_bias=False, name="ref_csp_conv")(x1)
-            x1 = layers.GroupNormalization(groups=8, name="ref_csp_gn")(x1)
+            x1 = _GroupNormalization(c_half, name="ref_csp_gn")(x1)
             x1 = layers.ReLU(6.0, name="ref_csp_relu")(x1)
             x2 = layers.AveragePooling2D(pool_size=2, name="ref_csp_pool")(x2)
             
             x = layers.Concatenate(axis=-1, name="ref_csp_cat")([x1, x2])
             out_channels = scale_filters(128)
             x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_final_gn")(x)
+            x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
             x = layers.ReLU(6.0, name="ref_final_relu")(x)
             
         else: # custom_legacy
             x = layers.Conv2D(32, (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_init_gn")(x)
+            x = _GroupNormalization(32, name="ref_init_gn")(x)
             x = layers.ReLU(6.0, name="ref_init_relu")(x)
             x = self._inverted_residual_block(x, expansion=2, filters=64, strides=2, name_prefix="ref_ir1")
             x = layers.Conv2D(128, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = layers.GroupNormalization(groups=8, name="ref_final_gn")(x)
+            x = _GroupNormalization(128, name="ref_final_gn")(x)
             x = layers.ReLU(6.0, name="ref_final_relu")(x)
             
         return models.Model(inputs, x, name="reference_target_encoder")
@@ -556,17 +604,7 @@ class TargetTrackerVer4:
         
         # 2. Attention Fusion
         if attn_mech == "depthwise_corr":
-            def depthwise_correlation(x_inputs):
-                search_feat, ref_feat = x_inputs
-                def corr_single(inputs):
-                    s, r = inputs
-                    s = tf.expand_dims(s, 0)
-                    r = tf.expand_dims(r, -1)
-                    out = tf.nn.depthwise_conv2d(s, r, strides=[1, 1, 1, 1], padding="SAME")
-                    return out[0]
-                return tf.map_fn(corr_single, [search_feat, ref_feat], fn_output_signature=tf.float32)
-                
-            fused_features = layers.Lambda(depthwise_correlation, name="depthwise_correlation_fusion")([search_features, ref_features])
+            fused_features = DepthwiseCorrelationFusion(name="depthwise_correlation_fusion")([search_features, ref_features])
             c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
             
         elif attn_mech == "linear_cross":
@@ -611,7 +649,7 @@ class TargetTrackerVer4:
             v_flat = layers.Reshape((64, c_v), name="v_flat")(v_proj)
             
             attn_weights = layers.Dot(axes=(2, 2), name="attention_dot")([q_flat, k_flat])
-            attn_weights = layers.Lambda(lambda x: x / tf.math.sqrt(tf.cast(c_qk, tf.float32)), name="attention_scale")(attn_weights)
+            attn_weights = layers.Rescaling(scale=1.0 / np.sqrt(c_qk), name="attention_scale")(attn_weights)
             attn_weights = layers.Softmax(axis=-1, name="attention_softmax")(attn_weights)
             
             fused_flat = layers.Dot(axes=(2, 1), name="attention_value_dot")([attn_weights, v_flat])
@@ -643,9 +681,9 @@ class TargetTrackerVer4:
             def pixel_shuffle_block(inputs, out_filters, name_prefix):
                 ps_c = out_filters * 4
                 x_ps = layers.Conv2D(ps_c, (3, 3), padding="same", use_bias=False, name=f"{name_prefix}_ps_conv")(inputs)
-                x_ps = layers.GroupNormalization(groups=8, name=f"{name_prefix}_ps_gn")(x_ps)
+                x_ps = _GroupNormalization(ps_c, name=f"{name_prefix}_ps_gn")(x_ps)
                 x_ps = layers.ReLU(6.0, name=f"{name_prefix}_ps_relu")(x_ps)
-                x_ps = layers.Lambda(lambda val: tf.nn.depth_to_space(val, block_size=2), name=f"{name_prefix}_ps_shuffle")(x_ps)
+                x_ps = DepthToSpace(block_size=2, name=f"{name_prefix}_ps_shuffle")(x_ps)
                 return x_ps
                 
             x = pixel_shuffle_block(fused_features, scale_filters(64) if bb_type != "custom_legacy" else 64, "decoder1")
@@ -663,20 +701,24 @@ class TargetTrackerVer4:
             x = pixel_shuffle_block(x, scale_filters(8) if bb_type != "custom_legacy" else 8, "decoder4")
             
         elif dec_type == "light_naive":
-            x = layers.Conv2DTranspose(scale_filters(64) if bb_type != "custom_legacy" else 64, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up1")(fused_features)
-            x = layers.GroupNormalization(groups=8, name="decoder_up1_gn")(x)
+            c_up1 = scale_filters(64) if bb_type != "custom_legacy" else 64
+            x = layers.Conv2DTranspose(c_up1, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up1")(fused_features)
+            x = _GroupNormalization(c_up1, name="decoder_up1_gn")(x)
             x = layers.ReLU(6.0, name="decoder_up1_relu")(x)
             
-            x = layers.Conv2DTranspose(scale_filters(32) if bb_type != "custom_legacy" else 32, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up2")(x)
-            x = layers.GroupNormalization(groups=8, name="decoder_up2_gn")(x)
+            c_up2 = scale_filters(32) if bb_type != "custom_legacy" else 32
+            x = layers.Conv2DTranspose(c_up2, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up2")(x)
+            x = _GroupNormalization(c_up2, name="decoder_up2_gn")(x)
             x = layers.ReLU(6.0, name="decoder_up2_relu")(x)
             
-            x = layers.Conv2DTranspose(scale_filters(16) if bb_type != "custom_legacy" else 16, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up3")(x)
-            x = layers.GroupNormalization(groups=8, name="decoder_up3_gn")(x)
+            c_up3 = scale_filters(16) if bb_type != "custom_legacy" else 16
+            x = layers.Conv2DTranspose(c_up3, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up3")(x)
+            x = _GroupNormalization(c_up3, name="decoder_up3_gn")(x)
             x = layers.ReLU(6.0, name="decoder_up3_relu")(x)
             
-            x = layers.Conv2DTranspose(scale_filters(8) if bb_type != "custom_legacy" else 8, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up4")(x)
-            x = layers.GroupNormalization(groups=8, name="decoder_up4_gn")(x)
+            c_up4 = scale_filters(8) if bb_type != "custom_legacy" else 8
+            x = layers.Conv2DTranspose(c_up4, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up4")(x)
+            x = _GroupNormalization(c_up4, name="decoder_up4_gn")(x)
             x = layers.ReLU(6.0, name="decoder_up4_relu")(x)
             
         else: # unet
@@ -697,10 +739,7 @@ class TargetTrackerVer4:
             
         # Final prediction heatmap
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
-        output_heatmap = layers.Lambda(
-            lambda val: val / (tf.reduce_max(val, axis=[1, 2], keepdims=True) + 1e-7),
-            name="predicted_heatmap"
-        )(output_heatmap_raw)
+        output_heatmap = HeatmapNormalization(name="predicted_heatmap")(output_heatmap_raw)
         
         # 4. Heatmap-Guided Classification Branch
         hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap)
@@ -709,11 +748,11 @@ class TargetTrackerVer4:
         q_fused = layers.Concatenate(axis=-1, name="quality_fusion")([fused_features, hm_pool])
         
         q = layers.Conv2D(64, (3, 3), strides=2, padding="same", use_bias=False, name="quality_conv1")(q_fused)
-        q = layers.GroupNormalization(groups=8, name="quality_gn1")(q)
+        q = _GroupNormalization(64, name="quality_gn1")(q)
         q = layers.ReLU(6.0, name="quality_relu1")(q)
         
         q = layers.Conv2D(32, (3, 3), strides=2, padding="same", use_bias=False, name="quality_conv2")(q)
-        q = layers.GroupNormalization(groups=8, name="quality_gn2")(q)
+        q = _GroupNormalization(32, name="quality_gn2")(q)
         q = layers.ReLU(6.0, name="quality_relu2")(q)
         
         q = layers.GlobalAveragePooling2D(name="quality_gap")(q)
