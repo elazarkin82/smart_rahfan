@@ -189,11 +189,8 @@ def main():
                 sample_sigma = sigma
             heatmap = generate_heatmap(search_crop.shape, local_target_2d, sample_sigma)
             
-            # Relaxed continuous quality score based on spatial offset
-            if distance <= 4.0:
-                quality_score = 1.0 - distance * 0.02
-            else:
-                quality_score = 0.9 * np.exp(-(distance - 4.0) / 48.0)
+            # Heatmap target is in frame, so quality is 1.0 (binary indicator of target presence)
+            quality_score = 1.0
             
             sample = {
                 "reference_stack": ref_stack,               # Shape: (16, 32, 32, 1)
@@ -213,61 +210,6 @@ def main():
                 }
             }
             training_samples.append(sample)
-            
-            frame_idx = frame_dict['frame_index']
-            if frame_idx % 3 == 0:
-                angle = np.random.uniform(0, 2 * np.pi)
-                distance = np.random.uniform(0, 30.0)
-                
-                dx = distance * np.cos(angle)
-                dy = distance * np.sin(angle)
-                
-                shifted_x = target_2d[0] + dx
-                shifted_y = target_2d[1] + dy
-                
-                # Check if shifted target falls out of bounds of the original image
-                out_of_bounds = (shifted_x < 0 or shifted_x >= w_s or shifted_y < 0 or shifted_y >= h_s)
-                
-                # Relaxed continuous quality score based on spatial offset
-                if out_of_bounds:
-                    quality_score = 0.0
-                elif distance <= 4.0:
-                    quality_score = 1.0 - distance * 0.02
-                else:
-                    quality_score = 0.9 * np.exp(-(distance - 4.0) / 48.0)
-                
-                # Crop Search Frame centered around the shifted coordinate
-                search_crop_gray_jittered = get_crop(search_frame_gray, shifted_x, shifted_y, s_crop)
-                search_crop_jittered = np.expand_dims(search_crop_gray_jittered, axis=-1)
-                
-                # Calculate where the true target is in this shifted crop space
-                x1_shifted = int(round(shifted_x - half))
-                y1_shifted = int(round(shifted_y - half))
-                local_true_x = target_2d[0] - x1_shifted
-                local_true_y = target_2d[1] - y1_shifted
-                local_true_target = (local_true_x, local_true_y)
-                
-                # Generate shifted heatmap centered at the TRUE target coordinate in cropped space
-                heatmap_shifted = generate_heatmap(search_crop_jittered.shape, local_true_target, sample_sigma)
-                
-                sample_jittered = {
-                    "reference_stack": ref_stack,
-                    "search_frame": search_crop_jittered,
-                    "ground_truth_heatmap": heatmap_shifted.astype(np.float16),
-                    "ground_truth_quality": np.array([quality_score], dtype=np.float16),
-                    "metadata": {
-                        "flight_id": basename,
-                        "frame_idx": frame_idx,
-                        "target_2d": local_true_target,
-                        "original_target_2d": (shifted_x, shifted_y),
-                        "true_target_2d": (local_true_x, local_true_y),
-                        "original_true_target_2d": target_2d,
-                        "distance": frame_dict['distance_to_target'],
-                        "shift_distance": distance,
-                        "is_positive": 2 # 2 indicates synthetic jittered quality sample
-                    }
-                }
-                training_samples.append(sample_jittered)
             
             # 2b. Negative Pair: target from flight i is NOT present in flight j
             if neg_flight_data is not None and len(neg_flight_data) > 1 and np.random.uniform(0, 1) < neg_sample_ratio:

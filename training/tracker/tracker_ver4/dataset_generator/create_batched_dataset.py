@@ -81,40 +81,45 @@ def main():
     random.shuffle(neg_pool)
 
     batch_size = args.batch_size
-    batch_idx = 0
-
-    # A. Generate purely positive batches: batch_pos_*.pkl
-    # We will use all available positive samples to build pure positive batches
-    print("Creating purely positive batches...")
-    num_pos_batches = len(pos_pool) // batch_size
-    for i in range(num_pos_batches):
-        batch_samples = pos_pool[i * batch_size : (i + 1) * batch_size]
-        batch_path = os.path.join(args.output_dir, f"batch_pos_{batch_idx:04d}.pkl")
-        with open(batch_path, 'wb') as f:
-            pickle.dump(batch_samples, f)
-        batch_idx += 1
-
-    # B. Generate 50-50 balanced mixed batches: batch_with_negative_*.pkl
-    # Each mixed batch contains exactly batch_size/2 positives and batch_size/2 negatives
-    print("Creating 50-50 balanced mixed batches...")
-    half_batch = batch_size // 2
-    num_mixed_batches = min(len(pos_pool) // half_batch, len(neg_pool) // half_batch)
+    total_samples = len(pos_pool) + len(neg_pool)
     
-    mixed_idx = 0
-    for i in range(num_mixed_batches):
-        pos_sub = pos_pool[i * half_batch : (i + 1) * half_batch]
-        neg_sub = neg_pool[i * half_batch : (i + 1) * half_batch]
+    if total_samples == 0:
+        print("Error: No samples found.")
+        return
+
+    # Calculate optimal positive/negative split per batch based on global ratio
+    num_pos_per_batch = int(round(batch_size * (len(pos_pool) / total_samples)))
+    num_pos_per_batch = max(0, min(batch_size, num_pos_per_batch))
+    num_neg_per_batch = batch_size - num_pos_per_batch
+
+    print(f"Batch configuration: {num_pos_per_batch} positives and {num_neg_per_batch} negatives per batch (size {batch_size}).")
+
+    # Determine maximum number of full batches we can make
+    num_batches = 0
+    if num_pos_per_batch > 0 and num_neg_per_batch > 0:
+        num_batches = min(len(pos_pool) // num_pos_per_batch, len(neg_pool) // num_neg_per_batch)
+    elif num_pos_per_batch > 0:
+        num_batches = len(pos_pool) // batch_size
+    elif num_neg_per_batch > 0:
+        num_batches = len(neg_pool) // batch_size
+
+    print(f"Generating {num_batches} homogeneous batches...")
+    
+    for i in tqdm.tqdm(range(num_batches), desc="Creating Batches"):
+        batch_samples = []
+        if num_pos_per_batch > 0:
+            batch_samples.extend(pos_pool[i * num_pos_per_batch : (i + 1) * num_pos_per_batch])
+        if num_neg_per_batch > 0:
+            batch_samples.extend(neg_pool[i * num_neg_per_batch : (i + 1) * num_neg_per_batch])
         
-        # Combine and shuffle within the batch
-        batch_samples = pos_sub + neg_sub
+        # Shuffle internally to mix positive/negative positions within the batch
         random.shuffle(batch_samples)
         
-        batch_path = os.path.join(args.output_dir, f"batch_with_negative_{mixed_idx:04d}.pkl")
+        batch_path = os.path.join(args.output_dir, f"batch_{i:04d}.pkl")
         with open(batch_path, 'wb') as f:
             pickle.dump(batch_samples, f)
-        mixed_idx += 1
-        
-    print(f"Done! {batch_idx} pure positive batches (batch_pos_*.pkl) and {mixed_idx} mixed batches (batch_with_negative_*.pkl) successfully created.")
+            
+    print(f"Done! {num_batches} homogeneous batched files (batch_*.pkl) successfully created.")
 
 if __name__ == "__main__":
     main()

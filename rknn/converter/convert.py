@@ -66,8 +66,8 @@ def main():
                     except Exception as imp_err:
                         print(f"[WARNING] Could not dynamically import {name} from {module_name}: {imp_err}")
 
-            # Load Keras model without compilation
-            keras_model = tf.keras.models.load_model(keras_path, compile=False, custom_objects=custom_objs)
+            # Load Keras model without compilation (using safe_mode=False to allow lambda layers)
+            keras_model = tf.keras.models.load_model(keras_path, compile=False, custom_objects=custom_objs, safe_mode=False)
             
             # Build TensorSpecs for conversion (prepending batch dimension None)
             input_specs = []

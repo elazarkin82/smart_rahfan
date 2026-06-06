@@ -844,6 +844,13 @@ class TargetTrackerVer4:
                 else:
                     loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
                     
+                # TODO (Future Dynamic Quality Training):
+                # When train_mode is 'quality_only', the ground truth quality label should be computed dynamically
+                # based on the accuracy of the predicted heatmap compared to the true target coordinate:
+                # 1. Find the coordinates of the peak intensity (hot point) in pred_heatmap.
+                # 2. Calculate the distance between the predicted peak and the ground truth target coordinate.
+                # 3. Define the target quality dynamically: 1.0 if distance is within tolerance, else 0.0 or a decaying score.
+                # 4. Compute loss_quality using this dynamic target quality score instead of the static gt_quality.
                 loss_quality = loss_fn_quality(gt_quality, pred_quality)
                 
                 if train_mode == "heatmap_only":
@@ -945,9 +952,6 @@ class TargetTrackerVer4:
                 if os.path.dirname(best_train_loss_output):
                     os.makedirs(os.path.dirname(best_train_loss_output), exist_ok=True)
                 self.model.save(best_train_loss_output)
-                best_train_h5 = os.path.splitext(best_train_loss_output)[0] + ".h5"
-                self.log(f"   [TRAIN IMPROVEMENT] Saving alternate H5 format to {best_train_h5}", log_file)
-                self.model.save(best_train_h5)
             
             val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, train_mode=train_mode, steps=val_steps)
             self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} (HM: {epoch_hm:.6f}, Q: {epoch_q:.6f}) | Val Loss: {val_loss:.6f} (HM: {val_hm:.6f}, Q: {val_q:.6f})", log_file)
@@ -959,9 +963,6 @@ class TargetTrackerVer4:
                     if os.path.dirname(output_path):
                         os.makedirs(os.path.dirname(output_path), exist_ok=True)
                     self.model.save(output_path)
-                    output_h5 = os.path.splitext(output_path)[0] + ".h5"
-                    self.log(f"   [VAL IMPROVEMENT] Saving alternate H5 format to {output_h5}", log_file)
-                    self.model.save(output_h5)
 
 # =====================================================================
 # Dataset Pipeline
@@ -1063,10 +1064,7 @@ def main():
         # File-Level Prefix Filtering based on train_mode to eliminate CPU dynamic filter overheads
         all_pkls = []
         for d in args.dataset_dir:
-            if args.train_mode == "quality_only":
-                all_pkls.extend(glob.glob(os.path.join(d, "batch_with_negative_*.pkl")))
-            else: # joint and heatmap_only load both positive and negative batches
-                all_pkls.extend(glob.glob(os.path.join(d, "batch_pos_*.pkl")) + glob.glob(os.path.join(d, "batch_with_negative_*.pkl")))
+            all_pkls.extend(glob.glob(os.path.join(d, "batch_*.pkl")))
                 
         all_pkls = sorted(all_pkls)
         if not all_pkls:
