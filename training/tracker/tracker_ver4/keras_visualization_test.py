@@ -22,6 +22,7 @@ class KerasFCNVisualizer:
         
         print(f"Loading Keras TargetTrackerVer4 from {model_path}...")
         self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+        self.model.summary()
         
         self.dataset_dir = dataset_dir
         if not os.path.exists(self.dataset_dir):
@@ -41,7 +42,7 @@ class KerasFCNVisualizer:
         
         self.root = root
         self.root.title("TargetTrackerVer4 - Live Inference Visualizer")
-        self.root.geometry("1150x500")
+        self.root.geometry("1430x500")
         self.root.configure(bg="#121212")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -91,7 +92,8 @@ class KerasFCNVisualizer:
         self.ref_panel, self.ref_lbl = self.create_frame_slot(self.frames_frame, "Reference Features")
         self.search_panel, self.search_lbl = self.create_frame_slot(self.frames_frame, "Search Frame")
         self.expected_heatmap_panel, self.expected_heatmap_lbl = self.create_frame_slot(self.frames_frame, "Expected Heatmap")
-        self.predicted_heatmap_panel, self.predicted_heatmap_lbl = self.create_frame_slot(self.frames_frame, "Predicted Heatmap")
+        self.raw_predicted_heatmap_panel, self.raw_predicted_heatmap_lbl = self.create_frame_slot(self.frames_frame, "Raw Prediction")
+        self.predicted_heatmap_panel, self.predicted_heatmap_lbl = self.create_frame_slot(self.frames_frame, "Filtered Prediction")
         
         self.status_bar = tk.Label(self.root, text="Press [Space] for Next Sample", font=("Inter", 10), bg="#1c1c1c", fg="#aaaaaa", anchor="w", padx=15, pady=8)
         self.status_bar.pack(side="bottom", fill="x")
@@ -154,6 +156,7 @@ class KerasFCNVisualizer:
             pred_quality = pred[1].numpy()[0][0]  # scalar float
             
             # Local Refined Argmax Centroid Method for sub-pixel prediction
+            raw_heatmap = pred_heatmap[:, :, 0].copy()
             heatmap = pred_heatmap[:, :, 0]
             
             # Apply threshold filter (noise gate)
@@ -234,6 +237,11 @@ class KerasFCNVisualizer:
             gt_heatmap_color_rgb = cv2.cvtColor(gt_heatmap_color, cv2.COLOR_BGR2RGB)
             self.tk_img_expected = ImageTk.PhotoImage(Image.fromarray(gt_heatmap_color_rgb))
             
+            # Prepare raw predicted heatmap
+            raw_heatmap_color = cv2.applyColorMap((raw_heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
+            raw_heatmap_color_rgb = cv2.cvtColor(raw_heatmap_color, cv2.COLOR_BGR2RGB)
+            self.tk_img_raw_predicted = ImageTk.PhotoImage(Image.fromarray(raw_heatmap_color_rgb))
+            
             # Prepare clean raw predicted heatmap
             heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
             heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
@@ -242,6 +250,7 @@ class KerasFCNVisualizer:
             self.ref_panel.config(image=self.tk_img_ref)
             self.search_panel.config(image=self.tk_img_search)
             self.expected_heatmap_panel.config(image=self.tk_img_expected)
+            self.raw_predicted_heatmap_panel.config(image=self.tk_img_raw_predicted)
             self.predicted_heatmap_panel.config(image=self.tk_img_predicted)
             
             self.ref_lbl.config(text="Target Features")
@@ -254,6 +263,7 @@ class KerasFCNVisualizer:
                 error_str = "Error: N/A"
             
             self.expected_heatmap_lbl.config(text="GT Heatmap")
+            self.raw_predicted_heatmap_lbl.config(text="Raw Predicted HM")
             self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {pred_quality:.2f}", fg="#33ff33")
             
             self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
