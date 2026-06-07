@@ -108,6 +108,7 @@ def main():
     rot_pitch_amp = noise_cfg.get('rot_pitch_amp', 0.5)
     rot_yaw_amp = noise_cfg.get('rot_yaw_amp', 0.5)
     rot_roll_amp = noise_cfg.get('rot_roll_amp', 1.0)
+    altitude_range = config['generation'].get('altitude_range', [20.0, 60.0])
     debug_interval = config['generation']['debug_interval']
     
     sensor_mgr = None
@@ -185,9 +186,18 @@ def main():
             spawn_points = world.get_map().get_spawn_points()
             start_point = random.choice(spawn_points)
             
-            # Elevate and pitch down randomly
-            start_point.location.z += random.uniform(20.0, 60.0)
-            start_point.rotation.pitch = random.uniform(-60.0, -10.0)
+            # Sample random altitude and pitch dynamically
+            flight_altitude = random.uniform(altitude_range[0], altitude_range[1])
+            alt_min, alt_max = altitude_range[0], altitude_range[1]
+            alt_diff = (alt_max - alt_min) if (alt_max > alt_min) else 1.0
+            norm_alt = (flight_altitude - alt_min) / alt_diff
+            
+            pitch_min = lerp(-15.0, -60.0, norm_alt)
+            pitch_max = lerp(-5.0, -20.0, norm_alt)
+            flight_pitch = random.uniform(pitch_min, pitch_max)
+            
+            start_point.location.z += flight_altitude
+            start_point.rotation.pitch = flight_pitch
             start_point.rotation.yaw += random.uniform(-180.0, 180.0)
             start_point.rotation.roll = 0.0
             
@@ -212,28 +222,40 @@ def main():
             if rgb_array is None or depth_array is None:
                 continue
                 
-            # Pick a random pixel in the middle 50% of the screen
+            # Pick a random pixel in the middle 50% of the screen and try up to 100 times in the same frame
             margin_x = int(width * 0.25)
             margin_y = int(height * 0.25)
-            px = random.randint(margin_x, width - margin_x)
-            py = random.randint(margin_y, height - margin_y)
             
-            # Check texture diversity around the selected pixel to avoid flat/homogeneous areas (e.g. sky or smooth road)
-            if min_texture_std > 0:
-                patch = rgb_array[max(0, py-7):min(height, py+8), max(0, px-7):min(width, px+8)]
-                patch_gray = cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY)
-                texture_std = np.std(patch_gray)
-                if texture_std < min_texture_std:
-                    continue # Discard low-texture target
-            
-            target_3d = get_3d_world_from_pixel(px, py, depth_array, K, rgb_transform)
-            if target_3d is None:
-                continue # Sky or invalid
+            found_target = False
+            for _ in range(100):
+                px = random.randint(margin_x, width - margin_x)
+                py = random.randint(margin_y, height - margin_y)
                 
-            # Check distance
-            dist = np.linalg.norm(target_3d - np.array([start_point.location.x, start_point.location.y, start_point.location.z]))
-            if dist < 30.0 or dist > 150.0:
-                continue
+                # Check texture diversity around the selected pixel to avoid flat/homogeneous areas (e.g. sky or smooth road)
+                if min_texture_std > 0:
+                    patch = rgb_array[max(0, py-7):min(height, py+8), max(0, px-7):min(width, px+8)]
+                    patch_gray = cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY)
+                    texture_std = np.std(patch_gray)
+                    if texture_std < min_texture_std:
+                        continue # Try another pixel in this frame
+                
+                target_3d = get_3d_world_from_pixel(px, py, depth_array, K, rgb_transform)
+                if target_3d is None:
+                    continue # Try another pixel in this frame
+                    
+                # Check distance dynamically based on flight altitude
+                min_allowed_dist = 0.96 * flight_altitude + 1.0
+                max_allowed_dist = min(200.0, 6.6 * flight_altitude + 2.0)
+                
+                dist = np.linalg.norm(target_3d - np.array([start_point.location.x, start_point.location.y, start_point.location.z]))
+                if dist < min_allowed_dist or dist > max_allowed_dist:
+                    continue # Try another pixel in this frame
+                    
+                found_target = True
+                break
+                
+            if not found_target:
+                continue # Skip this camera spawn entirely if no pixel was valid in 100 attempts
                 
             print(f"[{flights_generated+1}/{num_flights_target}] Generating Flight... Target Dist: {dist:.1f}m")
             

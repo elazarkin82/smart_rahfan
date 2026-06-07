@@ -29,7 +29,6 @@ class SensorManager:
         rgb_bp.set_attribute('fov', str(self.fov))
         rgb_bp.set_attribute('motion_blur_intensity', '0.0')
         rgb_bp.set_attribute('motion_blur_max_distortion', '0.0')
-        rgb_bp.set_attribute('motion_blur_amount', '0.0')
         self.rgb_sensor = self.world.spawn_actor(rgb_bp, transform)
         
         # Depth - Rigidly attach to RGB sensor to eliminate synchronization jitter and network set_transform delays
