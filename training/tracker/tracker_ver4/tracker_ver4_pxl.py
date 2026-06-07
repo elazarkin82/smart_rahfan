@@ -91,19 +91,15 @@ def load_model_config(config_path="model.conf"):
     config = configparser.ConfigParser()
     config.read(config_path)
     
-    ref_backbone = config.get("Backbone", "reference_backbone", fallback="mini_mnv2")
-    search_backbone = config.get("Backbone", "search_backbone", fallback="mnv2_nano")
-    width_mult = config.getfloat("Backbone", "width_multiplier", fallback=0.5)
-    
-    attn_mech = config.get("Attention", "mechanism", fallback="depthwise_corr")
-    
-    dec_type = config.get("Decoder", "type", fallback="fpn_add")
-    
-    hm_loss_default = config.get("Loss", "heatmap_loss_default", fallback="dbsz_relu")
+    # In this version, we share the backbone, so search_backbone defines the shared backbone
+    shared_backbone = config.get("Backbone", "search_backbone", fallback="mnv2")
+    width_mult = config.getfloat("Backbone", "width_multiplier", fallback=1.0)
+    attn_mech = config.get("Attention", "mechanism", fallback="multi_head_cross")
+    dec_type = config.get("Decoder", "type", fallback="unet")
+    hm_loss_default = config.get("Loss", "heatmap_loss_default", fallback="adaptive_wing")
     
     return {
-        "reference_backbone": ref_backbone,
-        "search_backbone": search_backbone,
+        "shared_backbone": shared_backbone,
         "width_multiplier": width_mult,
         "attention_mechanism": attn_mech,
         "decoder_type": dec_type,
@@ -112,62 +108,33 @@ def load_model_config(config_path="model.conf"):
 
 def check_and_create_default_config(config_path="model.conf"):
     if not os.path.exists(config_path):
-        default_content = """# TargetTrackerVer4 Model Configuration File
-# This file configures the backbones, attention mechanism, and decoder of the tracking network.
-# Optimizing these parameters helps balance tracking precision and real-time execution on weak boards.
+        default_content = """# Google Siamese Subject Tracker (tracker_ver_pxl) Configuration File
+# This file configures the shared backbone, attention fusion, and decoder.
 
 [Backbone]
-# Reference Stack Backbone
-# Options:
-#   - mini_mnv2       : (Recommended) Compact MobileNetV2 with low channel widths (max 64), customized for 32x32 inputs.
-#   - mnv1            : Standard MobileNetV1 backbone.
-#   - mnv2            : Full MobileNetV2 backbone.
-#   - yolo5           : CSPDarknet-style backbone.
-#   - custom_legacy   : The original hardcoded tracker_ver4 reference backbone.
-reference_backbone = mini_mnv2
-
-# Search Frame Backbone
-# Options:
-#   - mnv2_nano       : (Recommended) Highly optimized MobileNetV2 with capped channel widths (max 64) for low latency.
-#   - mnv1            : Standard MobileNetV1 backbone.
-#   - mnv2            : Full MobileNetV2 backbone.
-#   - yolo5           : CSPDarknet-style backbone.
-#   - custom_legacy   : The original hardcoded tracker_ver4 search backbone.
-search_backbone = mnv2_nano
-
-# Channel width multiplier to scale both backbones (e.g., 0.5, 0.75, 1.0). Smaller values reduce FLOPs.
-width_multiplier = 0.5
+# Shared Siamese Backbone
+# Options: mnv2 (Full MobileNetV2), mnv2_nano, mnv1, yolo5, custom_legacy
+search_backbone = mnv2
+width_multiplier = 1.0
 
 [Attention]
 # Fusion Attention Mechanism
-# Options:
-#   - depthwise_corr  : (Recommended) Depthwise Cross-Correlation. 0 learnable parameters, extremely fast on CPUs.
-#   - dot_cross       : Standard single-head dot-product cross-attention.
-#   - linear_cross    : Linearized cross-attention. Reduces memory complexity from O(N^2) to O(N).
-#   - multi_head_cross: Multi-head cross-attention. High capacity, slightly more resource intensive.
-mechanism = depthwise_corr
+# Options: depthwise_corr, dot_cross, linear_cross, multi_head_cross
+mechanism = multi_head_cross
 
 [Decoder]
 # Heatmap Decoder Architecture
-# Options:
-#   - fpn_add         : (Recommended) Feature Pyramid Network decoder using skip-add connections. Saves RAM bandwidth.
-#   - unet            : Standard U-Net style decoder with skip-concatenations.
-#   - pixel_shuffle   : Uses sub-pixel convolutions (depth-to-space). Fast on NPUs.
-#   - light_naive     : Transposed convolutions without skip connections. Fastest, lower precision.
-type = fpn_add
+# Options: unet, fpn_add, pixel_shuffle, light_naive
+type = unet
 
 [Loss]
 # Default loss function for heatmap regression
-# Options: dbsz_relu, dbsz_soft, dbsz_hard, centernet_dice, focal_dice, adaptive_wing, mse
-heatmap_loss_default = dbsz_relu
+# Options: adaptive_wing, dbsz_relu, dbsz_soft, dbsz_hard, centernet_dice, focal_dice, mse
+heatmap_loss_default = adaptive_wing
 """
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(default_content)
-        print(f"\\n[CONFIG NOTICE] Configuration file '{config_path}' was not found.")
-        print(f"Created a default '{config_path}' with optimal lightweight parameters.")
-        print("Please check the configuration options, modify if needed, and run the training/execution again.\\n")
-        import sys
-        sys.exit(0)
+        print(f"\n[CONFIG NOTICE] Configuration file '{config_path}' was not found. Created default config.")
 
 # =====================================================================
 # Custom Losses for Continuous Heatmap Regression
@@ -177,68 +144,51 @@ heatmap_loss_default = dbsz_relu
 def dbsz_hard_loss(y_true, y_pred, c_bg=1.0):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    
     mask_high = tf.cast(y_true >= 0.5, tf.float32)
     mask_low = tf.cast(y_true <= 0.01, tf.float32)
-    
     n_high = tf.reduce_sum(mask_high) + 1e-5
     n_low = tf.reduce_sum(mask_low) + 1e-5
-    
     loss_high = tf.reduce_sum(mask_high * tf.abs(y_true - y_pred)) / n_high
     loss_low = tf.reduce_sum(mask_low * tf.square(y_true - y_pred)) / n_low
-    
     return loss_high + c_bg * loss_low
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 def dbsz_soft_loss(y_true, y_pred, c_bg=1.0):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    
     w_high = tf.pow(y_true, 4.0)
     w_low = tf.pow(1.0 - y_true, 16.0)
-    
     loss_high = tf.reduce_sum(w_high * tf.abs(y_true - y_pred)) / (tf.reduce_sum(w_high) + 1e-5)
     loss_low = tf.reduce_sum(w_low * tf.square(y_true - y_pred)) / (tf.reduce_sum(w_low) + 1e-5)
-    
     return loss_high + c_bg * loss_low
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 def dbsz_relu_loss(y_true, y_pred, c_bg=1.0):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    
     w_high = tf.nn.relu(y_true - 0.5)
     w_low = tf.nn.relu(0.2 - y_true)
-    
     k1 = 1.0 / (tf.reduce_sum(w_high) + 1e-5)
     k = 1.0 / (tf.reduce_sum(w_low) + 1e-5)
-    
     loss_high = k1 * tf.reduce_sum(w_high * tf.square(y_true - y_pred))
     loss_low = k * tf.reduce_sum(w_low * tf.square(y_true - y_pred))
-    
     return loss_high + c_bg * loss_low
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 def adaptive_wing_loss(y_true, y_pred, alpha=2.1, omega=14.0, epsilon=1.0, theta=0.5):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    
     diff = tf.abs(y_true - y_pred)
     exponent = alpha - y_true
-    
     diff_clipped = tf.maximum(diff, 1e-7)
     ratio = diff_clipped / epsilon
     ratio_pow = tf.pow(ratio, exponent)
-    
     loss_small = omega * tf.math.log1p(ratio_pow)
-    
     theta_ratio = theta / epsilon
     theta_ratio_pow = tf.pow(theta_ratio, exponent)
     theta_ratio_pow_minus_1 = tf.pow(theta_ratio, exponent - 1.0)
-    
     s = (omega / epsilon) * exponent * theta_ratio_pow_minus_1 / (1.0 + theta_ratio_pow)
     C = s * theta - omega * tf.math.log1p(theta_ratio_pow)
-    
     loss_large = s * diff - C
     loss = tf.where(diff < theta, loss_small, loss_large)
     return tf.reduce_mean(loss)
@@ -247,26 +197,21 @@ def adaptive_wing_loss(y_true, y_pred, alpha=2.1, omega=14.0, epsilon=1.0, theta
 def dice_bce_loss(y_true, y_pred, bce_weight=1.0, dice_weight=1.0):
     y_true_f = tf.reshape(y_true, [-1])
     y_pred_f = tf.reshape(y_pred, [-1])
-    
     bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
     bce_loss = tf.reduce_mean(bce)
-    
     intersection = tf.reduce_sum(y_true_f * y_pred_f)
     union = tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f)
     eps = 1e-12
     dice_coef = (2. * intersection + eps) / (union + eps)
     dice_loss = 1.0 - dice_coef
-    
     return bce_weight * bce_loss + dice_weight * dice_loss
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     eps = 1e-7
     y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
-    
     bce_pos = - y_true * tf.math.log(y_pred) * tf.math.pow(1.0 - y_pred, gamma)
     bce_neg = - (1.0 - y_true) * tf.math.log(1.0 - y_pred) * tf.math.pow(y_pred, gamma)
-    
     loss = alpha * bce_pos + (1.0 - alpha) * bce_neg
     return tf.reduce_mean(loss)
 
@@ -274,56 +219,42 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
 def focal_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha=0.25, gamma=2.0):
     eps = 1e-7
     y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
-    
-    # 1. Continuous Focal Loss
     bce_pos = - y_true * tf.math.log(y_pred) * tf.math.pow(1.0 - y_pred, gamma)
     bce_neg = - (1.0 - y_true) * tf.math.log(1.0 - y_pred) * tf.math.pow(y_pred, gamma)
     focal_loss_val = tf.reduce_mean(alpha * bce_pos + (1.0 - alpha) * bce_neg)
     
-    # 2. Soft Dice Loss (Square Form) for continuous heatmaps
     y_true_f = tf.reshape(tf.cast(y_true, tf.float32), [-1])
     y_pred_f = tf.reshape(tf.cast(y_pred, tf.float32), [-1])
-    
     intersection = tf.reduce_sum(y_true_f * y_pred_f)
     denominator = tf.reduce_sum(tf.square(y_true_f)) + tf.reduce_sum(tf.square(y_pred_f))
     dice_loss_val = 1.0 - (2.0 * intersection + eps) / (denominator + eps)
-    
     return focal_weight * focal_loss_val + dice_weight * dice_loss_val
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 def centernet_focal_loss(y_true, y_pred, alpha=2.0, beta=4.0):
     eps = 1e-7
     y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
-    
-    # Soft continuous formulation of CenterNet Penalty-Reduced Focal Loss:
-    # y_true acts as the anchor, and (1 - y_true)^beta suppresses background penalty near the peak
     pos_loss = - y_true * tf.math.pow(1.0 - y_pred, alpha) * tf.math.log(y_pred)
     neg_loss = - tf.math.pow(1.0 - y_true, beta) * tf.math.pow(y_pred, alpha) * tf.math.log(1.0 - y_pred)
-    
     loss = pos_loss + neg_loss
     return tf.reduce_mean(loss)
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 def centernet_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha=2.0, beta=4.0):
     eps = 1e-7
-    # 1. CenterNet Focal Loss
     cn_loss = centernet_focal_loss(y_true, y_pred, alpha=alpha, beta=beta)
-    
-    # 2. Soft Dice Loss (Square Form)
     y_true_f = tf.reshape(tf.cast(y_true, tf.float32), [-1])
     y_pred_f = tf.reshape(tf.cast(y_pred, tf.float32), [-1])
-    
     intersection = tf.reduce_sum(y_true_f * y_pred_f)
     denominator = tf.reduce_sum(tf.square(y_true_f)) + tf.reduce_sum(tf.square(y_pred_f))
     dice_loss_val = 1.0 - (2.0 * intersection + eps) / (denominator + eps)
-    
     return focal_weight * cn_loss + dice_weight * dice_loss_val
 
 # =====================================================================
-# Target Tracker Ver 4 Class
+# Target Tracker Ver Pixel Class
 # =====================================================================
 
-class TargetTrackerVer4:
+class TargetTrackerVerPixel:
     def __init__(self, ref_shape=(16, 32, 32, 1), search_shape=(256, 256, 1), config_path="model.conf"):
         self.ref_shape = ref_shape
         self.search_shape = search_shape
@@ -334,30 +265,26 @@ class TargetTrackerVer4:
             self.config = load_model_config(config_path)
         else:
             self.config = {
-                "reference_backbone": "mini_mnv2",
-                "search_backbone": "mnv2_nano",
-                "width_multiplier": 0.5,
-                "attention_mechanism": "depthwise_corr",
-                "decoder_type": "fpn_add",
-                "heatmap_loss_default": "dbsz_relu"
+                "shared_backbone": "mnv2",
+                "width_multiplier": 1.0,
+                "attention_mechanism": "multi_head_cross",
+                "decoder_type": "unet",
+                "heatmap_loss_default": "adaptive_wing"
             }
 
     def _inverted_residual_block(self, inputs, expansion, filters, strides, name_prefix):
         x = inputs
         in_channels = inputs.shape[-1]
         
-        # Expand
         if expansion > 1:
             x = layers.Conv2D(expansion * in_channels, (1, 1), padding="same", use_bias=False, name=f"{name_prefix}_expand")(x)
             x = _GroupNormalization(expansion * in_channels, name=f"{name_prefix}_expand_gn")(x)
             x = layers.ReLU(6.0, name=f"{name_prefix}_expand_relu")(x)
             
-        # Depthwise
         x = layers.DepthwiseConv2D((3, 3), strides=strides, padding="same", use_bias=False, name=f"{name_prefix}_dw")(x)
         x = _GroupNormalization(expansion * in_channels, name=f"{name_prefix}_dw_gn")(x)
         x = layers.ReLU(6.0, name=f"{name_prefix}_dw_relu")(x)
         
-        # Project
         x = layers.Conv2D(filters, (1, 1), padding="same", use_bias=False, name=f"{name_prefix}_project")(x)
         x = _GroupNormalization(filters, name=f"{name_prefix}_project_gn")(x)
         
@@ -366,250 +293,75 @@ class TargetTrackerVer4:
             
         return x
 
-    def _create_search_backbone(self):
-        inputs = layers.Input(shape=self.search_shape, name="search_backbone_input")
+    def _create_shared_backbone(self):
+        """
+        Creates the shared Siamese CNN backbone.
+        This FCN backbone accepts dynamic input shapes (None, None, 1) and downsamples by 16x.
+        It returns [x1, x2, x3, x] to support skip connections in the UNet/FPN decoders.
+        """
+        inputs = layers.Input(shape=(None, None, 1), name="shared_backbone_input")
         
-        bb_type = self.config["search_backbone"]
+        bb_type = self.config["shared_backbone"]
         width_mult = self.config["width_multiplier"]
         
         def scale_filters(f):
             return max(8, int(f * width_mult))
             
-        if bb_type == "mnv2_nano":
-            # 1. Stride 2 -> (128, 128, 16)
-            x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = _GroupNormalization(scale_filters(16), name="sb_init_gn")(x1)
-            x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
-            
-            # 2. Stride 4 -> (64, 64, 16)
-            x2 = self._inverted_residual_block(x1, expansion=2, filters=scale_filters(16), strides=2, name_prefix="sb_ir1")
-            
-            # 3. Stride 8 -> (32, 32, 24)
-            x3 = self._inverted_residual_block(x2, expansion=2, filters=scale_filters(24), strides=2, name_prefix="sb_ir2")
-            
-            # 4. Stride 16 -> (16, 16, 32)
-            x4 = self._inverted_residual_block(x3, expansion=3, filters=scale_filters(32), strides=2, name_prefix="sb_ir3")
-            
-            # Final Expand to attention channels (e.g. 64)
-            x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
-            x = layers.ReLU(6.0, name="sb_final_relu")(x)
-            
-        elif bb_type == "mnv1":
-            # MobileNetV1 style with skip connections
-            # Stride 2 -> (128, 128, 16)
-            x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = _GroupNormalization(scale_filters(16), name="sb_init_gn")(x1)
-            x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
-            
-            # Stride 4 -> (64, 64, 24)
-            x = layers.DepthwiseConv2D((3, 3), strides=2, padding="same", use_bias=False, name="sb_dw1")(x1)
-            x = _GroupNormalization(scale_filters(16), name="sb_dw1_gn")(x)
-            x = layers.ReLU(6.0, name="sb_dw1_relu")(x)
-            x2 = layers.Conv2D(scale_filters(24), (1, 1), padding="same", use_bias=False, name="sb_pw1")(x)
-            x2 = _GroupNormalization(scale_filters(24), name="sb_pw1_gn")(x2)
-            x2 = layers.ReLU(6.0, name="sb_pw1_relu")(x2)
-            
-            # Stride 8 -> (32, 32, 32)
-            x = layers.DepthwiseConv2D((3, 3), strides=2, padding="same", use_bias=False, name="sb_dw2")(x2)
-            x = _GroupNormalization(scale_filters(24), name="sb_dw2_gn")(x)
-            x = layers.ReLU(6.0, name="sb_dw2_relu")(x)
-            x3 = layers.Conv2D(scale_filters(32), (1, 1), padding="same", use_bias=False, name="sb_pw2")(x)
-            x3 = _GroupNormalization(scale_filters(32), name="sb_pw2_gn")(x3)
-            x3 = layers.ReLU(6.0, name="sb_pw2_relu")(x3)
-            
-            # Stride 16 -> (16, 16, 64)
-            x = layers.DepthwiseConv2D((3, 3), strides=2, padding="same", use_bias=False, name="sb_dw3")(x3)
-            x = _GroupNormalization(scale_filters(32), name="sb_dw3_gn")(x)
-            x = layers.ReLU(6.0, name="sb_dw3_relu")(x)
-            x4 = layers.Conv2D(scale_filters(64), (1, 1), padding="same", use_bias=False, name="sb_pw3")(x)
-            x4 = _GroupNormalization(scale_filters(64), name="sb_pw3_gn")(x4)
-            x4 = layers.ReLU(6.0, name="sb_pw3_relu")(x4)
-            
-            # Final Expand
-            x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
-            x = layers.ReLU(6.0, name="sb_final_relu")(x)
-            
-        elif bb_type == "mnv2":
-            # Full MobileNetV2
-            x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = _GroupNormalization(scale_filters(16), name="sb_init_gn")(x1)
-            x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
-            
-            x2 = self._inverted_residual_block(x1, expansion=2, filters=scale_filters(24), strides=2, name_prefix="sb_ir1")
-            x3 = self._inverted_residual_block(x2, expansion=3, filters=scale_filters(32), strides=2, name_prefix="sb_ir2")
-            x4 = self._inverted_residual_block(x3, expansion=4, filters=scale_filters(64), strides=2, name_prefix="sb_ir3")
-            
-            x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
-            x = layers.ReLU(6.0, name="sb_final_relu")(x)
-            
-        elif bb_type == "yolo5":
-            # YOLOv5-style CSP blocks
-            # Stride 2 -> (128, 128, 16)
-            x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = _GroupNormalization(scale_filters(16), name="sb_init_gn")(x1)
-            x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
-            
-            # Stride 4 -> (64, 64, 24)
-            x2 = layers.Conv2D(scale_filters(24), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ir1_conv")(x1)
-            x2 = _GroupNormalization(scale_filters(24), name="sb_ir1_gn")(x2)
-            x2 = layers.ReLU(6.0, name="sb_ir1_relu")(x2)
-            
-            # Stride 8 -> (32, 32, 32)
-            x3 = layers.Conv2D(scale_filters(32), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ir2_conv")(x2)
-            x3 = _GroupNormalization(scale_filters(32), name="sb_ir2_gn")(x3)
-            x3 = layers.ReLU(6.0, name="sb_ir2_relu")(x3)
-            
-            # Stride 16 -> (16, 16, 64)
-            x4 = layers.Conv2D(scale_filters(64), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ir3_conv")(x3)
-            x4 = _GroupNormalization(scale_filters(64), name="sb_ir3_gn")(x4)
-            x4 = layers.ReLU(6.0, name="sb_ir3_relu")(x4)
-            
-            # Final Expand
-            x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
-            x = layers.ReLU(6.0, name="sb_final_relu")(x)
-            
-        else: # custom_legacy
-            # Init conv (strides=2) -> (128, 128, 16)
-            x1 = layers.Conv2D(16, (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
-            x1 = _GroupNormalization(16, name="sb_init_gn")(x1)
-            x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
-            
-            # IR Block 1 (strides=2) -> (64, 64, 24)
-            x2 = self._inverted_residual_block(x1, expansion=2, filters=24, strides=2, name_prefix="sb_ir1")
-            
-            # IR Block 2 (strides=2) -> (32, 32, 32)
-            x3 = self._inverted_residual_block(x2, expansion=3, filters=32, strides=2, name_prefix="sb_ir2")
-            
-            # IR Block 3 (strides=2) -> (16, 16, 64)
-            x4 = self._inverted_residual_block(x3, expansion=4, filters=64, strides=2, name_prefix="sb_ir3")
-            
-            # Final Expand -> (16, 16, 128)
-            x = layers.Conv2D(128, (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
-            x = _GroupNormalization(128, name="sb_final_gn")(x)
-            x = layers.ReLU(6.0, name="sb_final_relu")(x)
-            
-        return models.Model(inputs, [x1, x2, x3, x], name="search_feature_extractor")
-
-    def _create_reference_encoder(self):
-        inputs = layers.Input(shape=self.ref_shape, name="ref_encoder_input")
+        # 1. Stride 2 -> 1/2 size
+        x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
+        x1 = _GroupNormalization(scale_filters(16), name="sb_init_gn")(x1)
+        x1 = layers.ReLU(6.0, name="sb_init_relu")(x1)
         
-        # 1. Permute to align dimensions properly: (Layers, H, W, C) -> (H, W, Layers, C)
-        x = layers.Permute((2, 3, 1, 4), name="ref_permute")(inputs)
+        # 2. Stride 4 -> 1/4 size
+        x2 = self._inverted_residual_block(x1, expansion=2, filters=scale_filters(16), strides=2, name_prefix="sb_ir1")
         
-        # 2. Reshape to combine Layers and Channels: (32, 32, 16, 1) -> (32, 32, 16)
-        x = layers.Reshape((self.ref_shape[1], self.ref_shape[2], self.ref_shape[0] * self.ref_shape[3]), name="ref_reshape")(x)
+        # 3. Stride 8 -> 1/8 size
+        x3 = self._inverted_residual_block(x2, expansion=2, filters=scale_filters(24), strides=2, name_prefix="sb_ir2")
         
-        bb_type = self.config["reference_backbone"]
-        width_mult = self.config["width_multiplier"]
+        # 4. Stride 16 -> 1/16 size
+        x4 = self._inverted_residual_block(x3, expansion=3, filters=scale_filters(32), strides=2, name_prefix="sb_ir3")
         
-        def scale_filters(f):
-            return max(8, int(f * width_mult))
-            
-        if bb_type == "mini_mnv2":
-            x = layers.Conv2D(scale_filters(16), (3, 3), strides=1, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = _GroupNormalization(scale_filters(16), name="ref_init_gn")(x)
-            x = layers.ReLU(6.0, name="ref_init_relu")(x)
-            
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(24), strides=2, name_prefix="ref_ir1")
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(32), strides=2, name_prefix="ref_ir2")
-            
-            out_channels = scale_filters(128)
-            x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
-            x = layers.ReLU(6.0, name="ref_final_relu")(x)
-            
-        elif bb_type == "mnv1":
-            x = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = _GroupNormalization(scale_filters(16), name="ref_init_gn")(x)
-            x = layers.ReLU(6.0, name="ref_init_relu")(x)
-            
-            x = layers.DepthwiseConv2D((3, 3), strides=2, padding="same", use_bias=False, name="ref_dw1")(x)
-            x = _GroupNormalization(scale_filters(16), name="ref_dw1_gn")(x)
-            x = layers.ReLU(6.0, name="ref_dw1_relu")(x)
-            x = layers.Conv2D(scale_filters(32), (1, 1), padding="same", use_bias=False, name="ref_pw1")(x)
-            x = _GroupNormalization(scale_filters(32), name="ref_pw1_gn")(x)
-            x = layers.ReLU(6.0, name="ref_pw1_relu")(x)
-            
-            out_channels = scale_filters(128)
-            x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
-            x = layers.ReLU(6.0, name="ref_final_relu")(x)
-            
-        elif bb_type == "mnv2":
-            x = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = _GroupNormalization(scale_filters(16), name="ref_init_gn")(x)
-            x = layers.ReLU(6.0, name="ref_init_relu")(x)
-            
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(32), strides=2, name_prefix="ref_ir1")
-            
-            out_channels = scale_filters(128)
-            x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
-            x = layers.ReLU(6.0, name="ref_final_relu")(x)
-            
-        elif bb_type == "yolo5":
-            x = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = _GroupNormalization(scale_filters(16), name="ref_init_gn")(x)
-            x = layers.ReLU(6.0, name="ref_init_relu")(x)
-            
-            c_half = scale_filters(16)
-            x1 = layers.Conv2D(c_half, (1, 1), padding="same", use_bias=False, name="ref_csp1")(x)
-            x2 = layers.Conv2D(c_half, (1, 1), padding="same", use_bias=False, name="ref_csp2")(x)
-            x1 = layers.Conv2D(c_half, (3, 3), strides=2, padding="same", use_bias=False, name="ref_csp_conv")(x1)
-            x1 = _GroupNormalization(c_half, name="ref_csp_gn")(x1)
-            x1 = layers.ReLU(6.0, name="ref_csp_relu")(x1)
-            x2 = layers.AveragePooling2D(pool_size=2, name="ref_csp_pool")(x2)
-            
-            x = layers.Concatenate(axis=-1, name="ref_csp_cat")([x1, x2])
-            out_channels = scale_filters(128)
-            x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
-            x = layers.ReLU(6.0, name="ref_final_relu")(x)
-            
-        else: # custom_legacy
-            x = layers.Conv2D(32, (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x)
-            x = _GroupNormalization(32, name="ref_init_gn")(x)
-            x = layers.ReLU(6.0, name="ref_init_relu")(x)
-            x = self._inverted_residual_block(x, expansion=2, filters=64, strides=2, name_prefix="ref_ir1")
-            x = layers.Conv2D(128, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
-            x = _GroupNormalization(128, name="ref_final_gn")(x)
-            x = layers.ReLU(6.0, name="ref_final_relu")(x)
-            
-        return models.Model(inputs, x, name="reference_target_encoder")
+        # Final Expand
+        x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_final_conv")(x4)
+        x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
+        x = layers.ReLU(6.0, name="sb_final_relu")(x)
+        
+        return models.Model(inputs, [x1, x2, x3, x], name="shared_siamese_backbone")
 
     def create_model(self):
-        ref_input = layers.Input(shape=self.ref_shape, name="reference_stack")
-        search_input = layers.Input(shape=self.search_shape, name="search_frame")
+        ref_input = layers.Input(shape=self.ref_shape, name="reference_stack") # (16, 32, 32, 1)
+        search_input = layers.Input(shape=self.search_shape, name="search_frame") # (256, 256, 1)
         
-        # 1. Encoders
-        ref_encoder = self._create_reference_encoder()
-        search_encoder = self._create_search_backbone()
+        # 1. Shared Siamese Backbone
+        shared_backbone = self._create_shared_backbone()
         
-        ref_features = ref_encoder(ref_input)
+        # 2. Process Reference Stack (Template)
+        ref_reshaped = tf.reshape(ref_input, (-1, self.ref_shape[1], self.ref_shape[2], self.ref_shape[3]))
+        ref_resized = tf.image.resize(ref_reshaped, (128, 128))
         
-        # Multi-output Search Encoder to get intermediate features for skip connections
-        sb_init, sb_ir1, sb_ir2, search_features = search_encoder(search_input)
+        ref_outputs = shared_backbone(ref_resized)
+        ref_final_features = ref_outputs[-1] # Shape: (None * 16, 8, 8, C)
         
-        bb_type = self.config["search_backbone"]
+        ref_features_split = tf.reshape(ref_final_features, (-1, self.ref_shape[0], 8, 8, ref_final_features.shape[-1]))
+        ref_features = tf.reduce_mean(ref_features_split, axis=1)
+        
+        # 3. Process Search Frame
+        sb_init, sb_ir1, sb_ir2, search_features = shared_backbone(search_input)
+        
         width_mult = self.config["width_multiplier"]
-        
         def scale_filters(f):
             return max(8, int(f * width_mult))
             
         attn_mech = self.config["attention_mechanism"]
         
-        # 2. Attention Fusion
+        # 4. Attention Fusion
         if attn_mech == "depthwise_corr":
             fused_features = DepthwiseCorrelationFusion(name="depthwise_correlation_fusion")([search_features, ref_features])
-            c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
+            c_v = scale_filters(128)
             
         elif attn_mech == "linear_cross":
-            c_qk = scale_filters(64) if bb_type != "custom_legacy" else 64
-            c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
+            c_qk = scale_filters(64)
+            c_v = scale_filters(128)
             
             q_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="q_proj")(search_features)
             k_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="k_proj")(ref_features)
@@ -628,7 +380,7 @@ class TargetTrackerVer4:
             fused_features = layers.Reshape((16, 16, c_v), name="fused_features_reshape")(fused_flat)
             
         elif attn_mech == "multi_head_cross":
-            c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
+            c_v = scale_filters(128)
             q_flat = layers.Reshape((256, c_v), name="q_flat")(search_features)
             kv_flat = layers.Reshape((64, c_v), name="kv_flat")(ref_features)
             
@@ -637,8 +389,8 @@ class TargetTrackerVer4:
             fused_features = layers.Reshape((16, 16, c_v), name="fused_features_reshape")(fused_flat)
             
         else: # dot_cross
-            c_qk = scale_filters(64) if bb_type != "custom_legacy" else 64
-            c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
+            c_qk = scale_filters(64)
+            c_v = scale_filters(128)
             
             q_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="q_proj")(search_features)
             k_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="k_proj")(ref_features)
@@ -655,27 +407,27 @@ class TargetTrackerVer4:
             fused_flat = layers.Dot(axes=(2, 1), name="attention_value_dot")([attn_weights, v_flat])
             fused_features = layers.Reshape((16, 16, c_v), name="fused_features_reshape")(fused_flat)
             
-        # 3. Decoder for Output 1: Heatmap
+        # 5. Decoder for Output 1: Heatmap
         dec_type = self.config["decoder_type"]
         
         if dec_type == "fpn_add":
             x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up1")(fused_features)
             skip1_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip1_proj")(sb_ir2)
             x = layers.Add(name="decoder_skip1")([x, skip1_proj])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(64) if bb_type != "custom_legacy" else 64, strides=1, name_prefix="decoder_ir1")
+            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(64), strides=1, name_prefix="decoder_ir1")
             
             x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up2")(x)
             skip2_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip2_proj")(sb_ir1)
             x = layers.Add(name="decoder_skip2")([x, skip2_proj])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(32) if bb_type != "custom_legacy" else 32, strides=1, name_prefix="decoder_ir2")
+            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(32), strides=1, name_prefix="decoder_ir2")
             
             x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up3")(x)
             skip3_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip3_proj")(sb_init)
             x = layers.Add(name="decoder_skip3")([x, skip3_proj])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(16) if bb_type != "custom_legacy" else 16, strides=1, name_prefix="decoder_ir3")
+            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(16), strides=1, name_prefix="decoder_ir3")
             
             x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up4")(x)
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(8) if bb_type != "custom_legacy" else 8, strides=1, name_prefix="decoder_ir4")
+            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(8), strides=1, name_prefix="decoder_ir4")
             
         elif dec_type == "pixel_shuffle":
             def pixel_shuffle_block(inputs, out_filters, name_prefix):
@@ -686,37 +438,37 @@ class TargetTrackerVer4:
                 x_ps = DepthToSpace(block_size=2, name=f"{name_prefix}_ps_shuffle")(x_ps)
                 return x_ps
                 
-            x = pixel_shuffle_block(fused_features, scale_filters(64) if bb_type != "custom_legacy" else 64, "decoder1")
+            x = pixel_shuffle_block(fused_features, scale_filters(64), "decoder1")
             skip1_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip1_proj")(sb_ir2)
             x = layers.Add(name="decoder_skip1")([x, skip1_proj])
             
-            x = pixel_shuffle_block(x, scale_filters(32) if bb_type != "custom_legacy" else 32, "decoder2")
+            x = pixel_shuffle_block(x, scale_filters(32), "decoder2")
             skip2_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip2_proj")(sb_ir1)
             x = layers.Add(name="decoder_skip2")([x, skip2_proj])
             
-            x = pixel_shuffle_block(x, scale_filters(16) if bb_type != "custom_legacy" else 16, "decoder3")
+            x = pixel_shuffle_block(x, scale_filters(16), "decoder3")
             skip3_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip3_proj")(sb_init)
             x = layers.Add(name="decoder_skip3")([x, skip3_proj])
             
-            x = pixel_shuffle_block(x, scale_filters(8) if bb_type != "custom_legacy" else 8, "decoder4")
+            x = pixel_shuffle_block(x, scale_filters(8), "decoder4")
             
         elif dec_type == "light_naive":
-            c_up1 = scale_filters(64) if bb_type != "custom_legacy" else 64
+            c_up1 = scale_filters(64)
             x = layers.Conv2DTranspose(c_up1, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up1")(fused_features)
             x = _GroupNormalization(c_up1, name="decoder_up1_gn")(x)
             x = layers.ReLU(6.0, name="decoder_up1_relu")(x)
             
-            c_up2 = scale_filters(32) if bb_type != "custom_legacy" else 32
+            c_up2 = scale_filters(32)
             x = layers.Conv2DTranspose(c_up2, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up2")(x)
             x = _GroupNormalization(c_up2, name="decoder_up2_gn")(x)
             x = layers.ReLU(6.0, name="decoder_up2_relu")(x)
             
-            c_up3 = scale_filters(16) if bb_type != "custom_legacy" else 16
+            c_up3 = scale_filters(16)
             x = layers.Conv2DTranspose(c_up3, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up3")(x)
             x = _GroupNormalization(c_up3, name="decoder_up3_gn")(x)
             x = layers.ReLU(6.0, name="decoder_up3_relu")(x)
             
-            c_up4 = scale_filters(8) if bb_type != "custom_legacy" else 8
+            c_up4 = scale_filters(8)
             x = layers.Conv2DTranspose(c_up4, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up4")(x)
             x = _GroupNormalization(c_up4, name="decoder_up4_gn")(x)
             x = layers.ReLU(6.0, name="decoder_up4_relu")(x)
@@ -724,24 +476,24 @@ class TargetTrackerVer4:
         else: # unet
             x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up1")(fused_features)
             x = layers.Concatenate(axis=-1, name="decoder_skip1")([x, sb_ir2])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(64) if bb_type != "custom_legacy" else 64, strides=1, name_prefix="decoder_ir1")
+            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(64), strides=1, name_prefix="decoder_ir1")
             
             x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up2")(x)
             x = layers.Concatenate(axis=-1, name="decoder_skip2")([x, sb_ir1])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(32) if bb_type != "custom_legacy" else 32, strides=1, name_prefix="decoder_ir2")
+            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(32), strides=1, name_prefix="decoder_ir2")
             
             x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up3")(x)
             x = layers.Concatenate(axis=-1, name="decoder_skip3")([x, sb_init])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(16) if bb_type != "custom_legacy" else 16, strides=1, name_prefix="decoder_ir3")
+            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(16), strides=1, name_prefix="decoder_ir3")
             
             x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up4")(x)
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(8) if bb_type != "custom_legacy" else 8, strides=1, name_prefix="decoder_ir4")
+            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(8), strides=1, name_prefix="decoder_ir4")
             
         # Final prediction heatmap
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
         output_heatmap = HeatmapNormalization(name="predicted_heatmap")(output_heatmap_raw)
         
-        # 4. Heatmap-Guided Classification Branch
+        # 6. Heatmap-Guided Classification Branch
         hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap)
         hm_pool = layers.AveragePooling2D(pool_size=8, name="quality_hm_pool")(hm_feat)
         
@@ -762,17 +514,17 @@ class TargetTrackerVer4:
         self.model = models.Model(
             inputs=[ref_input, search_input],
             outputs=[output_heatmap, output_quality],
-            name="TargetTrackerVer4"
+            name="TargetTrackerVerPixel"
         )
         
-        print("\\n" + "="*50)
-        print("Model Architectural Configuration:")
+        print("\n" + "="*50)
+        print("Model Architectural Configuration (Google Siamese):")
         for k, v in self.config.items():
             print(f"  {k}: {v}")
         print("="*50)
         self.model.summary()
         print(f"Total Model Parameters: {self.model.count_params():,}")
-        print("="*50 + "\\n")
+        print("="*50 + "\n")
         
         return self.model
 
@@ -848,13 +600,6 @@ class TargetTrackerVer4:
                 else:
                     loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
                     
-                # TODO (Future Dynamic Quality Training):
-                # When train_mode is 'quality_only', the ground truth quality label should be computed dynamically
-                # based on the accuracy of the predicted heatmap compared to the true target coordinate:
-                # 1. Find the coordinates of the peak intensity (hot point) in pred_heatmap.
-                # 2. Calculate the distance between the predicted peak and the ground truth target coordinate.
-                # 3. Define the target quality dynamically: 1.0 if distance is within tolerance, else 0.0 or a decaying score.
-                # 4. Compute loss_quality using this dynamic target quality score instead of the static gt_quality.
                 loss_quality = loss_fn_quality(gt_quality, pred_quality)
                 
                 if train_mode == "heatmap_only":
@@ -914,7 +659,6 @@ class TargetTrackerVer4:
         else:
             raise ValueError(f"Unknown quality loss: {loss_quality}")
             
-        # Freeze layers dynamically based on Stage 1 / Stage 2 Training Mode
         if train_mode == "heatmap_only":
             quality_layer_names = [
                 "quality_hm_conv", "quality_hm_pool", "quality_fusion", 
@@ -976,7 +720,6 @@ def parse_training_samples(pkl_path):
     with open(pkl_path, 'rb') as f:
         samples = pickle.load(f)
     
-    # Stack list of dicts to form raw batched numpy arrays
     refs = np.stack([s['reference_stack'] for s in samples], axis=0)
     searches = np.stack([s['search_frame'] for s in samples], axis=0)
     heatmaps = np.stack([s['ground_truth_heatmap'] for s in samples], axis=0)
@@ -996,7 +739,6 @@ def build_tf_dataset(pkl_files, shuffle=True):
         for path in local_files:
             yield parse_training_samples(path)
             
-    # Batch output signature: added leading Batch dimension (None) to support dynamic batch size
     output_signature = (
         (
             tf.TensorSpec(shape=(None, 16, 32, 32, 1), dtype=tf.uint8, name="reference_stack"),
@@ -1014,14 +756,9 @@ def build_tf_dataset(pkl_files, shuffle=True):
         ref, search = inputs
         heatmap, quality = targets
         
-        # Resize inputs to model expectations (tf.image.resize and cast natively support batches)
         ref_float = tf.cast(ref, tf.float32) / 255.0
-        
-        # Resize search frame to 256x256
         search_resized = tf.image.resize(search, (256, 256))
         search_float = tf.cast(search_resized, tf.float32) / 255.0
-        
-        # Resize heatmap to 256x256
         heatmap_resized = tf.image.resize(tf.cast(heatmap, tf.float32), (256, 256))
         
         return {"reference_stack": ref_float, "search_frame": search_float}, {"predicted_heatmap": heatmap_resized, "predicted_quality": tf.cast(quality, tf.float32)}
@@ -1034,28 +771,27 @@ def build_tf_dataset(pkl_files, shuffle=True):
 def main():
     import argparse
     
-    # We can pre-load config loss default if model.conf exists
-    default_hm_loss = "dbsz_relu"
+    default_hm_loss = "adaptive_wing"
     if os.path.exists("model.conf"):
         try:
             cfg = load_model_config("model.conf")
-            default_hm_loss = cfg.get("heatmap_loss_default", "dbsz_relu")
+            default_hm_loss = cfg.get("heatmap_loss_default", "adaptive_wing")
         except Exception:
             pass
 
-    parser = argparse.ArgumentParser(description="TargetTrackerVer4 Training CLI")
+    parser = argparse.ArgumentParser(description="TargetTrackerVerPixel Training CLI")
     parser.add_argument("command", choices=["train"])
     parser.add_argument("--dataset_dir", nargs="+", required=True, help="One or more paths to dataset PKL directories")
-    parser.add_argument("--batch_size", type=int, default=16, help="Training batch size (ignored, defined by dataset files)")
+    parser.add_argument("--batch_size", type=int, default=16, help="Training batch size")
     parser.add_argument("--eval_pkl_num", type=int, default=4, help="Number of PKLs for validation")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_of_epochs", type=int, default=10)
     parser.add_argument("--loss_heatmap", choices=["mse", "dice_bce", "focal", "focal_dice", "centernet", "centernet_dice", "adaptive_wing", "dbsz_hard", "dbsz_soft", "dbsz_relu"], default=default_hm_loss)
     parser.add_argument("--loss_quality", choices=["bce", "mse", "huber", "logcosh"], default="bce")
-    parser.add_argument("--train_mode", choices=["joint", "heatmap_only", "quality_only"], default="joint", help="Training mode: heatmap_only, quality_only, or joint")
+    parser.add_argument("--train_mode", choices=["joint", "heatmap_only", "quality_only"], default="joint")
     parser.add_argument("--c_bg", type=float, default=3.0, help="Background suppression weight factor for DBSZ losses")
-    parser.add_argument("--output", type=str, default="outputs/tracker.keras")
-    parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_best_train.keras")
+    parser.add_argument("--output", type=str, default="outputs/tracker_pxl.keras")
+    parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_pxl_best_train.keras")
     parser.add_argument("--init_keras_file", type=str, default=None, help="Path to initial model to resume from")
     parser.add_argument("--log_file", type=str, default="outputs/train.log")
     
@@ -1065,35 +801,32 @@ def main():
         check_and_create_default_config("model.conf")
         import glob
         
-        # File-Level Prefix Filtering based on train_mode to eliminate CPU dynamic filter overheads
         all_pkls = []
         for d in args.dataset_dir:
             all_pkls.extend(glob.glob(os.path.join(d, "batch_*.pkl")))
                 
         all_pkls = sorted(all_pkls)
         if not all_pkls:
-            raise FileNotFoundError(f"No batch files found matching train_mode '{args.train_mode}' in specified directories: {args.dataset_dir}")
+            raise FileNotFoundError(f"No batch files found in specified directories: {args.dataset_dir}")
             
-        # Shuffle deterministically with a fixed seed to mix datasets for train/val split
         import random
         random.Random(42).shuffle(all_pkls)
             
         val_files = all_pkls[:args.eval_pkl_num]
         train_files = all_pkls[args.eval_pkl_num:]
         if not train_files:
-            train_files = val_files # Fallback
+            train_files = val_files
             
         train_ds = build_tf_dataset(train_files, shuffle=True)
         val_ds = build_tf_dataset(val_files, shuffle=False)
         
-        tracker = TargetTrackerVer4()
+        tracker = TargetTrackerVerPixel()
         
         if args.init_keras_file and os.path.exists(args.init_keras_file):
-            import tensorflow as tf
             print(f"Resuming training: loading model from {args.init_keras_file}...")
             tracker.model = tf.keras.models.load_model(args.init_keras_file, compile=False, safe_mode=False)
         else:
-            print("Building new TargetTrackerVer4 model...")
+            print("Building new TargetTrackerVerPixel model...")
             tracker.create_model()
             
         tracker.train(
