@@ -4,13 +4,13 @@
         "port": 2000,
         "timeout": 30.0,
         "maps": ["Town10HD_Opt", "Town04_Opt", "Town05_Opt"],
-        "weather_presets": ["ClearNoon", "HeavyRain", "Sunset", "Foggy"]
+        "weather_presets": ["ClearNoon", "HeavyRain", "Sunset"]
     },
     "sensor": {
         "width": 800,
         "height": 600,
         "fov": 90.0,
-        "fov_range": [48.0, 90.0],
+        "fov_range": [75.0, 125.0],
         "fps": 30
     },
     "generation": {
@@ -19,8 +19,16 @@
         "debug_dir": "debug",
         "num_flights_to_cache": 4000,
         "frames_per_flight": 6,
-        "num_false_negatives": 3,
+        "num_false_negatives": 1,
         "debug_interval": 50,
+        "min_texture_std": 8.0,
+        "noise_params": {
+            "pos_xy_amp": 0.3,
+            "pos_z_amp": 0.1,
+            "rot_pitch_amp": 0.5,
+            "rot_yaw_amp": 0.5,
+            "rot_roll_amp": 2.5
+        },
         "secondary_capture_delay_sec": 2.0,
         "drone_altitude_meters": 30.0,
         "drone_pitch_degrees": -30.0

@@ -101,6 +101,13 @@ def main():
     flights_generated = len(existing_flights)
     frames_per_flight = config['generation']['frames_per_flight']
     num_false_negatives = config['generation'].get('num_false_negatives', 0)
+    min_texture_std = config['generation'].get('min_texture_std', 0.0)
+    noise_cfg = config['generation'].get('noise_params', {})
+    pos_xy_amp = noise_cfg.get('pos_xy_amp', 0.3)
+    pos_z_amp = noise_cfg.get('pos_z_amp', 0.1)
+    rot_pitch_amp = noise_cfg.get('rot_pitch_amp', 0.5)
+    rot_yaw_amp = noise_cfg.get('rot_yaw_amp', 0.5)
+    rot_roll_amp = noise_cfg.get('rot_roll_amp', 1.0)
     debug_interval = config['generation']['debug_interval']
     
     sensor_mgr = None
@@ -211,6 +218,14 @@ def main():
             px = random.randint(margin_x, width - margin_x)
             py = random.randint(margin_y, height - margin_y)
             
+            # Check texture diversity around the selected pixel to avoid flat/homogeneous areas (e.g. sky or smooth road)
+            if min_texture_std > 0:
+                patch = rgb_array[max(0, py-7):min(height, py+8), max(0, px-7):min(width, px+8)]
+                patch_gray = cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY)
+                texture_std = np.std(patch_gray)
+                if texture_std < min_texture_std:
+                    continue # Discard low-texture target
+            
             target_3d = get_3d_world_from_pixel(px, py, depth_array, K, rgb_transform)
             if target_3d is None:
                 continue # Sky or invalid
@@ -309,12 +324,12 @@ def main():
                     
                     # Add smooth mechanical/wind noise (Pitch, Roll, X, Y)
                     phase = flights_generated * 10 + frame_idx * 0.2 + attempt * 5.0
-                    base_t.location.x += math.sin(phase * 1.3) * 0.3 * noise_scale
-                    base_t.location.y += math.cos(phase * 1.7) * 0.3 * noise_scale
-                    base_t.location.z += math.sin(phase * 0.9) * 0.1 * noise_scale
-                    base_t.rotation.pitch += math.cos(phase * 2.1) * 0.5 * noise_scale
-                    base_t.rotation.roll += math.sin(phase * 2.5) * 1.0 * noise_scale
-                    base_t.rotation.yaw += math.cos(phase * 1.5) * 0.5 * noise_scale
+                    base_t.location.x += math.sin(phase * 1.3) * pos_xy_amp * noise_scale
+                    base_t.location.y += math.cos(phase * 1.7) * pos_xy_amp * noise_scale
+                    base_t.location.z += math.sin(phase * 0.9) * pos_z_amp * noise_scale
+                    base_t.rotation.pitch += math.cos(phase * 2.1) * rot_pitch_amp * noise_scale
+                    base_t.rotation.roll += math.sin(phase * 2.5) * rot_roll_amp * noise_scale
+                    base_t.rotation.yaw += math.cos(phase * 1.5) * rot_yaw_amp * noise_scale
                     
                     sensor_mgr.move_to(base_t)
                     
