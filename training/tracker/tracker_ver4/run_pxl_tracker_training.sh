@@ -59,7 +59,7 @@ python3 tracker_ver4_pxl.py train \
     --loss_heatmap dbsz_relu \
     --loss_quality bce \
     --train_mode joint \
-    --c_bg 6.0 \
+    --c_bg 4.0 \
     --eval_pkl_num 	50 \
     --output outputs_pxl/tracker_pxl.keras \
     --init_keras_file outputs_pxl/tracker_pxl.keras \

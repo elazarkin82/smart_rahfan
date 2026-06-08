@@ -580,6 +580,7 @@ class TargetTrackerVerPixel:
     def train_epoch(self, dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_epochs, train_mode="joint", steps=None, shuffle=True):
         if shuffle:
             buffer_size = steps if (steps is not None and steps > 0) else 100
+            buffer_size = min(32, buffer_size)
             dataset = dataset.shuffle(buffer_size=buffer_size, reshuffle_each_iteration=True)
 
         epoch_loss_avg = tf.keras.metrics.Mean()
@@ -711,6 +712,9 @@ class TargetTrackerVerPixel:
                     if os.path.dirname(output_path):
                         os.makedirs(os.path.dirname(output_path), exist_ok=True)
                     self.model.save(output_path)
+            
+            import gc
+            gc.collect()
 
 # =====================================================================
 # Dataset Pipeline
@@ -725,6 +729,10 @@ def parse_training_samples(pkl_path):
     heatmaps = np.stack([s['ground_truth_heatmap'] for s in samples], axis=0)
     qualities = np.stack([s.get('ground_truth_quality', np.array([1.0], dtype=np.float16)) for s in samples], axis=0)
     
+    del samples
+    import gc
+    gc.collect()
+    
     return (refs, searches), (heatmaps, qualities)
 
 def build_tf_dataset(pkl_files, shuffle=True):
@@ -736,8 +744,11 @@ def build_tf_dataset(pkl_files, shuffle=True):
         if shuffle:
             import random
             random.shuffle(local_files)
-        for path in local_files:
+        import gc
+        for i, path in enumerate(local_files):
             yield parse_training_samples(path)
+            if i % 20 == 0:
+                gc.collect()
             
     output_signature = (
         (
