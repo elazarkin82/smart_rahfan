@@ -5,10 +5,10 @@ import time
 import os
 import math
 import numpy as np
-from core.carla_client import CarlaClientManager
-from core.sensor_manager import SensorManager
-from core.geometry_utils import build_projection_matrix, get_3d_world_from_pixel, get_3d_world_to_pixel
-from core.data_exporter import DataExporter
+from carla.core.carla_client import CarlaClientManager
+from carla.core.sensor_manager import SensorManager
+from carla.core.geometry_utils import build_projection_matrix, get_3d_world_from_pixel, get_3d_world_to_pixel
+from carla.core.data_exporter import DataExporter
 
 def load_config(path="pipeline_config.json"):
     with open(path, 'r') as f:

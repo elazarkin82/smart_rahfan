@@ -28,13 +28,21 @@ class KerasFCNVisualizer:
         if not os.path.exists(self.dataset_dir):
             raise FileNotFoundError(f"Dataset directory '{self.dataset_dir}' does not exist.")
             
-        self.pickle_files = [f for f in os.listdir(self.dataset_dir) if f.endswith('.pkl')]
-        if not self.pickle_files:
-            raise FileNotFoundError(f"No pickle files found in '{self.dataset_dir}'.")
+        h5_path = os.path.join(self.dataset_dir, "dataset.h5")
+        if os.path.exists(h5_path):
+            import h5py
+            self.is_h5 = True
+            with h5py.File(h5_path, 'r') as f:
+                self.h5_size = f['reference_stack'].shape[0]
+            print(f"Discovered HDF5 dataset dataset.h5 with {self.h5_size} samples.")
+        else:
+            self.is_h5 = False
+            self.pickle_files = [f for f in os.listdir(self.dataset_dir) if f.endswith('.pkl')]
+            if not self.pickle_files:
+                raise FileNotFoundError(f"No dataset.h5 or pickle files found in '{self.dataset_dir}'.")
+            self.pickle_files.sort()
+            print(f"Discovered {len(self.pickle_files)} dataset pickle files.")
             
-        self.pickle_files.sort()
-        print(f"Discovered {len(self.pickle_files)} dataset pickle files.")
-        
         self.current_pickle_idx = 0
         self.current_sample_idx = -1
         self.current_batch_data = None
@@ -102,28 +110,52 @@ class KerasFCNVisualizer:
         try:
             import tensorflow as tf
             
-            if self.current_batch_data is None or self.current_sample_idx >= self.current_batch_size - 1:
-                if self.current_batch_data is not None:
-                    self.current_pickle_idx = (self.current_pickle_idx + 1) % len(self.pickle_files)
+            if self.is_h5:
+                self.current_sample_idx = (self.current_sample_idx + 1) % self.h5_size
+                import h5py
+                with h5py.File(os.path.join(self.dataset_dir, "dataset.h5"), 'r') as f:
+                    ref_stack = f["reference_stack"][self.current_sample_idx]  # shape: (1, 64, 64, 16)
+                    search_raw = f["search_frame"][self.current_sample_idx]    # shape: (256, 256, 1)
+                    gt_heatmap = f["ground_truth_heatmap"][self.current_sample_idx]  # shape: (256, 256, 1)
+                    gt_quality = f["ground_truth_quality"][self.current_sample_idx][0]
                 
-                pickle_name = self.pickle_files[self.current_pickle_idx]
-                pickle_path = os.path.join(self.dataset_dir, pickle_name)
-                
-                with open(pickle_path, "rb") as f:
-                    self.current_batch_data = pickle.load(f)
-                
-                self.current_sample_idx = 0
-                self.current_batch_size = len(self.current_batch_data)
+                # Compute target_2d dynamically from the peak of gt_heatmap
+                hm_np = gt_heatmap[:, :, 0]
+                if np.max(hm_np) > 0.1:
+                    py, px = np.unravel_index(np.argmax(hm_np), hm_np.shape)
+                    target_2d = (px, py)
+                else:
+                    target_2d = None
+                    
+                meta = {
+                    "flight_id": "dataset.h5",
+                    "frame_idx": self.current_sample_idx,
+                    "target_2d": target_2d,
+                    "distance": 0.0,
+                    "quality": gt_quality
+                }
             else:
-                self.current_sample_idx += 1
-                
-            sample = self.current_batch_data[self.current_sample_idx]
-            
-            ref_stack = sample["reference_stack"]  # (16, 16, 16, 1)
-            search_raw = sample["search_frame"]    # (H, W, 1)
-            gt_heatmap = sample["ground_truth_heatmap"]
-            meta = sample["metadata"]
-            target_2d = meta.get("target_2d")
+                if self.current_batch_data is None or self.current_sample_idx >= self.current_batch_size - 1:
+                    if self.current_batch_data is not None:
+                        self.current_pickle_idx = (self.current_pickle_idx + 1) % len(self.pickle_files)
+                    
+                    pickle_name = self.pickle_files[self.current_pickle_idx]
+                    pickle_path = os.path.join(self.dataset_dir, pickle_name)
+                    
+                    with open(pickle_path, "rb") as f:
+                        self.current_batch_data = pickle.load(f)
+                    
+                    self.current_sample_idx = 0
+                    self.current_batch_size = len(self.current_batch_data)
+                else:
+                    self.current_sample_idx += 1
+                    
+                sample = self.current_batch_data[self.current_sample_idx]
+                ref_stack = sample["reference_stack"]  # (16, 32, 32, 1)
+                search_raw = sample["search_frame"]    # (H, W, 1)
+                gt_heatmap = sample["ground_truth_heatmap"]
+                meta = sample["metadata"]
+                target_2d = meta.get("target_2d")
             
             # Prepare Target Label
             # Scale target_2d to normalized coordinates
@@ -140,15 +172,23 @@ class KerasFCNVisualizer:
                 curr_lbl_fg = "#ff3366"
             
             # Show the largest reference crop (layer 0) scaled up
-            ref_layer_0 = ref_stack[0, :, :, 0] # (16, 16)
+            ref_layer_0 = ref_stack[0, :, :, 0]
+            if ref_layer_0.dtype != np.uint8:
+                ref_layer_0 = (ref_layer_0 * 255.0).astype(np.uint8)
             ref_vis = cv2.resize(ref_layer_0, (256, 256), interpolation=cv2.INTER_NEAREST)
             self.tk_img_ref = ImageTk.PhotoImage(Image.fromarray(ref_vis))
             
             # Prepare inputs for model
-            ref_tensor = tf.expand_dims(tf.cast(ref_stack, tf.float32) / 255.0, 0)
+            ref_tensor = tf.expand_dims(tf.cast(ref_stack, tf.float32), 0)
+            if tf.reduce_max(ref_tensor) > 1.001:
+                ref_tensor = ref_tensor / 255.0
             
             search_256 = cv2.resize(search_raw[:, :, 0], (256, 256), interpolation=cv2.INTER_LINEAR)
-            search_tensor = tf.expand_dims(tf.expand_dims(tf.cast(search_256, tf.float32) / 255.0, -1), 0)
+            if search_256.dtype == np.uint8:
+                search_256_float = search_256.astype(np.float32) / 255.0
+            else:
+                search_256_float = search_256.astype(np.float32)
+            search_tensor = tf.expand_dims(tf.expand_dims(search_256_float, -1), 0)
             
             # Predict
             pred = self.model([ref_tensor, search_tensor], training=False)

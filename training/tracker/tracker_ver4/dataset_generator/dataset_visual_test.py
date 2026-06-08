@@ -94,15 +94,18 @@ class DatasetVisualizer:
             
         self.compiled_files = []
         if os.path.exists(self.dataset_dir):
-            self.compiled_files = sorted([
+            if os.path.exists(os.path.join(self.dataset_dir, "dataset.h5")):
+                self.compiled_files.append("dataset.h5")
+            self.compiled_files.extend(sorted([
                 f for f in os.listdir(self.dataset_dir) 
                 if f.endswith(".pkl") and os.path.isfile(os.path.join(self.dataset_dir, f))
-            ])
+            ]))
             
         print(f"[Visualizer] Found {len(self.raw_files)} raw flights in cache.")
         print(f"[Visualizer] Found {len(self.compiled_files)} compiled files in dataset.")
         
         # State
+        self.h5_file = None
         if self.raw_files:
             self.mode = "raw"
         elif self.compiled_files:
@@ -300,6 +303,14 @@ class DatasetVisualizer:
         self.playing = False
         self.play_button.config(text=" ▶ Play [Space] ")
         
+        # Close previous H5 file if open
+        if hasattr(self, 'h5_file') and self.h5_file:
+            try:
+                self.h5_file.close()
+            except Exception:
+                pass
+            self.h5_file = None
+            
         files = self.raw_files if self.mode == "raw" else self.compiled_files
         if not files:
             self.loaded_data = None
@@ -317,8 +328,13 @@ class DatasetVisualizer:
         filepath = os.path.join(dir_path, filename)
         
         try:
-            with open(filepath, 'rb') as f:
-                self.loaded_data = pickle.load(f)
+            if filepath.endswith(".h5"):
+                import h5py
+                self.h5_file = h5py.File(filepath, 'r')
+                self.loaded_data = range(self.h5_file["reference_stack"].shape[0])
+            else:
+                with open(filepath, 'rb') as f:
+                    self.loaded_data = pickle.load(f)
             self.current_frame_idx = 0
             self.file_combo.current(self.current_file_idx)
             print(f"[Visualizer] Loaded {self.mode} file: {filename} ({len(self.loaded_data)} frames/samples)")
@@ -349,12 +365,38 @@ class DatasetVisualizer:
         elif self.current_frame_idx < 0:
             self.current_frame_idx = num_frames - 1
             
-        sample = self.loaded_data[self.current_frame_idx]
-        
-        if self.mode == "raw":
-            self.render_raw(sample)
-        else:
+        if self.mode == "compiled" and hasattr(self, 'h5_file') and self.h5_file:
+            idx = self.current_frame_idx
+            ref_stack = self.h5_file["reference_stack"][idx]
+            search_frame = self.h5_file["search_frame"][idx]
+            gt_heatmap = self.h5_file["ground_truth_heatmap"][idx]
+            gt_quality = self.h5_file["ground_truth_quality"][idx][0]
+            
+            # Find peak of heatmap
+            hm_np = gt_heatmap[:, :, 0]
+            if np.max(hm_np) > 0.1:
+                py, px = np.unravel_index(np.argmax(hm_np), hm_np.shape)
+                target_2d = (px, py)
+            else:
+                target_2d = None
+                
+            sample = {
+                "reference_stack": ref_stack,
+                "search_frame": search_frame,
+                "ground_truth_heatmap": gt_heatmap,
+                "metadata": {
+                    "target_2d": target_2d,
+                    "distance": 0.0,
+                    "quality": gt_quality
+                }
+            }
             self.render_compiled(sample)
+        else:
+            sample = self.loaded_data[self.current_frame_idx]
+            if self.mode == "raw":
+                self.render_raw(sample)
+            else:
+                self.render_compiled(sample)
 
     def render_raw(self, sample):
         img_gray = sample["image_gray"]
@@ -430,14 +472,19 @@ class DatasetVisualizer:
     def render_compiled(self, sample):
         # 1. Base search image
         search_gray = sample["search_frame"][:, :, 0]
+        if search_gray.dtype != np.uint8:
+            search_gray = (search_gray * 255.0).astype(np.uint8)
         h_s, w_s = search_gray.shape[:2]
         search_rgb = cv2.cvtColor(search_gray, cv2.COLOR_GRAY2RGB)
         
         # 2. Extract ground truth heatmap
         gt_heatmap = sample["ground_truth_heatmap"][:, :, 0].astype(np.float32)
-        
+        if np.max(gt_heatmap) <= 1.001:
+            heatmap_scaled = (gt_heatmap * 255.0).astype(np.uint8)
+        else:
+            heatmap_scaled = gt_heatmap.astype(np.uint8)
+            
         # Colorize Heatmap to Jet
-        heatmap_scaled = (gt_heatmap * 255.0).astype(np.uint8)
         heatmap_color = cv2.applyColorMap(heatmap_scaled, cv2.COLORMAP_JET)
         heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
         
@@ -477,6 +524,9 @@ class DatasetVisualizer:
         self.search_tk_image = ImageTk.PhotoImage(image=pil_search)
         self.search_image_label.config(image=self.search_tk_image, text='')
         
+        # Draw quality score value on heatmap image for validation inspection
+        cv2.putText(heatmap_resized, f"Quality: {meta.get('quality', 1.0):.2f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        
         pil_heatmap = Image.fromarray(heatmap_resized)
         self.heatmap_tk_image = ImageTk.PhotoImage(image=pil_heatmap)
         self.heatmap_image_label.config(image=self.heatmap_tk_image, text='')
@@ -500,16 +550,28 @@ class DatasetVisualizer:
         self.display_ref_stack(ref_stack)
 
     def display_ref_stack(self, ref_stack):
-        # ref_stack is shape: (num_layers, size, size, 1)
-        num_layers = ref_stack.shape[0]
+        # ref_stack is shape: (num_layers, size, size, 1) in legacy, or (1, size, size, num_layers) in new
+        if ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
+            num_layers = ref_stack.shape[3]
+        else:
+            num_layers = ref_stack.shape[0]
+            
         self.ref_tk_images = [] # Prevent garbage collection
         
         for i in range(16):
             if i < num_layers:
-                layer_gray = ref_stack[i, :, :, 0]
+                if ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
+                    layer_gray = ref_stack[0, :, :, i]
+                else:
+                    layer_gray = ref_stack[i, :, :, 0]
+                    
                 # Scale up to 64x64 using Nearest Neighbor to see individual pixels clearly
                 layer_resized = cv2.resize(layer_gray, (64, 64), interpolation=cv2.INTER_NEAREST)
                 
+                # Check if it is float or uint8
+                if layer_resized.dtype != np.uint8:
+                    layer_resized = (layer_resized * 255.0).astype(np.uint8)
+                    
                 # Convert to RGB PIL Image
                 pil_img = Image.fromarray(cv2.cvtColor(layer_resized, cv2.COLOR_GRAY2RGB))
                 tk_img = ImageTk.PhotoImage(image=pil_img)

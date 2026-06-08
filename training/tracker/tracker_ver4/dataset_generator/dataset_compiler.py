@@ -5,8 +5,12 @@ import pickle
 import numpy as np
 import cv2
 import tqdm
+import h5py
 
 def load_config(path="pipeline_config.json"):
+    if not os.path.exists(path) and path == "pipeline_config.json":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(script_dir, path)
     with open(path, 'r') as f:
         return json.load(f)
 
@@ -61,21 +65,27 @@ def build_reference_stack(image, center, num_layers, max_size, min_size, target_
     
     for sz in sizes:
         crop = get_crop(image, center[0], center[1], sz)
-        # Resize to uniform shape (e.g., 16x16)
+        # Resize to uniform shape (e.g., 64x64)
         resized = cv2.resize(crop, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
         stack_layers.append(resized)
         
-    # Stack along first axis to form (Layers, H, W)
-    stack = np.stack(stack_layers, axis=0).astype(np.uint8)
-    # Expand dims to add the channel dimension: (Layers, H, W, 1)
-    return np.expand_dims(stack, axis=-1)
+    # Stack along channels axis to form (H, W, Layers)
+    stack = np.stack(stack_layers, axis=-1).astype(np.uint8)
+    # Expand dims on first axis to form (1, H, W, Layers)
+    return np.expand_dims(stack, axis=0)
 
 def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     config = load_config()
     cache_dir = config['generation'].get('cache_dir', 'cache')
+    if not os.path.isabs(cache_dir):
+        cache_dir = os.path.join(script_dir, cache_dir)
+        
     compiler_cfg = config['compiler']
-    
     dataset_dir = compiler_cfg['dataset_dir']
+    if not os.path.isabs(dataset_dir):
+        dataset_dir = os.path.join(script_dir, dataset_dir)
+        
     os.makedirs(dataset_dir, exist_ok=True)
     
     cache_files = sorted(glob.glob(os.path.join(cache_dir, "flight_*.pkl")))
@@ -84,7 +94,7 @@ def main():
         print(f"No cache files found in '{cache_dir}'. Run dataset_generator.py first.")
         return
         
-    print(f"Found {len(cache_files)} cached flights. Starting compilation...")
+    print(f"Found {len(cache_files)} cached flights. Starting compilation to HDF5...")
     
     # Compiler settings
     layers = compiler_cfg['stack_layers']
@@ -95,19 +105,32 @@ def main():
     relative_sigma = compiler_cfg.get('heatmap_relative_sigma', None)
     neg_sample_ratio = compiler_cfg.get('synthetic_negative_ratio', compiler_cfg.get('negative_sample_ratio', 0.20))
     
+    h5_path = os.path.join(dataset_dir, "dataset.h5")
+    if os.path.exists(h5_path):
+        try:
+            os.remove(h5_path)
+        except Exception as e:
+            print(f"Warning: Could not remove existing dataset.h5: {e}")
+            
+    f_h5 = h5py.File(h5_path, 'w')
+    
+    # Extendable datasets
+    ref_ds = f_h5.create_dataset('reference_stack', shape=(0, 1, tgt_sz, tgt_sz, layers), maxshape=(None, 1, tgt_sz, tgt_sz, layers), dtype='float32', chunks=(16, 1, tgt_sz, tgt_sz, layers))
+    search_ds = f_h5.create_dataset('search_frame', shape=(0, 256, 256, 1), maxshape=(None, 256, 256, 1), dtype='float32', chunks=(16, 256, 256, 1))
+    heatmap_ds = f_h5.create_dataset('ground_truth_heatmap', shape=(0, 256, 256, 1), maxshape=(None, 256, 256, 1), dtype='float32', chunks=(16, 256, 256, 1))
+    quality_ds = f_h5.create_dataset('ground_truth_quality', shape=(0, 1), maxshape=(None, 1), dtype='float32', chunks=(16, 1))
+    
     processed_count = 0
     
     for cache_path in tqdm.tqdm(cache_files, desc="Compiling Dataset"):
         basename = os.path.basename(cache_path)
-        out_name = basename.replace("flight_", "train_")
-        out_path = os.path.join(dataset_dir, out_name)
         
-        # Skip if already compiled
-        if os.path.exists(out_path):
-            continue
-            
         with open(cache_path, 'rb') as f:
-            flight_data = pickle.load(f)
+            try:
+                flight_data = pickle.load(f)
+            except Exception as e:
+                print(f"\nWarning: Failed to load {cache_path}: {e}")
+                continue
             
         if not flight_data or len(flight_data) < 2:
             continue
@@ -121,9 +144,13 @@ def main():
             frame_0['target_2d'], 
             layers, flight_max_sz, flight_min_sz, tgt_sz
         )
+        ref_float = ref_stack.astype(np.float32) / 255.0
         
         # 2. Training Pairs (frames 1..N)
-        training_samples = []
+        flight_refs = []
+        flight_searches = []
+        flight_heatmaps = []
+        flight_qualities = []
         
         idx = cache_files.index(cache_path)
         neg_flight_data = None
@@ -144,72 +171,53 @@ def main():
             half = s_crop / 2.0
             
             if target_2d is None:
-                # Natural negative frame (target is not in frame)
+                # Natural negative frame
                 search_crop_gray = get_crop(search_frame_gray, w_s / 2.0, h_s / 2.0, s_crop)
-                search_crop = np.expand_dims(search_crop_gray, axis=-1)
+                search_resized = cv2.resize(search_crop_gray, (256, 256), interpolation=cv2.INTER_LINEAR)
+                search_float = search_resized.astype(np.float32) / 255.0
+                search_float = np.expand_dims(search_float, axis=-1)
                 
-                heatmap = np.zeros(search_crop.shape, dtype=np.float16)
+                heatmap_float = np.zeros((256, 256, 1), dtype=np.float32)
                 
-                sample = {
-                    "reference_stack": ref_stack,
-                    "search_frame": search_crop,
-                    "ground_truth_heatmap": heatmap,
-                    "ground_truth_quality": np.array([0.0], dtype=np.float16),
-                    "metadata": {
-                        "flight_id": basename,
-                        "frame_idx": frame_dict['frame_index'],
-                        "target_2d": None,
-                        "original_target_2d": None,
-                        "true_target_2d": None,
-                        "original_true_target_2d": None,
-                        "distance": frame_dict['distance_to_target'],
-                        "shift_distance": 0.0,
-                        "is_positive": 0
-                    }
-                }
-                training_samples.append(sample)
+                flight_refs.append(ref_float[0])
+                flight_searches.append(search_float)
+                flight_heatmaps.append(heatmap_float)
+                flight_qualities.append(np.array([0.0], dtype=np.float32))
                 continue
                 
-            # 1. Crop Search Frame with central 1/8 padding jittering
+            # Crop Search Frame with central 1/8 padding jittering
             angle = np.random.uniform(0, 2 * np.pi)
             distance = np.random.uniform(0, s_crop * 0.375)
             dx = distance * np.cos(angle)
             dy = distance * np.sin(angle)
             
             search_crop_gray = get_crop(search_frame_gray, target_2d[0] + dx, target_2d[1] + dy, s_crop)
-            search_crop = np.expand_dims(search_crop_gray, axis=-1)
+            search_resized = cv2.resize(search_crop_gray, (256, 256), interpolation=cv2.INTER_LINEAR)
+            search_float = search_resized.astype(np.float32) / 255.0
+            search_float = np.expand_dims(search_float, axis=-1)
             
-            # Target local coordinate in cropped space is guaranteed to reside in [s_crop*0.125, s_crop*0.875]
             local_target_2d = (half - dx, half - dy)
             
-            # Dynamic Isotropic Gaussian Heatmap on the cropped space
-            if relative_sigma is not None:
-                sample_sigma = s_crop * relative_sigma
-            else:
-                sample_sigma = sigma
-            heatmap = generate_heatmap(search_crop.shape, local_target_2d, sample_sigma)
+            # Scale target local coordinates to 256x256 space for correct heatmap scaling
+            scale_factor = 256.0 / s_crop
+            local_target_2d_scaled = (local_target_2d[0] * scale_factor, local_target_2d[1] * scale_factor)
             
-            # Heatmap target is in frame, so quality is 1.0 (binary indicator of target presence)
+            # Dynamic Isotropic Gaussian Heatmap on 256x256 space
+            if relative_sigma is not None:
+                sample_sigma = 256.0 * relative_sigma
+            else:
+                sample_sigma = sigma * scale_factor
+                
+            # Generate heatmap directly on 256x256 space
+            heatmap_resized = generate_heatmap((256, 256, 1), local_target_2d_scaled, sample_sigma)
+            heatmap_float = heatmap_resized.astype(np.float32)
+            
             quality_score = 1.0
             
-            sample = {
-                "reference_stack": ref_stack,               # Shape: (16, 32, 32, 1)
-                "search_frame": search_crop,                # Shape: (S_crop, S_crop, 1)
-                "ground_truth_heatmap": heatmap.astype(np.float16), # Shape: (S_crop, S_crop, 1) Float16 to save space
-                "ground_truth_quality": np.array([quality_score], dtype=np.float16), # Shape: (1,)
-                "metadata": {
-                    "flight_id": basename,
-                    "frame_idx": frame_dict['frame_index'],
-                    "target_2d": local_target_2d,
-                    "original_target_2d": (target_2d[0] + dx, target_2d[1] + dy),
-                    "true_target_2d": local_target_2d,
-                    "original_true_target_2d": target_2d,
-                    "distance": frame_dict['distance_to_target'],
-                    "shift_distance": distance,
-                    "is_positive": 1
-                }
-            }
-            training_samples.append(sample)
+            flight_refs.append(ref_float[0])
+            flight_searches.append(search_float)
+            flight_heatmaps.append(heatmap_float)
+            flight_qualities.append(np.array([quality_score], dtype=np.float32))
             
             # 2b. Negative Pair: target from flight i is NOT present in flight j
             if neg_flight_data is not None and len(neg_flight_data) > 1 and np.random.uniform(0, 1) < neg_sample_ratio:
@@ -220,35 +228,38 @@ def main():
                 h_n, w_n = search_frame_gray_neg.shape[:2]
                 s_crop_neg = min(h_n, w_n)
                 
-                # Crop negative search frame centered at the middle of the frame
                 search_crop_gray_neg = get_crop(search_frame_gray_neg, w_n / 2.0, h_n / 2.0, s_crop_neg)
-                search_crop_neg = np.expand_dims(search_crop_gray_neg, axis=-1)
+                search_resized_neg = cv2.resize(search_crop_gray_neg, (256, 256), interpolation=cv2.INTER_LINEAR)
+                search_float_neg = search_resized_neg.astype(np.float32) / 255.0
+                search_float_neg = np.expand_dims(search_float_neg, axis=-1)
                 
-                heatmap_neg = np.zeros(search_crop_neg.shape, dtype=np.float16)
+                heatmap_float_neg = np.zeros((256, 256, 1), dtype=np.float32)
                 
-                sample_neg = {
-                    "reference_stack": ref_stack,               # Shape: (16, 32, 32, 1)
-                    "search_frame": search_crop_neg,            # Shape: (S_crop_neg, S_crop_neg, 1)
-                    "ground_truth_heatmap": heatmap_neg,        # Shape: (S_crop_neg, S_crop_neg, 1)
-                    "ground_truth_quality": np.array([0.0], dtype=np.float16), # Shape: (1,)
-                    "metadata": {
-                        "flight_id": basename,
-                        "neg_flight_id": os.path.basename(neg_cache_path),
-                        "frame_idx": neg_frame_dict['frame_index'],
-                        "target_2d": None,
-                        "distance": neg_frame_dict['distance_to_target'],
-                        "is_positive": 0
-                    }
-                }
-                training_samples.append(sample_neg)
+                flight_refs.append(ref_float[0])
+                flight_searches.append(search_float_neg)
+                flight_heatmaps.append(heatmap_float_neg)
+                flight_qualities.append(np.array([0.0], dtype=np.float32))
+                
+        # Append this flight's samples to the HDF5 datasets
+        if flight_refs:
+            n_existing = ref_ds.shape[0]
+            n_new = len(flight_refs)
             
-        # 3. Save to dataset dir
-        with open(out_path, 'wb') as f:
-            pickle.dump(training_samples, f)
+            ref_ds.resize(n_existing + n_new, axis=0)
+            search_ds.resize(n_existing + n_new, axis=0)
+            heatmap_ds.resize(n_existing + n_new, axis=0)
+            quality_ds.resize(n_existing + n_new, axis=0)
+            
+            # reference_stack input requires shape (N, 1, 64, 64, 16)
+            ref_ds[n_existing:] = np.expand_dims(np.stack(flight_refs, axis=0), axis=1)
+            search_ds[n_existing:] = np.stack(flight_searches, axis=0)
+            heatmap_ds[n_existing:] = np.stack(flight_heatmaps, axis=0)
+            quality_ds[n_existing:] = np.stack(flight_qualities, axis=0)
             
         processed_count += 1
         
-    print(f"\nCompilation finished! {processed_count} new flights compiled into '{dataset_dir}'.")
+    f_h5.close()
+    print(f"\nCompilation finished! {processed_count} flights compiled into a single HDF5 dataset: '{h5_path}'.")
     print(f"Dataset is ready for Neural Network training.")
 
 if __name__ == '__main__':

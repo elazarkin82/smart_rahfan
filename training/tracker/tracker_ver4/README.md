@@ -37,9 +37,9 @@ To facilitate rapid optimization and hardware-specific tuning, the network archi
 
 ## Key Architectural Features
 
-### 1. Multi-Scale Target Reference Stack (`32x32`)
-* **Spatial Resolution**: The reference stack receives 16 layers of multiscale crops of the target, upscaled to `32x32` pixels.
-* **Coherent Spatial Convolutions**: A spatial **`Permute((2, 3, 1, 4))`** layer transposes the input tensor to `(H, W, Layers, C)` before reshaping, ensuring that 2D convolutions process actual spatial geometries instead of scrambled coordinates.
+### 1. Multi-Scale Target Reference Stack (`64x64`)
+* **Spatial Resolution**: The reference stack receives 16 layers of multiscale crops of the target, compiled at `64x64` pixels.
+* **Direct Channel Layout**: The input shape is `(1, 64, 64, 16)` where the 16 layers are packed as channels. It is reshaped to `(64, 64, 16)` dynamically in the encoders, avoiding legacy permute operations.
 * **Cross-Attention Dot-Product Fusion**: Correlates the `(8, 8, 128)` target features against the `(16, 16, 128)` search frame features to generate robust, scale-invariant correlation maps.
 
 ### 2. U-Net Style Skip Connections (Decoder)
@@ -51,7 +51,7 @@ This dramatically enhances tracking precision, sharpens the predicted heatmaps, 
 
 ### 3. Continuous Hybrid & DBSZ Losses (with Background Suppression)
 The heatmap can be trained using continuous-safe custom losses or Dynamic Balanced Semantic Zone (DBSZ) losses:
-* **DBSZ Losses (`dbsz_hard`, `dbsz_soft`, `dbsz_relu`)**: These losses dynamically divide the heatmap into high-confidence peak zones and low-confidence background zones, balancing the training gradients.
+* **DBSZ Losses (`dbsz_hard`, `dbsz_soft`, `dbsz_relu`)**: These losses dynamically divide the heatmap into high-confidence peak zones and low-confidence background zones, balancing the training gradients. The `dbsz_relu` loss features a configurable `--dbsz_border` parameter (default: `0.35`) defining the zone boundaries continuously to eliminate gradient-free transition bands.
 * **Background Suppression Weight (`--c_bg`)**: To suppress real-world camera noise and false-positive activations in the background (black regions of the heatmap), a controlled weight multiplier $C_{bg}$ (default: `3.0`) is applied directly to the background loss component:
   $$\mathcal{L}_{\text{DBSZ}} = \mathcal{L}_{\text{high}} + C_{bg} \cdot \mathcal{L}_{\text{low}}$$
   Setting $C_{bg}$ to `3.0` penalizes background activations 3 times harder, forcing the network to keep the background flat and dark.
@@ -72,7 +72,7 @@ The heatmap can be trained using continuous-safe custom losses or Dynamic Balanc
 graph TD
     %% Inputs
     subgraph Inputs
-        Ref[Reference Stack<br/>16x32x32x1]
+        Ref[Reference Stack<br/>1x64x64x16]
         Search[Search Frame<br/>256x256x1]
     end
 
@@ -164,18 +164,14 @@ To resolve conflicting gradients between the heatmap regression branch and the l
 
 This mathematical relaxation guarantees that targets remain trackable ($\text{Quality} \ge 0.70$) up to offset shifts of $15$-$20$ pixels, aligning perfectly with the heatmap's peak prediction capabilities and preventing gradient pollution.
 
-### 4. File-Level Segregated Batching (Zero-Overhead Strategy)
-Our custom shuffling script (`create_batched_dataset.py`) loads all compiled flight samples and segregates them into two distinct batch file categories:
-* **`batch_pos_*.pkl`**: Contains purely positive and jittered target samples. These are used during Stage 1 Heatmap training to ensure zero pollution from negative frames.
-* **`batch_with_negative_*.pkl`**: Contains exactly **50% positive** and **50% negative** (background only) samples. This perfectly balanced class distribution is ideal for training the Quality classifier in Stage 2.
-This file-level split entirely eliminates CPU filtering overhead during training, reduces disk I/O, and guarantees zero data pollution.
+### 4. Single-File HDF5 Compilation (`dataset.h5`)
+To optimize disk storage and read speeds, `dataset_compiler.py` compiles all flights progressively into a single, unified HDF5 dataset file (`dataset.h5`) under `dataset_generator/compiled/`. This avoids creating thousands of small pickled files, reducing disk fragmentation and I/O latency.
 
-### 5. Deterministic Dataset Shuffling & Evaluation Splits
-To ensure that the validation set (the evaluation files slice `--eval_pkl_num`) contains a balanced representation of all specified directories (e.g. both Carla simulation and real physical data), the combined file list is **deterministically shuffled** using a fixed seed (`42`) before splitting:
-```python
-random.Random(42).shuffle(all_pkls)
-```
-This guarantees a homogeneous mixture of sources in both training and evaluation, while preserving absolute reproducibility across training runs.
+### 5. Dynamic In-Memory RAM Caching & Shuffling
+The dataloader dynamically loads `dataset.h5` and performs:
+* **Memory Safety**: Checks system memory availability using `psutil` before caching the dataset in RAM. If RAM is sufficient, the entire dataset is loaded to memory to avoid CPU pickling/unpickling bottlenecks.
+* **Stage-Specific Filtering**: Filters only positive target samples in Stage 1 (`heatmap_only`), and dynamically balances classes 50-50 (positive vs negative/background) in Stage 2 (`quality_only`).
+* **Deterministic Shuffling**: Shuffles sample indices deterministically with a fixed seed (`42`) before splitting into training and validation folds (using `--val_split`).
 
 ---
 
@@ -185,47 +181,44 @@ To prevent conflicting gradients from the Quality classifier branch from polluti
 
 ### Stage 1: Heatmap Training (`--train_mode heatmap_only`)
 - **Action**: Freezes the Quality branch layers.
-- **Dataset**: Automatically loads **only** the `batch_pos_*.pkl` files from the dataset directory.
+- **Dataset**: Loads target data from `dataset.h5`, filtering positive samples only.
 - **Outcome**: The encoders and decoder learn to extract pristine, noise-immune spatial features and predict razor-sharp heatmaps.
 
 ### Stage 2: Quality Training (`--train_mode quality_only`)
 - **Action**: **Freezes the shared encoders and heatmap decoder**. Only the quality branch layers are trainable.
-- **Dataset**: Loads **only** the 50-50 balanced `batch_with_negative_*.pkl` files.
+- **Dataset**: Loads target data from `dataset.h5`, balancing positive and negative samples 50-50.
 - **Outcome**: The Quality branch learns robust tracking confidence boundaries based on static, pre-trained spatial features.
 
 ---
 
 ## Running the Training Pipeline
 
-### Step 1: Compile Cached Flights
+### Step 1: Compile Cached Flights to HDF5
 ```bash
-python3 dataset_compiler.py
+python3 dataset_generator/dataset_compiler.py
 ```
-Parses raw CARLA cached flights, extracts square crops, calculates relaxed continuous quality scores, and outputs compiled samples into `compiled/`.
+Parses raw CARLA cached flights, extracts square crops, resizes templates to 64x64, calculates relaxed continuous quality scores, and compiles all flights into `dataset_generator/compiled/dataset.h5`.
 
-### Step 2: Global Shuffling & Segregated Batching
-```bash
-python3 dataset_generator/create_batched_dataset.py --batch_size 4
-```
-Generates the pure positive `batch_pos_*.pkl` and the perfectly balanced 50-50 mixed `batch_with_negative_*.pkl` files in `dataset_generator/dataset/`.
-
-### Step 3: Run Stage 1 (Heatmap Only)
-To train on multiple datasets, pass them as space-separated paths to `--dataset_dir`:
+### Step 2: Run Stage 1 (Heatmap Only)
+Train the spatial feature encoders and heatmap decoder. You can specify `--val_split` for evaluation splitting:
 ```bash
 python3 tracker_model.py train \
-    --dataset_dir dataset_generator/dataset_carla dataset_generator/dataset \
+    --dataset_dir dataset_generator/compiled \
     --train_mode heatmap_only \
-    --loss_heatmap dbsz_soft \
+    --loss_heatmap dbsz_relu \
+    --dbsz_border 0.35 \
+    --val_split 0.1 \
     --output outputs/tracker.keras
 ```
 
-### Step 4: Run Stage 2 (Quality Only)
+### Step 3: Run Stage 2 (Quality Only)
 Loads the pre-trained weights from Stage 1, freezes them, and trains only the Quality classification branch:
 ```bash
 python3 tracker_model.py train \
-    --dataset_dir dataset_generator/dataset_carla dataset_generator/dataset \
+    --dataset_dir dataset_generator/compiled \
     --train_mode quality_only \
     --init_keras_file outputs/tracker.keras \
+    --val_split 0.1 \
     --output outputs/tracker.keras
 ```
 
