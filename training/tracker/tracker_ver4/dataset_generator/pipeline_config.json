@@ -16,9 +16,12 @@
         ],
         "renderer": "RayTracedLighting",
         "headless": true,
-        "rt_subframes": 4,
+        "rt_subframes": 1,
+        "warmup_frames": 1,
         "stage_load_timeout_sec": 180.0,
-        "max_attempts_per_flight": 25
+        "repair_missing_asset_paths": true,
+        "max_attempts_per_flight": 25,
+        "force_process_exit_on_shutdown": true
     },
     "sensor": {
         "width": 800,

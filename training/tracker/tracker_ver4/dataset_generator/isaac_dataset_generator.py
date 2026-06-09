@@ -5,6 +5,7 @@ import json
 import random
 import math
 import pickle
+import traceback
 import numpy as np
 import cv2
 
@@ -123,6 +124,15 @@ def get_lookat_quaternion(eye, target):
     R = np.stack([right, up, -forward_unit], axis=-1)
     return rotation_matrix_to_quaternion(R)
 
+def get_map_for_flight(maps, flight_index, num_flights_target):
+    """Matches CARLA's ordered, contiguous flight allocation per map."""
+    if not maps:
+        raise ValueError("At least one Isaac map must be configured.")
+
+    flights_per_map = max(1, num_flights_target // len(maps))
+    map_idx = min(flight_index // flights_per_map, len(maps) - 1)
+    return maps[map_idx]
+
 def main():
     config = load_config()
     
@@ -157,9 +167,15 @@ def main():
     maps = isaac_cfg.get("maps", ["/Isaac/Environments/Simple_Warehouse/warehouse.usd"])
     renderer = isaac_cfg.get("renderer", "RayTracedLighting")
     headless = isaac_cfg.get("headless", True)
-    rt_subframes = isaac_cfg.get("rt_subframes", 4)
+    rt_subframes = isaac_cfg.get("rt_subframes", 1)
+    warmup_frames = isaac_cfg.get("warmup_frames", 1)
     stage_load_timeout = isaac_cfg.get("stage_load_timeout_sec", 180.0)
+    repair_asset_paths = isaac_cfg.get("repair_missing_asset_paths", True)
     max_attempts_per_flight = isaac_cfg.get("max_attempts_per_flight", 25)
+    force_process_exit = isaac_cfg.get("force_process_exit_on_shutdown", True)
+
+    if not maps:
+        raise ValueError("isaac.maps must contain at least one USD map.")
     
     frames_per_flight = config['generation']['frames_per_flight']
     num_false_negatives = config['generation']['num_false_negatives']
@@ -181,21 +197,43 @@ def main():
     sensor_mgr = IsaacSensorManager(camera_path="/World/Camera", width=width, height=height, fov=fov)
     current_map = None
     attempts_for_flight = 0
+    exit_code = 0
+    pending_exception = None
     
     try:
         while flights_generated < num_flights_target:
-            # Pick a map deterministically based on flight index
-            target_map = maps[flights_generated % len(maps)]
+            # Use the same contiguous per-map allocation as the CARLA generator.
+            target_map = get_map_for_flight(
+                maps,
+                flights_generated,
+                num_flights_target,
+            )
 
             # Keep a loaded stage alive across retries to avoid recompiling RTX
             # shaders and rebuilding the Replicator graph on every failed flight.
             if current_map != target_map:
+                flights_per_map = max(1, num_flights_target // len(maps))
+                map_idx = maps.index(target_map)
+                first_flight = map_idx * flights_per_map
+                last_flight = (
+                    num_flights_target - 1
+                    if map_idx == len(maps) - 1
+                    else min(num_flights_target - 1, first_flight + flights_per_map - 1)
+                )
+                print(
+                    f"[*] Map {map_idx + 1}/{len(maps)} will generate flights "
+                    f"{first_flight + 1}-{last_flight + 1}."
+                )
                 sensor_mgr.destroy()
-                client_mgr.load_map(target_map, timeout_sec=stage_load_timeout)
+                client_mgr.load_map(
+                    target_map,
+                    timeout_sec=stage_load_timeout,
+                    repair_asset_paths=repair_asset_paths,
+                )
                 sensor_mgr.create_camera()
                 sensor_mgr.initialize_replicator(
                     simulation_app,
-                    warmup_frames=2,
+                    warmup_frames=warmup_frames,
                     rt_subframes=rt_subframes,
                 )
                 current_map = target_map
@@ -447,10 +485,21 @@ def main():
             
     except KeyboardInterrupt:
         print("[*] Interrupted by user.")
+        exit_code = 130
+    except Exception as exc:
+        exit_code = 1
+        pending_exception = exc
+        traceback.print_exc()
     finally:
         sensor_mgr.destroy()
-        client_mgr.shutdown()
         print("[*] Dataset generation finished.")
+        client_mgr.shutdown(
+            force_process_exit=force_process_exit,
+            exit_code=exit_code,
+        )
+
+    if pending_exception is not None:
+        raise pending_exception
 
 if __name__ == '__main__':
     main()

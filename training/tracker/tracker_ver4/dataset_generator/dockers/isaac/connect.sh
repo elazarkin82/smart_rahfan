@@ -9,6 +9,10 @@ HOST_HOME="${HOME}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CONTAINER_USER="${HOST_USER}"
+DISPLAY_VALUE="${DISPLAY:-:1}"
+SHADER_CACHE_DIR="${WORKDIR}/nv_shadercache"
+
+mkdir -p "${SHADER_CACHE_DIR}"
 
 if ! docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     echo "Container '${CONTAINER_NAME}' does not exist. Run ./run.sh first." >&2
@@ -25,6 +29,7 @@ docker exec -i -u root \
     -e HOST_GID="${HOST_GID}" \
     -e HOST_USER="${HOST_USER}" \
     -e HOST_HOME="${HOST_HOME}" \
+    -e WORKDIR="${WORKDIR}" \
     "${CONTAINER_NAME}" bash -s <<'SETUP_USER'
 set -euo pipefail
 
@@ -58,6 +63,7 @@ mkdir -p \
     "${HOST_HOME}/.cache/ov/hub" \
     "${HOST_HOME}/.config" \
     "${HOST_HOME}/.local/share/ov" \
+    "${WORKDIR}/nv_shadercache" \
     /isaac-sim/kit/cache \
     /isaac-sim/.nvidia-omniverse \
     /var/cache/hub
@@ -67,6 +73,7 @@ chown -R "${HOST_UID}:${HOST_GID}" \
     "${HOST_HOME}/.cache/ov" \
     "${HOST_HOME}/.config" \
     "${HOST_HOME}/.local/share/ov" \
+    "${WORKDIR}/nv_shadercache" \
     /isaac-sim/.nvidia-omniverse
 chmod 1777 /isaac-sim/kit/cache /var/cache/hub
 SETUP_USER
@@ -84,9 +91,12 @@ exec docker exec "${docker_tty_args[@]}" \
     -e HOME="${HOST_HOME}" \
     -e USER="${CONTAINER_USER}" \
     -e LOGNAME="${CONTAINER_USER}" \
+    -e DISPLAY="${DISPLAY_VALUE}" \
     -e XDG_CACHE_HOME="${HOST_HOME}/.cache" \
     -e XDG_CONFIG_HOME="${HOST_HOME}/.config" \
     -e XDG_DATA_HOME="${HOST_HOME}/.local/share" \
     -e HUB__CACHE__PATH="${HOST_HOME}/.cache/ov/hub" \
     -e ISAAC_SIM_PORTABLE_ROOT="${HOST_HOME}/.cache/isaac-sim" \
+    -e __GL_SHADER_DISK_CACHE=1 \
+    -e __GL_SHADER_DISK_CACHE_PATH="${SHADER_CACHE_DIR}" \
     "${CONTAINER_NAME}" "${container_command[@]}"

@@ -14,6 +14,8 @@ class IsaacClientManager:
         self.renderer = renderer
         self.simulation_app = None
         self.stage = None
+        self.original_working_dir = os.getcwd()
+        self.stage_working_dir = None
         
     def connect(self):
         """Launches the Isaac Sim simulator application."""
@@ -34,7 +36,134 @@ class IsaacClientManager:
         self.stage_context = omni.usd.get_context()
         return self.simulation_app, self.stage_context
         
-    def load_map(self, usd_path, timeout_sec=180.0):
+    def _repair_missing_asset_paths(self, asset_root):
+        """Overrides broken legacy USD asset paths with local absolute paths."""
+        from pxr import Sdf
+
+        file_index = None
+        repaired = 0
+        unresolved = set()
+
+        def build_file_index():
+            index = {}
+            for root, _, filenames in os.walk(asset_root):
+                for filename in filenames:
+                    index.setdefault(filename.lower(), []).append(
+                        os.path.join(root, filename)
+                    )
+            return index
+
+        def common_suffix_length(left, right):
+            length = 0
+            for left_part, right_part in zip(reversed(left), reversed(right)):
+                if left_part.lower() != right_part.lower():
+                    break
+                length += 1
+            return length
+
+        def find_candidate(attr, authored_path):
+            nonlocal file_index
+
+            normalized_path = authored_path.replace("\\", "/")
+            relative_parts = [
+                part
+                for part in normalized_path.split("/")
+                if part not in ("", ".", "..")
+            ]
+            candidates = []
+
+            for spec in attr.GetPropertyStack():
+                layer_path = spec.layer.realPath or spec.layer.identifier
+                if layer_path and os.path.isabs(layer_path):
+                    candidates.append(
+                        os.path.normpath(
+                            os.path.join(os.path.dirname(layer_path), authored_path)
+                        )
+                    )
+
+            candidates.append(
+                os.path.normpath(os.path.join(asset_root, authored_path))
+            )
+
+            for anchor in ("Assets", "Library", "Materials", "Props"):
+                if anchor in relative_parts:
+                    suffix = relative_parts[relative_parts.index(anchor):]
+                    candidates.append(os.path.join(asset_root, *suffix))
+                    if anchor == "Library":
+                        candidates.append(
+                            os.path.join(asset_root, "ov-content", *suffix)
+                        )
+
+            for candidate in candidates:
+                if os.path.isfile(candidate):
+                    return os.path.abspath(candidate)
+
+            if not relative_parts:
+                return None
+            if file_index is None:
+                file_index = build_file_index()
+
+            matches = file_index.get(relative_parts[-1].lower(), [])
+            if len(matches) == 1:
+                return os.path.abspath(matches[0])
+            if matches:
+                ranked_matches = sorted(
+                    matches,
+                    key=lambda path: common_suffix_length(
+                        relative_parts,
+                        os.path.relpath(path, asset_root).split(os.sep),
+                    ),
+                    reverse=True,
+                )
+                best_match = ranked_matches[0]
+                best_score = common_suffix_length(
+                    relative_parts,
+                    os.path.relpath(best_match, asset_root).split(os.sep),
+                )
+                if best_score >= 2:
+                    return os.path.abspath(best_match)
+            return None
+
+        for prim in self.stage.TraverseAll():
+            for attr in prim.GetAttributes():
+                try:
+                    value = attr.Get()
+                except Exception:
+                    continue
+                if not isinstance(value, Sdf.AssetPath):
+                    continue
+
+                authored_path = value.path
+                if (
+                    not authored_path
+                    or value.resolvedPath
+                    or os.path.isabs(authored_path)
+                    or authored_path.startswith(("http://", "https://", "omniverse://"))
+                ):
+                    continue
+
+                candidate = find_candidate(attr, authored_path)
+                if candidate is None:
+                    unresolved.add(authored_path)
+                    continue
+
+                try:
+                    attr.Set(Sdf.AssetPath(candidate))
+                    repaired += 1
+                except Exception:
+                    unresolved.add(authored_path)
+
+        if repaired:
+            print(f"[+] Repaired {repaired} missing local USD asset path(s).")
+        if unresolved:
+            preview = ", ".join(sorted(unresolved)[:5])
+            suffix = "" if len(unresolved) <= 5 else ", ..."
+            print(
+                f"[!] {len(unresolved)} local asset path(s) remain unresolved: "
+                f"{preview}{suffix}"
+            )
+
+    def load_map(self, usd_path, timeout_sec=180.0, repair_asset_paths=True):
         """Loads a USD map stage and waits for it to compile assets."""
         if not os.path.isabs(usd_path) and not usd_path.startswith(("http://", "https://", "omniverse://")):
             dataset_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -52,6 +181,13 @@ class IsaacClientManager:
             else:
                 raise FileNotFoundError(f"USD map not found: {usd_path}")
 
+        if not usd_path.startswith(("http://", "https://", "omniverse://")):
+            # Some legacy AEC materials resolve texture paths relative to the
+            # process working directory instead of the authoring USD layer.
+            self.stage_working_dir = os.path.dirname(os.path.abspath(usd_path))
+            os.chdir(self.stage_working_dir)
+            print(f"[*] USD asset working directory: {self.stage_working_dir}")
+
         if not self.stage_context.open_stage(usd_path):
             raise RuntimeError(f"Isaac Sim failed to open USD stage: {usd_path}")
 
@@ -61,12 +197,15 @@ class IsaacClientManager:
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"Timed out while loading USD stage after {timeout_sec:.0f}s: {usd_path}")
 
-        for _ in range(5):
-            self.simulation_app.update()
-
         self.stage = self.stage_context.get_stage()
         if self.stage is None:
             raise RuntimeError(f"USD stage is unavailable after loading: {usd_path}")
+
+        if repair_asset_paths and self.stage_working_dir:
+            self._repair_missing_asset_paths(self.stage_working_dir)
+
+        for _ in range(5):
+            self.simulation_app.update()
 
         print("[+] USD Stage loaded successfully.")
         return self.stage
@@ -182,9 +321,20 @@ class IsaacClientManager:
 
         return np.asarray(random.choice(prop_specs)[0], dtype=np.float64)
 
-    def shutdown(self):
+    def shutdown(self, force_process_exit=False, exit_code=0):
         """Closes the simulation application cleanly."""
+        os.chdir(self.original_working_dir)
+        self.stage_working_dir = None
+
         if self.simulation_app:
             print("[*] Shutting down NVIDIA Isaac Sim application...")
+            if force_process_exit:
+                # Isaac Sim 6.0 on this ARM/GB10 host aborts in TaskGroup
+                # teardown with fast shutdown and takes several minutes with
+                # full cleanup. The generator has already detached Replicator
+                # and flushed its pickle files before reaching this point.
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(exit_code)
             self.simulation_app.close()
             self.simulation_app = None
