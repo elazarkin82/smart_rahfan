@@ -4,6 +4,7 @@ import os
 import pickle
 import numpy as np
 import configparser
+from tqdm.auto import tqdm
 
 # Save the original GroupNormalization
 if hasattr(layers, 'GroupNormalization'):
@@ -923,24 +924,35 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
     # If the dataset size is less than 75% of available memory, cache the whole thing in RAM
     if total_expected_bytes < mem.available * 0.75:
         print(f"Caching dataset to RAM ({len(selected_indices)} samples, {total_expected_bytes / (1024**3):.2f} GB)...")
+
         with h5py.File(h5_path, 'r') as f:
             # Efficient index sorting for faster HDF5 slicing
+            print("1")
             sort_idx = np.argsort(selected_indices)
+            print("2")
             sorted_indices = selected_indices[sort_idx]
-            
+            print("3")
             # Read in sorted order (much faster for H5 index slicing)
             ref_data = f['reference_stack'][sorted_indices]
+            print("4")
             search_data = f['search_frame'][sorted_indices]
+            print("5")
             heatmap_data = f['ground_truth_heatmap'][sorted_indices]
+            print("6")
             quality_data = f['ground_truth_quality'][sorted_indices]
-            
+            print("7")
             # Restore original shuffled order
             unsort_idx = np.argsort(sort_idx)
+            print("8")
             ref_data = ref_data[unsort_idx]
+            print("9")
             search_data = search_data[unsort_idx]
+            print("10")
             heatmap_data = heatmap_data[unsort_idx]
+            print("11")
             quality_data = quality_data[unsort_idx]
-            
+            print("12")
+
         print("Dataset successfully cached to RAM.")
         
         # Create a tf.data.Dataset from generator

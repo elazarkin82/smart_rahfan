@@ -53,16 +53,19 @@ mkdir -p outputs
 # --dataset_dir: Can receive multiple space-separated directories (e.g. carla + real data)
 # --loss_heatmap dbsz_relu: (Default) Uses the Relu-based DBSZ loss for flat background suppression.
 python3 tracker_model.py train \
-    --dataset_dir dataset_generator/dataset_carla dataset_generator/dataset \
+    --dataset_dir dataset_generator/compiled \
     --num_of_epochs 500 \
     --lr 1e-3 \
     --loss_heatmap dbsz_relu \
     --loss_quality bce \
     --train_mode joint \
-    --c_bg 6.0 \
-    --eval_pkl_num 	50 \
+    --c_bg 4.0 \
+    --dbsz_border 0.4 \
     --output outputs/tracker.keras \
     --init_keras_file outputs/tracker.keras \
     --best_train_loss_output outputs/tracker_best_train_loss.keras \
     --log_file outputs/train.log \
-    --train_mode heatmap_only
+    --train_mode heatmap_only \
+    --batch_size 32
+
+# --eval_pkl_num 	50 \

@@ -6,6 +6,13 @@
         "maps": ["Town10HD_Opt", "Town04_Opt", "Town05_Opt"],
         "weather_presets": ["ClearNoon", "Sunset"]
     },
+    "isaac": {
+        "maps": [
+            "/home/elazarkin/work/projects/smart_rahfan/training/tracker/tracker_ver4/dataset_generator/isaac/assets/warehouse.usd",
+            "/home/elazarkin/work/projects/smart_rahfan/training/tracker/tracker_ver4/dataset_generator/isaac/assets/office.usd"
+        ],
+        "renderer": "RayTracedLighting"
+    },
     "sensor": {
         "width": 800,
         "height": 600,
@@ -17,7 +24,7 @@
         "output_dir": "outputs",
         "cache_dir": "cache",
         "debug_dir": "debug",
-        "num_flights_to_cache": 3000,
+        "num_flights_to_cache": 5,
         "frames_per_flight": 6,
         "num_false_negatives": 1,
         "debug_interval": 50,

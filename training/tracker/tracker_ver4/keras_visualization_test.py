@@ -151,7 +151,7 @@ class KerasFCNVisualizer:
                     self.current_sample_idx += 1
                     
                 sample = self.current_batch_data[self.current_sample_idx]
-                ref_stack = sample["reference_stack"]  # (16, 32, 32, 1)
+                ref_stack = sample["reference_stack"].transpose(3, 1, 2, 0)  # (16, 32, 32, 1)->(1, 32, 32, 16)
                 search_raw = sample["search_frame"]    # (H, W, 1)
                 gt_heatmap = sample["ground_truth_heatmap"]
                 meta = sample["metadata"]
@@ -252,9 +252,9 @@ class KerasFCNVisualizer:
                 pred_norm = [x_c / 256.0, y_c / 256.0]
             else:
                 pred_norm = [x_max / 256.0, y_max / 256.0]
-            
+
             search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
-            search_vis = search_rgb.copy()
+            search_vis = (search_rgb.copy()*255).astype(np.uint8)
             
             # Draw Expected target (cyan circle)
             if norm_coords is not None:
