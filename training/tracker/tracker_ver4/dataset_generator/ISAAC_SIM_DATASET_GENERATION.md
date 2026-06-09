@@ -76,6 +76,18 @@ The same command can be launched non-interactively from the host:
 ./connect.sh /isaac-sim/python.sh isaac_dataset_generator.py
 ```
 
+For the complete build, container startup, and cache-generation flow, run from
+the dataset generator directory:
+
+```bash
+./run_isaac_datagenerator.sh
+```
+
+The Docker image is built only when it is missing. Use `--rebuild` to force an
+image rebuild, or `--keep-container` to leave a container started by the script
+running after generation. A container that was already running is reused and
+is never stopped by the script.
+
 The generator reads `pipeline_config.json`. Isaac-specific settings include:
 
 ```json

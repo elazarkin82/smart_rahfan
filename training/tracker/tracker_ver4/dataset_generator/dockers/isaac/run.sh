@@ -2,6 +2,7 @@
 set -euo pipefail
 
 CONTAINER_NAME="${ISAAC_CONTAINER_NAME:-isaac-sim-instance}"
+IMAGE_NAME="${ISAAC_IMAGE_NAME:-isaac-sim-server:local}"
 DISPLAY_VALUE="${DISPLAY:-:1}"
 
 if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
@@ -24,5 +25,5 @@ docker run -d --rm \
     -v "${HOME}:${HOME}" \
     --entrypoint /bin/bash \
     --name "${CONTAINER_NAME}" \
-    isaac-sim-server:local \
+    "${IMAGE_NAME}" \
     -lc 'exec sleep infinity'
