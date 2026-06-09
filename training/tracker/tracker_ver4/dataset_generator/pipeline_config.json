@@ -8,8 +8,11 @@
     },
     "isaac": {
         "maps": [
-            "isaac/assets/warehouse.usd",
-            "isaac/assets/office.usd"
+            "isaac/assets/Demos/AEC/BrownstoneDemo/World_BrownstoneDemopack_Brownstone(8Gb).usd",
+            "isaac/assets/Demos/AEC/BrownstoneDemo/World_BrownstoneDemopack_Lite(11Gb).usd",
+            "isaac/assets/Demos/AEC/BrownstoneDemo/World_BrownstoneDemopack_Morning(20Gb).usd",
+            "isaac/assets/Demos/AEC/BrownstoneDemo/World_BrownstoneDemopack_Night(20Gb).usd",
+            "isaac/assets/Demos/AEC/BrownstoneDemo/World_BrownstoneDemopack_Park(8Gb).usd"
         ],
         "renderer": "RayTracedLighting",
         "headless": true,
