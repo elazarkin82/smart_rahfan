@@ -8,10 +8,14 @@
     },
     "isaac": {
         "maps": [
-            "/home/elazarkin/work/projects/smart_rahfan/training/tracker/tracker_ver4/dataset_generator/isaac/assets/warehouse.usd",
-            "/home/elazarkin/work/projects/smart_rahfan/training/tracker/tracker_ver4/dataset_generator/isaac/assets/office.usd"
+            "isaac/assets/warehouse.usd",
+            "isaac/assets/office.usd"
         ],
-        "renderer": "RayTracedLighting"
+        "renderer": "RayTracedLighting",
+        "headless": true,
+        "rt_subframes": 4,
+        "stage_load_timeout_sec": 180.0,
+        "max_attempts_per_flight": 25
     },
     "sensor": {
         "width": 800,

@@ -35,6 +35,39 @@ def nlerp_quat(q1, q2, t):
     q = q1 * (1.0 - t) + q2 * t
     return q / np.linalg.norm(q)
 
+def quaternion_multiply(q1, q2):
+    """Multiplies two quaternions in [w, x, y, z] order."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    q = np.array([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ])
+    return q / np.linalg.norm(q)
+
+def quaternion_from_euler(roll, pitch, yaw):
+    """Creates a local rotation quaternion from Euler angles in radians."""
+    cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+    cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+    cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+    return np.array([
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ])
+
+def rotate_vector(vector, axis, angle):
+    """Rotates a vector around an axis using Rodrigues' formula."""
+    axis = axis / np.linalg.norm(axis)
+    return (
+        vector * math.cos(angle)
+        + np.cross(axis, vector) * math.sin(angle)
+        + axis * np.dot(axis, vector) * (1.0 - math.cos(angle))
+    )
+
 def rotation_matrix_to_quaternion(R):
     """Converts a 3x3 rotation matrix to a normalized quaternion [w, x, y, z]."""
     tr = np.trace(R)
@@ -117,17 +150,21 @@ def main():
     width = config['sensor']['width']
     height = config['sensor']['height']
     fov = config['sensor']['fov']
-    fps = config['sensor']['fps']
+    fov_range = config['sensor'].get('fov_range', [fov, fov])
     
     # Read Isaac Sim configs
     isaac_cfg = config.get("isaac", {})
     maps = isaac_cfg.get("maps", ["/Isaac/Environments/Simple_Warehouse/warehouse.usd"])
     renderer = isaac_cfg.get("renderer", "RayTracedLighting")
     headless = isaac_cfg.get("headless", True)
+    rt_subframes = isaac_cfg.get("rt_subframes", 4)
+    stage_load_timeout = isaac_cfg.get("stage_load_timeout_sec", 180.0)
+    max_attempts_per_flight = isaac_cfg.get("max_attempts_per_flight", 25)
     
     frames_per_flight = config['generation']['frames_per_flight']
     num_false_negatives = config['generation']['num_false_negatives']
     debug_interval = config['generation']['debug_interval']
+    min_texture_std = config['generation'].get('min_texture_std', 2.0)
     
     # Noise parameters
     noise_cfg = config['generation']['noise_params']
@@ -142,16 +179,36 @@ def main():
     simulation_app, stage_context = client_mgr.connect()
     
     sensor_mgr = IsaacSensorManager(camera_path="/World/Camera", width=width, height=height, fov=fov)
+    current_map = None
+    attempts_for_flight = 0
     
     try:
         while flights_generated < num_flights_target:
             # Pick a map deterministically based on flight index
             target_map = maps[flights_generated % len(maps)]
-            
-            # 2. Load Stage
-            client_mgr.load_map(target_map)
-            sensor_mgr.create_camera()
-            sensor_mgr.initialize_replicator(simulation_app)
+
+            # Keep a loaded stage alive across retries to avoid recompiling RTX
+            # shaders and rebuilding the Replicator graph on every failed flight.
+            if current_map != target_map:
+                sensor_mgr.destroy()
+                client_mgr.load_map(target_map, timeout_sec=stage_load_timeout)
+                sensor_mgr.create_camera()
+                sensor_mgr.initialize_replicator(
+                    simulation_app,
+                    warmup_frames=2,
+                    rt_subframes=rt_subframes,
+                )
+                current_map = target_map
+
+            attempts_for_flight += 1
+            if attempts_for_flight > max_attempts_per_flight:
+                raise RuntimeError(
+                    f"Unable to generate flight {flights_generated} after "
+                    f"{max_attempts_per_flight} attempts on map {target_map}"
+                )
+
+            flight_fov = random.uniform(float(fov_range[0]), float(fov_range[1]))
+            sensor_mgr.set_fov(flight_fov)
             
             # 3. Locate Target
             target_3d = client_mgr.get_random_target()
@@ -170,6 +227,7 @@ def main():
             # Flight approaches closely to target
             stop_dist = random.uniform(3.0, 6.0)
             vec = target_3d - start_pos
+            start_dist = np.linalg.norm(vec)
             dir_vec = vec / start_dist
             end_pos = start_pos + dir_vec * (start_dist - stop_dist)
             
@@ -208,7 +266,11 @@ def main():
             drift_right_freq = random.uniform(1.0, 3.0)
             drift_up_freq = random.uniform(1.0, 3.0)
             
-            print(f"[{flights_generated+1}/{num_flights_target}] Generating Flight... Target Dist: {start_dist:.1f}m")
+            print(
+                f"[{flights_generated+1}/{num_flights_target}] Generating flight "
+                f"(attempt {attempts_for_flight}/{max_attempts_per_flight}, "
+                f"target distance {start_dist:.1f}m)"
+            )
             
             flight_data = []
             valid_flight = True
@@ -264,22 +326,24 @@ def main():
                     # Compute perturbed lookat orientation
                     rot_perturbed = get_lookat_quaternion(pos, target_3d)
                     
-                    # Apply perturbations to quat
-                    # For simplicity, perturb the rotation matrices or slerp slightly
                     quat = nlerp_quat(quat, rot_perturbed, 0.5)
+                    jitter_quat = quaternion_from_euler(
+                        roll_wobble,
+                        pitch_wobble,
+                        yaw_wobble,
+                    )
+                    quat = quaternion_multiply(quat, jitter_quat)
                     
                     sensor_mgr.move_to(pos, quat)
                     
                     # Get frame data from replicator
-                    rgb_arr, params = sensor_mgr.get_sync_data(simulation_app)
+                    rgb_arr, params = sensor_mgr.get_sync_data(rt_subframes=rt_subframes)
                     
                     if rgb_arr is None or params is None:
                         continue
                         
                     # Project target onto 2D image coordinates
                     px_draw = project_3d_to_pixel(target_3d, params, width, height)
-                    print(f"DEBUG: frame_idx={frame_idx}, pos={pos}, target_3d={target_3d}, px_draw={px_draw}, params_ok={params is not None}")
-                    
                     # Target must remain in screen bounds during positive frames
                     if px_draw is None or not (0 <= px_draw[0] < width and 0 <= px_draw[1] < height):
                         continue
@@ -292,6 +356,16 @@ def main():
                     break
                     
                 gray_arr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2GRAY)
+                patch_radius = 24
+                patch_x0 = max(0, px_draw[0] - patch_radius)
+                patch_x1 = min(width, px_draw[0] + patch_radius + 1)
+                patch_y0 = max(0, px_draw[1] - patch_radius)
+                patch_y1 = min(height, px_draw[1] + patch_radius + 1)
+                target_patch = gray_arr[patch_y0:patch_y1, patch_x0:patch_x1]
+                if target_patch.size == 0 or float(np.std(target_patch)) < min_texture_std:
+                    valid_flight = False
+                    break
+
                 actual_dist = np.linalg.norm(target_3d - pos)
                 
                 flight_data.append({
@@ -311,18 +385,20 @@ def main():
             # 5. Handle False Negatives (target completely out of frame)
             if valid_flight:
                 for fn_idx in range(num_false_negatives):
-                    # Rotate the camera 45 degrees away so the target is out of screen
-                    fn_quat = get_lookat_quaternion(pos, target_3d)
-                    
-                    # Rotate camera yaw
-                    # Multiply by a local yaw rotation quaternion
-                    yaw_rot_angle = math.radians(45.0 + fn_idx * 15.0)
-                    rot_y = np.array([math.cos(yaw_rot_angle/2), 0.0, 0.0, math.sin(yaw_rot_angle/2)])
-                    # Simple quat mult: q_final = quat * rot_y
-                    fn_quat = nlerp_quat(fn_quat, rot_y, 0.5)
+                    target_vector = target_3d - pos
+                    rotation_axis = np.array([0.0, 0.0, 1.0])
+                    target_direction = target_vector / np.linalg.norm(target_vector)
+                    if abs(np.dot(target_direction, rotation_axis)) > 0.95:
+                        rotation_axis = np.array([0.0, 1.0, 0.0])
+                    away_vector = rotate_vector(
+                        target_vector,
+                        rotation_axis,
+                        math.radians(110.0 + fn_idx * 20.0),
+                    )
+                    fn_quat = get_lookat_quaternion(pos, pos + away_vector)
                     
                     sensor_mgr.move_to(pos, fn_quat)
-                    rgb_arr, params = sensor_mgr.get_sync_data(simulation_app)
+                    rgb_arr, params = sensor_mgr.get_sync_data(rt_subframes=rt_subframes)
                     
                     if rgb_arr is None or params is None:
                         valid_flight = False
@@ -358,18 +434,16 @@ def main():
                 flight_data[0]["map_name"] = os.path.basename(target_map).replace(".usd", "")
                 flight_data[0]["crop_max_size"] = config['compiler'].get('crop_max_size', 512)
                 flight_data[0]["crop_min_size"] = config['compiler'].get('crop_min_size', 16)
-                flight_data[0]["fov"] = fov
+                flight_data[0]["fov"] = flight_fov
                 
                 with open(pkl_path, 'wb') as f:
                     pickle.dump(flight_data, f)
                     
                 flights_generated += 1
+                attempts_for_flight = 0
                 print(f"[SUCCESS] Flight successfully saved to cache: flight_{flights_generated-1:04d}.pkl")
             else:
-                print("[!] Flight generation failed or target lost. Retrying stage...")
-                
-            # Clean up current camera before loading next map
-            sensor_mgr.destroy()
+                print("[!] Flight generation failed or target was lost. Retrying on the loaded stage...")
             
     except KeyboardInterrupt:
         print("[*] Interrupted by user.")
