@@ -6,6 +6,7 @@ import random
 import math
 import pickle
 import traceback
+from collections import Counter
 import numpy as np
 import cv2
 
@@ -16,7 +17,7 @@ sys.path.append(os.path.dirname(script_dir))
 
 from isaac.core.isaac_client import IsaacClientManager
 from isaac.core.sensor_manager import IsaacSensorManager
-from isaac.core.geometry_utils import project_3d_to_pixel
+from isaac.core.geometry_utils import pixel_depth_to_world, project_3d_to_pixel
 
 def load_config(path="pipeline_config.json"):
     if not os.path.exists(path) and path == "pipeline_config.json":
@@ -133,6 +134,127 @@ def get_map_for_flight(maps, flight_index, num_flights_target):
     map_idx = min(flight_index // flights_per_map, len(maps) - 1)
     return maps[map_idx]
 
+
+def select_available_map(maps, scheduled_map, failed_maps):
+    """Uses the scheduled map, or the next healthy map after a failure."""
+    if scheduled_map not in failed_maps:
+        return scheduled_map
+
+    scheduled_idx = maps.index(scheduled_map)
+    for offset in range(1, len(maps) + 1):
+        candidate = maps[(scheduled_idx + offset) % len(maps)]
+        if candidate not in failed_maps:
+            return candidate
+    return None
+
+
+def get_depth_at_pixel(depth_arr, pixel):
+    if depth_arr is None:
+        return None
+    x, y = int(pixel[0]), int(pixel[1])
+    if y < 0 or y >= depth_arr.shape[0] or x < 0 or x >= depth_arr.shape[1]:
+        return None
+    distance = float(depth_arr[y, x])
+    if not np.isfinite(distance) or distance <= 0.0:
+        return None
+    return distance
+
+
+def find_visible_target(
+    rgb_arr,
+    depth_arr,
+    params,
+    width,
+    height,
+    min_texture_std,
+    min_distance,
+    max_distance,
+    max_samples,
+):
+    """Selects a textured, visible RGB/depth pixel like the CARLA generator."""
+    failures = Counter()
+    if rgb_arr is None:
+        failures["scout_missing_rgb"] += 1
+        return None, failures
+    if depth_arr is None:
+        failures["scout_missing_depth"] += 1
+        return None, failures
+    if params is None:
+        failures["scout_missing_camera_params"] += 1
+        return None, failures
+
+    margin_x = max(1, int(width * 0.25))
+    margin_y = max(1, int(height * 0.25))
+    for _ in range(max_samples):
+        px = random.randint(margin_x, width - margin_x - 1)
+        py = random.randint(margin_y, height - margin_y - 1)
+
+        patch = rgb_arr[
+            max(0, py - 7):min(height, py + 8),
+            max(0, px - 7):min(width, px + 8),
+        ]
+        if patch.size == 0:
+            failures["scout_empty_patch"] += 1
+            continue
+        patch_gray = cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY)
+        if float(np.std(patch_gray)) < min_texture_std:
+            failures["scout_low_texture"] += 1
+            continue
+
+        distance = get_depth_at_pixel(depth_arr, (px, py))
+        if distance is None or not (min_distance <= distance <= max_distance):
+            failures["scout_invalid_distance"] += 1
+            continue
+
+        target_3d = pixel_depth_to_world(
+            (px, py),
+            distance,
+            params,
+            width,
+            height,
+        )
+        if target_3d is None:
+            failures["scout_backprojection_failed"] += 1
+            continue
+
+        reprojection = project_3d_to_pixel(target_3d, params, width, height)
+        if (
+            reprojection is None
+            or abs(reprojection[0] - px) > 2
+            or abs(reprojection[1] - py) > 2
+        ):
+            failures["scout_reprojection_mismatch"] += 1
+            continue
+        return (target_3d, (px, py), distance), failures
+
+    failures["scout_no_valid_target"] += 1
+    return None, failures
+
+
+def report_failed_attempt(
+    target_map,
+    attempts_for_flight,
+    max_attempts_per_flight,
+    rejection_counts,
+    failed_maps,
+):
+    if attempts_for_flight < max_attempts_per_flight:
+        print("[!] Flight generation failed. Retrying on the loaded stage...")
+        return
+
+    summary = ", ".join(
+        f"{reason}={count}"
+        for reason, count in rejection_counts.most_common()
+    )
+    print(
+        f"[!] Map exhausted after {max_attempts_per_flight} attempts: "
+        f"{target_map}"
+    )
+    if summary:
+        print(f"[!] Rejection summary: {summary}")
+    failed_maps.add(target_map)
+
+
 def main():
     config = load_config()
     
@@ -172,6 +294,9 @@ def main():
     stage_load_timeout = isaac_cfg.get("stage_load_timeout_sec", 180.0)
     repair_asset_paths = isaac_cfg.get("repair_missing_asset_paths", True)
     max_attempts_per_flight = isaac_cfg.get("max_attempts_per_flight", 25)
+    target_search_samples = isaac_cfg.get("target_search_samples", 100)
+    target_distance_range = isaac_cfg.get("target_distance_range", [8.0, 80.0])
+    occlusion_tolerance = isaac_cfg.get("occlusion_tolerance_m", 1.5)
     force_process_exit = isaac_cfg.get("force_process_exit_on_shutdown", True)
 
     if not maps:
@@ -197,17 +322,30 @@ def main():
     sensor_mgr = IsaacSensorManager(camera_path="/World/Camera", width=width, height=height, fov=fov)
     current_map = None
     attempts_for_flight = 0
+    failed_maps = set()
+    rejection_counts = Counter()
     exit_code = 0
     pending_exception = None
     
     try:
         while flights_generated < num_flights_target:
             # Use the same contiguous per-map allocation as the CARLA generator.
-            target_map = get_map_for_flight(
+            scheduled_map = get_map_for_flight(
                 maps,
                 flights_generated,
                 num_flights_target,
             )
+            target_map = select_available_map(maps, scheduled_map, failed_maps)
+            if target_map is None:
+                raise RuntimeError(
+                    f"All {len(maps)} Isaac maps failed while generating "
+                    f"flight {flights_generated}."
+                )
+            if target_map != scheduled_map and current_map != target_map:
+                print(
+                    f"[!] Scheduled map is unavailable; continuing with "
+                    f"{target_map}"
+                )
 
             # Keep a loaded stage alive across retries to avoid recompiling RTX
             # shaders and rebuilding the Replicator graph on every failed flight.
@@ -236,36 +374,73 @@ def main():
                     warmup_frames=warmup_frames,
                     rt_subframes=rt_subframes,
                 )
+                client_mgr.prepare_target_candidates()
                 current_map = target_map
+                attempts_for_flight = 0
+                rejection_counts.clear()
 
             attempts_for_flight += 1
-            if attempts_for_flight > max_attempts_per_flight:
-                raise RuntimeError(
-                    f"Unable to generate flight {flights_generated} after "
-                    f"{max_attempts_per_flight} attempts on map {target_map}"
-                )
 
             flight_fov = random.uniform(float(fov_range[0]), float(fov_range[1]))
             sensor_mgr.set_fov(flight_fov)
             
-            # 3. Locate Target
-            target_3d = client_mgr.get_random_target()
-            
-            # 4. Compute Flight Start and End
+            # 3. Use cached geometry only as a camera anchor. The actual target
+            # is selected from the visible RGB/depth scout frame below.
+            camera_anchor = client_mgr.get_random_target()
+
+            # 4. Compute a scout camera pose.
             start_dist = random.uniform(20.0, 45.0)
             theta = random.uniform(0, 2 * math.pi)
             phi = random.uniform(math.radians(15), math.radians(45)) # Angle from vertical
             
-            start_pos = target_3d + start_dist * np.array([
+            start_pos = camera_anchor + start_dist * np.array([
                 math.sin(phi)*math.cos(theta),
                 math.sin(phi)*math.sin(theta),
                 math.cos(phi)
             ])
-            
+
+            scout_quat = get_lookat_quaternion(start_pos, camera_anchor)
+            sensor_mgr.move_to(start_pos, scout_quat)
+            scout_rgb, scout_depth, scout_params = sensor_mgr.get_sync_data(
+                rt_subframes=rt_subframes
+            )
+            target_result, scout_failures = find_visible_target(
+                scout_rgb,
+                scout_depth,
+                scout_params,
+                width,
+                height,
+                min_texture_std,
+                float(target_distance_range[0]),
+                float(target_distance_range[1]),
+                int(target_search_samples),
+            )
+            rejection_counts.update(scout_failures)
+            if target_result is None:
+                report_failed_attempt(
+                    target_map,
+                    attempts_for_flight,
+                    max_attempts_per_flight,
+                    rejection_counts,
+                    failed_maps,
+                )
+                continue
+            target_3d, _, selected_distance = target_result
+
             # Flight approaches closely to target
             stop_dist = random.uniform(3.0, 6.0)
             vec = target_3d - start_pos
             start_dist = np.linalg.norm(vec)
+            if start_dist <= stop_dist:
+                rejection_counts["target_too_close_for_flight"] += 1
+                report_failed_attempt(
+                    target_map,
+                    attempts_for_flight,
+                    max_attempts_per_flight,
+                    rejection_counts,
+                    failed_maps,
+                )
+                continue
             dir_vec = vec / start_dist
             end_pos = start_pos + dir_vec * (start_dist - stop_dist)
             
@@ -307,11 +482,12 @@ def main():
             print(
                 f"[{flights_generated+1}/{num_flights_target}] Generating flight "
                 f"(attempt {attempts_for_flight}/{max_attempts_per_flight}, "
-                f"target distance {start_dist:.1f}m)"
+                f"target distance {selected_distance:.1f}m)"
             )
             
             flight_data = []
             valid_flight = True
+            failure_reason = None
             
             is_debug = (flights_generated % debug_interval == 0)
             flight_debug_dir = os.path.join(debug_dir, f"flight_{flights_generated:04d}")
@@ -375,15 +551,34 @@ def main():
                     sensor_mgr.move_to(pos, quat)
                     
                     # Get frame data from replicator
-                    rgb_arr, params = sensor_mgr.get_sync_data(rt_subframes=rt_subframes)
+                    rgb_arr, depth_arr, params = sensor_mgr.get_sync_data(
+                        rt_subframes=rt_subframes
+                    )
                     
-                    if rgb_arr is None or params is None:
+                    if rgb_arr is None:
+                        rejection_counts["positive_missing_rgb"] += 1
+                        continue
+                    if depth_arr is None:
+                        rejection_counts["positive_missing_depth"] += 1
+                        continue
+                    if params is None:
+                        rejection_counts["positive_missing_camera_params"] += 1
                         continue
                         
                     # Project target onto 2D image coordinates
                     px_draw = project_3d_to_pixel(target_3d, params, width, height)
                     # Target must remain in screen bounds during positive frames
                     if px_draw is None or not (0 <= px_draw[0] < width and 0 <= px_draw[1] < height):
+                        rejection_counts["positive_target_offscreen"] += 1
+                        continue
+
+                    actual_dist = np.linalg.norm(target_3d - pos)
+                    visible_dist = get_depth_at_pixel(depth_arr, px_draw)
+                    if visible_dist is None:
+                        rejection_counts["positive_invalid_depth"] += 1
+                        continue
+                    if visible_dist < actual_dist - occlusion_tolerance:
+                        rejection_counts["positive_target_occluded"] += 1
                         continue
                         
                     frame_success = True
@@ -391,6 +586,7 @@ def main():
                     
                 if not frame_success:
                     valid_flight = False
+                    failure_reason = "positive_frame_exhausted"
                     break
                     
                 gray_arr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2GRAY)
@@ -402,10 +598,9 @@ def main():
                 target_patch = gray_arr[patch_y0:patch_y1, patch_x0:patch_x1]
                 if target_patch.size == 0 or float(np.std(target_patch)) < min_texture_std:
                     valid_flight = False
+                    failure_reason = "positive_low_texture"
                     break
 
-                actual_dist = np.linalg.norm(target_3d - pos)
-                
                 flight_data.append({
                     "frame_index": frame_idx,
                     "image_gray": gray_arr,
@@ -436,16 +631,24 @@ def main():
                     fn_quat = get_lookat_quaternion(pos, pos + away_vector)
                     
                     sensor_mgr.move_to(pos, fn_quat)
-                    rgb_arr, params = sensor_mgr.get_sync_data(rt_subframes=rt_subframes)
+                    rgb_arr, _, params = sensor_mgr.get_sync_data(
+                        rt_subframes=rt_subframes
+                    )
                     
-                    if rgb_arr is None or params is None:
+                    if rgb_arr is None:
                         valid_flight = False
+                        failure_reason = "negative_missing_rgb"
+                        break
+                    if params is None:
+                        valid_flight = False
+                        failure_reason = "negative_missing_camera_params"
                         break
                         
                     # Project target to ensure it is indeed out of bounds
                     px_draw = project_3d_to_pixel(target_3d, params, width, height)
                     if px_draw is not None and (0 <= px_draw[0] < width and 0 <= px_draw[1] < height):
                         valid_flight = False
+                        failure_reason = "negative_target_still_visible"
                         break
                         
                     gray_arr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2GRAY)
@@ -479,9 +682,17 @@ def main():
                     
                 flights_generated += 1
                 attempts_for_flight = 0
+                rejection_counts.clear()
                 print(f"[SUCCESS] Flight successfully saved to cache: flight_{flights_generated-1:04d}.pkl")
             else:
-                print("[!] Flight generation failed or target was lost. Retrying on the loaded stage...")
+                rejection_counts[failure_reason or "incomplete_flight"] += 1
+                report_failed_attempt(
+                    target_map,
+                    attempts_for_flight,
+                    max_attempts_per_flight,
+                    rejection_counts,
+                    failed_maps,
+                )
             
     except KeyboardInterrupt:
         print("[*] Interrupted by user.")

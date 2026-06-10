@@ -21,6 +21,9 @@
         "stage_load_timeout_sec": 180.0,
         "repair_missing_asset_paths": true,
         "max_attempts_per_flight": 25,
+        "target_search_samples": 100,
+        "target_distance_range": [8.0, 80.0],
+        "occlusion_tolerance_m": 1.5,
         "force_process_exit_on_shutdown": true
     },
     "sensor": {

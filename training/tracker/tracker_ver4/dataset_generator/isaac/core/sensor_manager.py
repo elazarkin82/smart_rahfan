@@ -11,6 +11,7 @@ class IsaacSensorManager:
         
         self.render_product = None
         self.rgb_annotator = None
+        self.depth_annotator = None
         self.params_annotator = None
         self.camera_prim = None
         self.rep = None
@@ -73,7 +74,7 @@ class IsaacSensorManager:
         self.camera_prim.GetAttribute("xformOp:orient").Set(quat_gf)
         
     def initialize_replicator(self, simulation_app, warmup_frames=2, rt_subframes=4):
-        """Attaches Replicator annotators to capture rgb and projection camera parameters."""
+        """Attaches Replicator annotators for RGB, depth, and camera parameters."""
         import omni.replicator.core as rep
 
         self.rep = rep
@@ -82,6 +83,8 @@ class IsaacSensorManager:
         self.render_product = rep.create.render_product(self.camera_path, (self.width, self.height))
         self.rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
         self.rgb_annotator.attach(self.render_product)
+        self.depth_annotator = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
+        self.depth_annotator.attach(self.render_product)
         self.params_annotator = rep.AnnotatorRegistry.get_annotator("camera_params")
         self.params_annotator.attach(self.render_product)
 
@@ -98,7 +101,12 @@ class IsaacSensorManager:
         Updates the simulator step and retrieves the captured rgb array 
         and camera parameters (view and projection matrices).
         """
-        if not self.rgb_annotator or not self.params_annotator or self.rep is None:
+        if (
+            not self.rgb_annotator
+            or not self.depth_annotator
+            or not self.params_annotator
+            or self.rep is None
+        ):
             raise RuntimeError("Replicator annotators not initialized.")
 
         self.rep.orchestrator.step(
@@ -108,6 +116,7 @@ class IsaacSensorManager:
         )
 
         rgb_data = self.rgb_annotator.get_data()
+        depth_data = self.depth_annotator.get_data()
         params_data = self.params_annotator.get_data()
 
         if rgb_data is not None and getattr(rgb_data, "ndim", 0) == 3 and rgb_data.size:
@@ -115,20 +124,29 @@ class IsaacSensorManager:
         else:
             rgb_arr = None
 
+        depth_arr = np.asarray(depth_data, dtype=np.float32)
+        if depth_arr.ndim == 3 and depth_arr.shape[2] == 1:
+            depth_arr = depth_arr[:, :, 0]
+        if depth_arr.ndim != 2 or not depth_arr.size:
+            depth_arr = None
+
         if not isinstance(params_data, dict):
             params_data = None
-        return rgb_arr, params_data
+        return rgb_arr, depth_arr, params_data
 
     def destroy(self):
         """Removes the camera and detaches annotators."""
         if self.rgb_annotator and self.render_product:
             self.rgb_annotator.detach(self.render_product)
+        if self.depth_annotator and self.render_product:
+            self.depth_annotator.detach(self.render_product)
         if self.params_annotator and self.render_product:
             self.params_annotator.detach(self.render_product)
         if self.render_product:
             self.render_product.destroy()
             self.render_product = None
         self.rgb_annotator = None
+        self.depth_annotator = None
         self.params_annotator = None
         self.rep = None
         if self.camera_prim:

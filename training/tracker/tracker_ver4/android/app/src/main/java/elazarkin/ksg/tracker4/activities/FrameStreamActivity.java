@@ -83,7 +83,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private float targetY = 0.0f;
     
     // Ver4 Inputs: 1 channel grayscale (direct ByteBuffers to maintain tensor dimensions)
-    private java.nio.ByteBuffer refStackInputBuffer = java.nio.ByteBuffer.allocateDirect(16 * 32 * 32 * 4).order(java.nio.ByteOrder.nativeOrder());
+    private java.nio.ByteBuffer refStackInputBuffer = java.nio.ByteBuffer.allocateDirect(1 * 1 * 64 * 64 * 16 * 4).order(java.nio.ByteOrder.nativeOrder());
     private java.nio.ByteBuffer searchBuffer = java.nio.ByteBuffer.allocateDirect(256 * 256 * 4).order(java.nio.ByteOrder.nativeOrder());
     private java.nio.ByteBuffer outputHeatmapBuffer = java.nio.ByteBuffer.allocateDirect(256 * 256 * 4).order(java.nio.ByteOrder.nativeOrder());
     private java.nio.ByteBuffer outputQualityBuffer = java.nio.ByteBuffer.allocateDirect(4).order(java.nio.ByteOrder.nativeOrder());
@@ -270,9 +270,9 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         lastTrackedX = cx;
         lastTrackedY = cy;
         
-        // Zoom range matches pipeline_config.json: from size 128 down to 4 pixels (scaled dynamically by camera height relative to 600px training size)
+        // Zoom range matches pipeline_config.json: from size 512 down to 16 pixels (scaled dynamically by camera height relative to 600px training size)
         float maxCropSize = (512.0f / 600.0f) * height;
-        float minCropSize = (4.0f / 600.0f) * height;
+        float minCropSize = (16.0f / 600.0f) * height;
         
         int stride = width; // rotated frame stride is width
         
@@ -282,16 +282,17 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             float size = maxCropSize - layer * ((maxCropSize - minCropSize) / 15.0f);
             float half = size / 2.0f;
             
-            for (int y = 0; y < 32; y++) {
-                for (int x = 0; x < 32; x++) {
-                    float srcX = cx - half + (x / 31.0f) * size;
-                    float srcY = cy - half + (y / 31.0f) * size;
+            for (int y = 0; y < 64; y++) {
+                for (int x = 0; x < 64; x++) {
+                    float srcX = cx - half + (x / 63.0f) * size;
+                    float srcY = cy - half + (y / 63.0f) * size;
                     
                     int ix = (int) Math.max(0, Math.min(width - 1, srcX));
                     int iy = (int) Math.max(0, Math.min(height - 1, srcY));
                     
                     int pixel = yPlane[iy * stride + ix] & 0xFF;
-                    refFloatBuffer.put(layer * 32 * 32 + y * 32 + x, pixel / 255.0f);
+                    // Store in Row-Major NHWC layout: batch=0, dim=0, y, x, layer
+                    refFloatBuffer.put(y * 64 * 16 + x * 16 + layer, pixel / 255.0f);
                 }
             }
         }
@@ -385,8 +386,9 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         float[] currBuffer = new float[256 * 256];
         long preStart = SystemClock.elapsedRealtime();
         
-        float cx = (float) width / 2.0f;
-        float cy = (float) height / 2.0f;
+        // Center the search crop dynamically around the last tracked target position
+        float cx = lastTrackedX;
+        float cy = lastTrackedY;
         
         // JNI extracts square crop around static frame center (cx, cy)
         MainActivity.downsampleSearchCrop(yPlane, width, height, stride, cx, cy, cropSize, currBuffer);
@@ -589,16 +591,17 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         cropCurrView.setImageBitmap(currBitmap);
 
         // 3. Render cropHistView (the locked target reference template layer)
-        Bitmap histBitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888);
-        int[] histColors = new int[32 * 32];
+        Bitmap histBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888);
+        int[] histColors = new int[64 * 64];
         java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
-        for (int y = 0; y < 32; y++) {
-            for (int x = 0; x < 32; x++) {
-                int val = (int)(refFloatBuffer.get(selectedHistLayer * 32 * 32 + y * 32 + x) * 255.0f);
-                histColors[y * 32 + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
+        for (int y = 0; y < 64; y++) {
+            for (int x = 0; x < 64; x++) {
+                // Read from NHWC Row-Major layout: batch=0, dim=0, y, x, layer
+                int val = (int)(refFloatBuffer.get(y * 64 * 16 + x * 16 + selectedHistLayer) * 255.0f);
+                histColors[y * 64 + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
             }
         }
-        histBitmap.setPixels(histColors, 0, 32, 0, 0, 32, 32);
+        histBitmap.setPixels(histColors, 0, 64, 0, 0, 64, 64);
         
         // Draw a small red indicator at the center of the reference crop template (the target origin)
         Canvas canvasHist = new Canvas(histBitmap);
@@ -606,7 +609,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         paintHist.setColor(Color.RED);
         paintHist.setStyle(Paint.Style.FILL);
         paintHist.setAntiAlias(true);
-        canvasHist.drawCircle(16.0f, 16.0f, 1.5f, paintHist);
+        canvasHist.drawCircle(32.0f, 32.0f, 3.0f, paintHist);
         
         cropHistView.setImageBitmap(histBitmap);
 

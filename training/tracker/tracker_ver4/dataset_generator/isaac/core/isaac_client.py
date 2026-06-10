@@ -16,6 +16,7 @@ class IsaacClientManager:
         self.stage = None
         self.original_working_dir = os.getcwd()
         self.stage_working_dir = None
+        self.target_candidates = None
         
     def connect(self):
         """Launches the Isaac Sim simulator application."""
@@ -200,6 +201,7 @@ class IsaacClientManager:
         self.stage = self.stage_context.get_stage()
         if self.stage is None:
             raise RuntimeError(f"USD stage is unavailable after loading: {usd_path}")
+        self.target_candidates = None
 
         if repair_asset_paths and self.stage_working_dir:
             self._repair_missing_asset_paths(self.stage_working_dir)
@@ -210,11 +212,11 @@ class IsaacClientManager:
         print("[+] USD Stage loaded successfully.")
         return self.stage
         
-    def get_random_target(self):
-        """
-        Traverses the USD stage to find an existing mesh prop to target.
-        If no meshes are found, spawns a default target cube.
-        """
+    def prepare_target_candidates(self):
+        """Caches coarse scene anchors once per loaded map."""
+        if self.target_candidates is not None:
+            return self.target_candidates
+
         from pxr import Usd, UsdGeom
 
         bbox_cache = UsdGeom.BBoxCache(
@@ -233,6 +235,17 @@ class IsaacClientManager:
             "environment",
             "navmesh",
             "light",
+            "sprinkler",
+            "receptacle",
+            "outlet",
+            "faucet",
+            "shower",
+            "toilet",
+            "cabinet",
+            "dishwasher",
+            "mullion",
+            "plumbing",
+            "fixture",
         )
 
         for prim in self.stage.TraverseAll():
@@ -252,14 +265,24 @@ class IsaacClientManager:
 
             if not np.all(np.isfinite(center)) or not np.all(np.isfinite(size)):
                 continue
-            if np.max(size) < 0.25 or np.max(size) > 50.0:
+            if np.max(size) < 2.0 or np.max(size) > 100.0:
                 continue
             targets.append((prim, center))
 
+        self.target_candidates = targets
+        print(f"[+] Cached {len(targets)} coarse target anchor(s) for this map.")
+        return targets
+
+    def get_random_target(self):
+        """
+        Returns a cached coarse scene anchor. The generator resolves the final
+        target from a visible RGB/depth pixel.
+        """
+        targets = self.prepare_target_candidates()
         if targets:
             target_prim, center = random.choice(targets)
             target_path = target_prim.GetPath().pathString
-            print(f"[+] Targeting existing USD geometry: {target_path}")
+            print(f"[+] Using USD geometry as camera anchor: {target_path}")
             return center
 
         print("[!] No suitable stage geometry found. Creating a procedural fallback scene...")
