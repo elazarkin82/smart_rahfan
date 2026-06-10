@@ -133,6 +133,7 @@ class DatasetVisualizer:
         self.root.bind("<Down>", lambda e: self.prev_file())
         self.root.bind("<m>", lambda e: self.toggle_mode_hotkey())
         self.root.bind("<M>", lambda e: self.toggle_mode_hotkey())
+        self.root.bind("<Delete>", lambda e: self.delete_current_file())
         self.root.bind("<Escape>", lambda e: self.root.quit())
         
         # Initialize first load
@@ -148,6 +149,8 @@ class DatasetVisualizer:
         style.configure("TFrame", background="#121212")
         style.configure("TButton", background="#2a2a2a", foreground="#ffffff", borderwidth=0, focuscolor="none")
         style.map("TButton", background=[("active", "#3a3a3a")])
+        style.configure("Delete.TButton", background="#8b0000", foreground="#ffffff", borderwidth=0, focuscolor="none")
+        style.map("Delete.TButton", background=[("active", "#b22222")])
         style.configure("TCombobox", fieldbackground="#1e1e1e", background="#2d2d2d", foreground="#ffffff")
         
         # 1. Header Frame
@@ -180,8 +183,9 @@ class DatasetVisualizer:
         main_view.pack(side="top", fill="both", expand=True, padx=15, pady=15)
         
         # Left main display area
-        self.left_panel = tk.Frame(main_view, bg="#121212")
+        self.left_panel = tk.Frame(main_view, bg="#121212", width=730, height=520)
         self.left_panel.pack(side="left", fill="both", expand=True)
+        self.left_panel.pack_propagate(False)
         
         # Two side-by-side panels for separate raw displays
         self.search_image_label = tk.Label(self.left_panel, bg="#1a1a1a", bd=1, relief="solid")
@@ -259,6 +263,9 @@ class DatasetVisualizer:
         
         self.btn_next_file = ttk.Button(controls_bar, text="Next Flight [↑] ⏭", width=15, command=self.next_file)
         self.btn_next_file.pack(side="left", padx=5)
+        
+        self.btn_delete = ttk.Button(controls_bar, text="🗑 Delete [Del]", width=15, style="Delete.TButton", command=self.delete_current_file)
+        self.btn_delete.pack(side="left", padx=5)
         
         # Playback speed slider
         speed_frame = tk.Frame(controls_bar, bg="#1e1e1e")
@@ -631,6 +638,65 @@ class DatasetVisualizer:
     def on_speed_changed(self, val):
         self.play_delay_ms = int(float(val))
         self.speed_label.config(text=f"Frame Delay: {self.play_delay_ms} ms")
+
+    def delete_current_file(self):
+        files = self.raw_files if self.mode == "raw" else self.compiled_files
+        if not files or not self.loaded_data:
+            return
+            
+        filename = files[self.current_file_idx]
+        
+        # Safety Check: Do not allow deletion of dataset.h5 from this visualizer.
+        if filename == "dataset.h5":
+            messagebox.showwarning(
+                "Cannot Delete Dataset",
+                "You cannot delete the compiled dataset file 'dataset.h5' directly from here.\n\n"
+                "To remove bad flights:\n"
+                "1. Switch Mode to 'Raw Flight Cache'.\n"
+                "2. Delete the bad raw flight(s).\n"
+                "3. Re-run the compiler to generate a clean 'dataset.h5'."
+            )
+            return
+            
+        dir_path = self.cache_dir if self.mode == "raw" else self.dataset_dir
+        filepath = os.path.join(dir_path, filename)
+        
+        confirm = messagebox.askyesno(
+            "Confirm Deletion",
+            f"Are you sure you want to delete this flight file?\n\n{filename}\n\nThis action cannot be undone."
+        )
+        if not confirm:
+            return
+            
+        # Close H5 file if it is currently open
+        if hasattr(self, 'h5_file') and self.h5_file:
+            try:
+                self.h5_file.close()
+            except Exception:
+                pass
+            self.h5_file = None
+            
+        try:
+            os.remove(filepath)
+            print(f"[Visualizer] Deleted file: {filepath}")
+            
+            # Remove from local list
+            files.pop(self.current_file_idx)
+            self.file_combo['values'] = files
+            
+            if not files:
+                self.loaded_data = None
+                self.current_file_idx = 0
+            else:
+                if self.current_file_idx >= len(files):
+                    self.current_file_idx = len(files) - 1
+                self.file_combo.current(self.current_file_idx)
+                
+            self.load_file()
+            messagebox.showinfo("Deleted", f"Successfully deleted {filename}")
+        except Exception as e:
+            print(f"[Error] Failed to delete {filepath}: {e}")
+            messagebox.showerror("Error Deleting File", f"Could not delete file:\n{filepath}\n\nError: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="TargetTrackerVer4 Dataset & Cache Visualizer")
