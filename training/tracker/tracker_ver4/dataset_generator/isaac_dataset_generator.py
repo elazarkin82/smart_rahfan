@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import sys
 import os
 import json
@@ -18,12 +19,88 @@ sys.path.append(os.path.dirname(script_dir))
 from isaac.core.isaac_client import IsaacClientManager
 from isaac.core.sensor_manager import IsaacSensorManager
 from isaac.core.geometry_utils import pixel_depth_to_world, project_3d_to_pixel
+from isaac.core.viewpoint_bank import (
+    build_viewpoint_bank,
+    load_viewpoint_bank,
+    prepare_bank_context,
+)
 
 def load_config(path="pipeline_config.json"):
     if not os.path.exists(path) and path == "pipeline_config.json":
         path = os.path.join(script_dir, path)
     with open(path, 'r') as f:
         return json.load(f)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate TargetTrackerVer4 flights with NVIDIA Isaac Sim."
+    )
+    parser.add_argument(
+        "--single-flight",
+        "--single_flight",
+        action="store_true",
+        help="Generate exactly one new flight and save it to the existing cache.",
+    )
+    parser.add_argument(
+        "--disable-all-features",
+        "--disable_all_features",
+        action="store_true",
+        help="Disable all optional flight augmentation and debug features.",
+    )
+    parser.add_argument("--disable-random-fov", action="store_true")
+    parser.add_argument("--disable-look-offset", action="store_true")
+    parser.add_argument("--disable-step-noise", action="store_true")
+    parser.add_argument("--disable-drift", action="store_true")
+    parser.add_argument("--disable-jitter", action="store_true")
+    parser.add_argument("--disable-false-negatives", action="store_true")
+    parser.add_argument("--disable-texture-filter", action="store_true")
+    parser.add_argument("--disable-debug-output", action="store_true")
+    return parser.parse_args()
+
+
+def resolve_disabled_features(args):
+    feature_names = (
+        "random_fov",
+        "look_offset",
+        "step_noise",
+        "drift",
+        "jitter",
+        "false_negatives",
+        "texture_filter",
+        "debug_output",
+    )
+    if args.disable_all_features:
+        return {name: True for name in feature_names}
+    return {
+        name: bool(getattr(args, f"disable_{name}"))
+        for name in feature_names
+    }
+
+
+def get_viewpoint_bank_config(isaac_config):
+    defaults = {
+        "enabled": True,
+        "cache_dir": "viewpoint_cache",
+        "rebuild": False,
+        "scout_resolution": [320, 240],
+        "grid_size": [3, 3],
+        "yaw_count": 4,
+        "pitch_degrees": [-45.0],
+        "altitude_m": 35.0,
+        "edge_margin_ratio": 0.1,
+        "max_scene_span_m": 500.0,
+        "central_margin_ratio": 0.15,
+        "min_valid_depth_ratio": 0.05,
+        "pixel_stride": 12,
+        "max_targets_per_viewpoint": 64,
+        "max_bank_entries": 4096,
+        "min_entries": 32,
+        "reprojection_tolerance_px": 2.0,
+    }
+    defaults.update(isaac_config.get("viewpoint_bank", {}))
+    return defaults
+
 
 def lerp(a, b, t):
     return a + (b - a) * t
@@ -256,6 +333,8 @@ def report_failed_attempt(
 
 
 def main():
+    args = parse_args()
+    disabled_features = resolve_disabled_features(args)
     config = load_config()
     
     cache_dir = config['generation'].get('cache_dir', 'cache')
@@ -270,14 +349,31 @@ def main():
     os.makedirs(cache_dir, exist_ok=True)
     os.makedirs(debug_dir, exist_ok=True)
     
-    num_flights_target = config['generation']['num_flights_to_cache']
+    configured_flights_target = config['generation']['num_flights_to_cache']
     
     existing_flights = [f for f in os.listdir(cache_dir) if f.endswith('.pkl')]
     flights_generated = len(existing_flights)
-    
-    if flights_generated >= num_flights_target:
+
+    if args.single_flight:
+        num_flights_target = flights_generated + 1
+        print(
+            f"[*] Single-flight mode: generating one new flight "
+            f"(cache target: {num_flights_target})."
+        )
+    else:
+        num_flights_target = configured_flights_target
+
+    if not args.single_flight and flights_generated >= num_flights_target:
         print(f"[+] Cache already has {flights_generated} flights. Skipping generation.")
         return
+
+    disabled_feature_names = [
+        name.replace("_", "-")
+        for name, disabled in disabled_features.items()
+        if disabled
+    ]
+    if disabled_feature_names:
+        print(f"[*] Disabled features: {', '.join(disabled_feature_names)}")
         
     width = config['sensor']['width']
     height = config['sensor']['height']
@@ -296,8 +392,19 @@ def main():
     max_attempts_per_flight = isaac_cfg.get("max_attempts_per_flight", 25)
     target_search_samples = isaac_cfg.get("target_search_samples", 100)
     target_distance_range = isaac_cfg.get("target_distance_range", [8.0, 80.0])
+    stop_distance_range = isaac_cfg.get("stop_distance_range_m", [3.0, 6.0])
+    camera_clipping_range = isaac_cfg.get(
+        "camera_clipping_range_m",
+        [0.1, 1000.0],
+    )
     occlusion_tolerance = isaac_cfg.get("occlusion_tolerance_m", 1.5)
+    disable_async_rendering = isaac_cfg.get("disable_async_rendering", True)
+    viewpoint_bank_cfg = get_viewpoint_bank_config(isaac_cfg)
     force_process_exit = isaac_cfg.get("force_process_exit_on_shutdown", True)
+
+    viewpoint_cache_dir = viewpoint_bank_cfg["cache_dir"]
+    if not os.path.isabs(viewpoint_cache_dir):
+        viewpoint_cache_dir = os.path.join(script_dir, viewpoint_cache_dir)
 
     if not maps:
         raise ValueError("isaac.maps must contain at least one USD map.")
@@ -306,6 +413,11 @@ def main():
     num_false_negatives = config['generation']['num_false_negatives']
     debug_interval = config['generation']['debug_interval']
     min_texture_std = config['generation'].get('min_texture_std', 2.0)
+
+    if disabled_features["false_negatives"]:
+        num_false_negatives = 0
+    if disabled_features["texture_filter"]:
+        min_texture_std = 0.0
     
     # Noise parameters
     noise_cfg = config['generation']['noise_params']
@@ -316,11 +428,22 @@ def main():
     rot_roll_amp = noise_cfg.get('rot_roll_amp', 2.5)
     
     # 1. Initialize Simulator
+    sys.argv = [sys.argv[0]]
     client_mgr = IsaacClientManager(headless=headless, renderer=renderer)
     simulation_app, stage_context = client_mgr.connect()
+
+    if disable_async_rendering:
+        import carb
+
+        carb.settings.get_settings().set(
+            "/exts/isaacsim.core.throttling/enable_async",
+            False,
+        )
     
     sensor_mgr = IsaacSensorManager(camera_path="/World/Camera", width=width, height=height, fov=fov)
     current_map = None
+    viewpoint_entries = None
+    viewpoint_pool = []
     attempts_for_flight = 0
     failed_maps = set()
     rejection_counts = Counter()
@@ -333,7 +456,7 @@ def main():
             scheduled_map = get_map_for_flight(
                 maps,
                 flights_generated,
-                num_flights_target,
+                max(configured_flights_target, num_flights_target),
             )
             target_map = select_available_map(maps, scheduled_map, failed_maps)
             if target_map is None:
@@ -363,72 +486,174 @@ def main():
                     f"{first_flight + 1}-{last_flight + 1}."
                 )
                 sensor_mgr.destroy()
-                client_mgr.load_map(
+                stage = client_mgr.load_map(
                     target_map,
                     timeout_sec=stage_load_timeout,
                     repair_asset_paths=repair_asset_paths,
                 )
-                sensor_mgr.create_camera()
+
+                # Retrieve dynamic scale factor (meters to USD stage units)
+                scale = client_mgr.scale_to_stage
+                scaled_distance_range = [r * scale for r in target_distance_range]
+                scaled_occlusion_tolerance = occlusion_tolerance * scale
+                scaled_pos_xy_amp = pos_xy_amp * scale
+                scaled_pos_z_amp = pos_z_amp * scale
+                clipping_range_stage = [
+                    float(camera_clipping_range[0]) * scale,
+                    float(camera_clipping_range[1]) * scale,
+                ]
+
+                viewpoint_entries = None
+                viewpoint_pool = []
+                if viewpoint_bank_cfg["enabled"]:
+                    scout_width, scout_height = [
+                        int(value)
+                        for value in viewpoint_bank_cfg["scout_resolution"]
+                    ]
+                    bank_context = prepare_bank_context(
+                        stage,
+                        target_map,
+                        scale,
+                        viewpoint_bank_cfg,
+                        (scout_width, scout_height),
+                        float(fov),
+                        target_distance_range,
+                        min_texture_std,
+                        viewpoint_cache_dir,
+                    )
+                    viewpoint_entries = load_viewpoint_bank(
+                        bank_context,
+                        rebuild=bool(viewpoint_bank_cfg["rebuild"]),
+                    )
+
+                    if viewpoint_entries is None:
+                        scout_sensor_mgr = IsaacSensorManager(
+                            camera_path="/World/Camera",
+                            width=scout_width,
+                            height=scout_height,
+                            fov=fov,
+                        )
+                        try:
+                            scout_sensor_mgr.create_camera(
+                                clipping_range=clipping_range_stage
+                            )
+                            scout_sensor_mgr.initialize_replicator(
+                                simulation_app,
+                                warmup_frames=warmup_frames,
+                                rt_subframes=rt_subframes,
+                            )
+                            viewpoint_entries = build_viewpoint_bank(
+                                stage,
+                                scout_sensor_mgr,
+                                scale,
+                                viewpoint_bank_cfg,
+                                bank_context,
+                                target_distance_range,
+                                min_texture_std,
+                                rt_subframes,
+                            )
+                        finally:
+                            scout_sensor_mgr.destroy()
+
+                    print(
+                        f"[+] Viewpoint bank ready with "
+                        f"{len(viewpoint_entries)} target(s)."
+                    )
+                else:
+                    client_mgr.prepare_target_candidates()
+
+                sensor_mgr = IsaacSensorManager(
+                    camera_path="/World/Camera",
+                    width=width,
+                    height=height,
+                    fov=fov,
+                )
+                sensor_mgr.create_camera(
+                    clipping_range=clipping_range_stage
+                )
                 sensor_mgr.initialize_replicator(
                     simulation_app,
                     warmup_frames=warmup_frames,
                     rt_subframes=rt_subframes,
                 )
-                client_mgr.prepare_target_candidates()
+
                 current_map = target_map
                 attempts_for_flight = 0
                 rejection_counts.clear()
 
             attempts_for_flight += 1
 
-            flight_fov = random.uniform(float(fov_range[0]), float(fov_range[1]))
+            if disabled_features["random_fov"]:
+                flight_fov = float(fov)
+            else:
+                flight_fov = random.uniform(
+                    float(fov_range[0]),
+                    float(fov_range[1]),
+                )
             sensor_mgr.set_fov(flight_fov)
             
-            # 3. Use cached geometry only as a camera anchor. The actual target
-            # is selected from the visible RGB/depth scout frame below.
-            camera_anchor = client_mgr.get_random_target()
-
-            # 4. Compute a scout camera pose.
-            start_dist = random.uniform(20.0, 45.0)
-            theta = random.uniform(0, 2 * math.pi)
-            phi = random.uniform(math.radians(15), math.radians(45)) # Angle from vertical
-            
-            start_pos = camera_anchor + start_dist * np.array([
-                math.sin(phi)*math.cos(theta),
-                math.sin(phi)*math.sin(theta),
-                math.cos(phi)
-            ])
-
-            scout_quat = get_lookat_quaternion(start_pos, camera_anchor)
-            sensor_mgr.move_to(start_pos, scout_quat)
-            scout_rgb, scout_depth, scout_params = sensor_mgr.get_sync_data(
-                rt_subframes=rt_subframes
-            )
-            target_result, scout_failures = find_visible_target(
-                scout_rgb,
-                scout_depth,
-                scout_params,
-                width,
-                height,
-                min_texture_std,
-                float(target_distance_range[0]),
-                float(target_distance_range[1]),
-                int(target_search_samples),
-            )
-            rejection_counts.update(scout_failures)
-            if target_result is None:
-                report_failed_attempt(
-                    target_map,
-                    attempts_for_flight,
-                    max_attempts_per_flight,
-                    rejection_counts,
-                    failed_maps,
+            if viewpoint_entries is not None:
+                if not viewpoint_pool:
+                    viewpoint_pool = list(viewpoint_entries)
+                    random.shuffle(viewpoint_pool)
+                viewpoint = viewpoint_pool.pop()
+                start_pos = np.asarray(
+                    viewpoint["start_pos"],
+                    dtype=np.float64,
                 )
-                continue
-            target_3d, _, selected_distance = target_result
+                target_3d = np.asarray(
+                    viewpoint["target_3d"],
+                    dtype=np.float64,
+                )
+                selected_distance = float(viewpoint["distance"])
+            else:
+                # Legacy fallback when the viewpoint bank is disabled.
+                camera_anchor = client_mgr.get_random_target()
+                start_dist = random.uniform(20.0 * scale, 45.0 * scale)
+                theta = random.uniform(0, 2 * math.pi)
+                phi = random.uniform(
+                    math.radians(15),
+                    math.radians(45),
+                )
+                start_pos = camera_anchor + start_dist * np.array([
+                    math.sin(phi) * math.cos(theta),
+                    math.sin(phi) * math.sin(theta),
+                    math.cos(phi),
+                ])
+
+                scout_quat = get_lookat_quaternion(start_pos, camera_anchor)
+                sensor_mgr.move_to(start_pos, scout_quat)
+                scout_rgb, scout_depth, scout_params = sensor_mgr.get_sync_data(
+                    rt_subframes=rt_subframes
+                )
+                target_result, scout_failures = find_visible_target(
+                    scout_rgb,
+                    scout_depth,
+                    scout_params,
+                    width,
+                    height,
+                    min_texture_std,
+                    float(scaled_distance_range[0]),
+                    float(scaled_distance_range[1]),
+                    int(target_search_samples),
+                )
+                rejection_counts.update(scout_failures)
+                if target_result is None:
+                    report_failed_attempt(
+                        target_map,
+                        attempts_for_flight,
+                        max_attempts_per_flight,
+                        rejection_counts,
+                        failed_maps,
+                    )
+                    continue
+                target_3d, _, selected_distance = target_result
 
             # Flight approaches closely to target
-            stop_dist = random.uniform(3.0, 6.0)
+            stop_dist = random.uniform(
+                float(stop_distance_range[0]) * scale,
+                float(stop_distance_range[1]) * scale,
+            )
             vec = target_3d - start_pos
             start_dist = np.linalg.norm(vec)
             if start_dist <= stop_dist:
@@ -448,8 +673,12 @@ def main():
             start_quat = get_lookat_quaternion(start_pos, target_3d)
             
             # Look slightly off-center at the end of the flight
-            pitch_offset = random.uniform(-10.0, 10.0)
-            yaw_offset = random.uniform(-10.0, 10.0)
+            if disabled_features["look_offset"]:
+                pitch_offset = 0.0
+                yaw_offset = 0.0
+            else:
+                pitch_offset = random.uniform(-10.0, 10.0)
+                yaw_offset = random.uniform(-10.0, 10.0)
             
             # Create end rotation matrix with offset
             forward_unit = dir_vec
@@ -469,27 +698,36 @@ def main():
             perturbed_forward = forward_unit + right * math.sin(yaw_rad) + up * math.sin(pitch_rad)
             perturbed_forward /= np.linalg.norm(perturbed_forward)
             
-            end_quat = get_lookat_quaternion(end_pos, end_pos + perturbed_forward * 10.0)
+            end_quat = get_lookat_quaternion(end_pos, end_pos + perturbed_forward * (10.0 * scale))
             
             # Compute orthogonal vectors for strafing/jitter
             right_vec = right
             up_vec = up
-            drift_right_amp = random.uniform(-2.5, 2.5)
-            drift_up_amp = random.uniform(-1.5, 1.5)
-            drift_right_freq = random.uniform(1.0, 3.0)
-            drift_up_freq = random.uniform(1.0, 3.0)
+            if disabled_features["drift"]:
+                drift_right_amp = 0.0
+                drift_up_amp = 0.0
+                drift_right_freq = 0.0
+                drift_up_freq = 0.0
+            else:
+                drift_right_amp = random.uniform(-2.5 * scale, 2.5 * scale)
+                drift_up_amp = random.uniform(-1.5 * scale, 1.5 * scale)
+                drift_right_freq = random.uniform(1.0, 3.0)
+                drift_up_freq = random.uniform(1.0, 3.0)
             
             print(
                 f"[{flights_generated+1}/{num_flights_target}] Generating flight "
                 f"(attempt {attempts_for_flight}/{max_attempts_per_flight}, "
-                f"target distance {selected_distance:.1f}m)"
+                f"target distance {selected_distance / scale:.1f}m)"
             )
             
             flight_data = []
             valid_flight = True
             failure_reason = None
             
-            is_debug = (flights_generated % debug_interval == 0)
+            is_debug = (
+                not disabled_features["debug_output"]
+                and flights_generated % debug_interval == 0
+            )
             flight_debug_dir = os.path.join(debug_dir, f"flight_{flights_generated:04d}")
             if is_debug:
                 os.makedirs(flight_debug_dir, exist_ok=True)
@@ -498,7 +736,10 @@ def main():
                 t = frame_idx / float(frames_per_flight - 1)
                 
                 # Perturb step size slightly for non-linearity
-                if 0 < frame_idx < frames_per_flight - 1:
+                if (
+                    not disabled_features["step_noise"]
+                    and 0 < frame_idx < frames_per_flight - 1
+                ):
                     t_noisy = t + random.uniform(-0.04, 0.04)
                     t_noisy = max(0.01, min(0.99, t_noisy))
                 else:
@@ -522,33 +763,70 @@ def main():
                     pos = clean_pos.copy()
                     quat = clean_quat.copy()
                     
-                    # Scale down jitter noise as camera gets closer
-                    current_dist = start_dist - smooth_t * (start_dist - stop_dist)
-                    noise_scale = min(1.0, current_dist / 30.0)
+                    if not disabled_features["jitter"]:
+                        # Scale down jitter noise as camera gets closer.
+                        current_dist = (
+                            start_dist
+                            - smooth_t * (start_dist - stop_dist)
+                        )
+                        noise_scale = min(
+                            1.0,
+                            current_dist / (30.0 * scale),
+                        )
+
+                        phase = (
+                            flights_generated * 10
+                            + frame_idx * 0.2
+                            + attempt * 5.0
+                        )
+                        pos[0] += (
+                            math.sin(phase * 1.3)
+                            * scaled_pos_xy_amp
+                            * noise_scale
+                        )
+                        pos[1] += (
+                            math.cos(phase * 1.7)
+                            * scaled_pos_xy_amp
+                            * noise_scale
+                        )
+                        pos[2] += (
+                            math.sin(phase * 0.9)
+                            * scaled_pos_z_amp
+                            * noise_scale
+                        )
+
+                        roll_wobble = (
+                            math.sin(phase * 2.5)
+                            * math.radians(rot_roll_amp)
+                            * noise_scale
+                        )
+                        pitch_wobble = (
+                            math.cos(phase * 2.1)
+                            * math.radians(rot_pitch_amp)
+                            * noise_scale
+                        )
+                        yaw_wobble = (
+                            math.cos(phase * 1.5)
+                            * math.radians(rot_yaw_amp)
+                            * noise_scale
+                        )
+
+                        rot_perturbed = get_lookat_quaternion(pos, target_3d)
+                        quat = nlerp_quat(quat, rot_perturbed, 0.5)
+                        jitter_quat = quaternion_from_euler(
+                            roll_wobble,
+                            pitch_wobble,
+                            yaw_wobble,
+                        )
+                        quat = quaternion_multiply(quat, jitter_quat)
                     
-                    # Add mechanical wind noise to position
-                    phase = flights_generated * 10 + frame_idx * 0.2 + attempt * 5.0
-                    pos[0] += math.sin(phase * 1.3) * pos_xy_amp * noise_scale
-                    pos[1] += math.cos(phase * 1.7) * pos_xy_amp * noise_scale
-                    pos[2] += math.sin(phase * 0.9) * pos_z_amp * noise_scale
-                    
-                    # Apply small rotations to quat for mechanical wobble
-                    roll_wobble = math.sin(phase * 2.5) * math.radians(rot_roll_amp) * noise_scale
-                    pitch_wobble = math.cos(phase * 2.1) * math.radians(rot_pitch_amp) * noise_scale
-                    yaw_wobble = math.cos(phase * 1.5) * math.radians(rot_yaw_amp) * noise_scale
-                    
-                    # Compute perturbed lookat orientation
-                    rot_perturbed = get_lookat_quaternion(pos, target_3d)
-                    
-                    quat = nlerp_quat(quat, rot_perturbed, 0.5)
-                    jitter_quat = quaternion_from_euler(
-                        roll_wobble,
-                        pitch_wobble,
-                        yaw_wobble,
-                    )
-                    quat = quaternion_multiply(quat, jitter_quat)
-                    
-                    sensor_mgr.move_to(pos, quat)
+                    if (
+                        disabled_features["look_offset"]
+                        and disabled_features["jitter"]
+                    ):
+                        sensor_mgr.look_at(pos, target_3d)
+                    else:
+                        sensor_mgr.move_to(pos, quat)
                     
                     # Get frame data from replicator
                     rgb_arr, depth_arr, params = sensor_mgr.get_sync_data(
@@ -577,7 +855,7 @@ def main():
                     if visible_dist is None:
                         rejection_counts["positive_invalid_depth"] += 1
                         continue
-                    if visible_dist < actual_dist - occlusion_tolerance:
+                    if visible_dist < actual_dist - scaled_occlusion_tolerance:
                         rejection_counts["positive_target_occluded"] += 1
                         continue
                         

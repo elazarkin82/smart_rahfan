@@ -17,6 +17,8 @@ class IsaacClientManager:
         self.original_working_dir = os.getcwd()
         self.stage_working_dir = None
         self.target_candidates = None
+        self.meters_per_unit = 1.0
+        self.scale_to_stage = 1.0
         
     def connect(self):
         """Launches the Isaac Sim simulator application."""
@@ -203,8 +205,20 @@ class IsaacClientManager:
             raise RuntimeError(f"USD stage is unavailable after loading: {usd_path}")
         self.target_candidates = None
 
+        from pxr import Usd, UsdGeom
+        self.meters_per_unit = UsdGeom.GetStageMetersPerUnit(self.stage)
+        self.scale_to_stage = 1.0 / self.meters_per_unit
+        print(f"[*] Stage Meters Per Unit: {self.meters_per_unit} (scale factor: {self.scale_to_stage})")
+
         if repair_asset_paths and self.stage_working_dir:
-            self._repair_missing_asset_paths(self.stage_working_dir)
+            # Detect global asset root if "isaac/assets" is in the path
+            global_asset_root = self.stage_working_dir
+            marker = os.path.join("isaac", "assets")
+            idx = self.stage_working_dir.find(marker)
+            if idx != -1:
+                global_asset_root = self.stage_working_dir[:idx + len(marker)]
+                print(f"[*] Detected global asset root: {global_asset_root}")
+            self._repair_missing_asset_paths(global_asset_root)
 
         for _ in range(5):
             self.simulation_app.update()
@@ -226,26 +240,23 @@ class IsaacClientManager:
         )
         targets = []
         excluded_names = (
-            "camera",
-            "sensor",
-            "ground",
-            "floor",
-            "ceiling",
-            "sky",
-            "environment",
-            "navmesh",
-            "light",
-            "sprinkler",
-            "receptacle",
-            "outlet",
-            "faucet",
-            "shower",
-            "toilet",
-            "cabinet",
-            "dishwasher",
-            "mullion",
-            "plumbing",
-            "fixture",
+            "camera", "sensor", "ground", "floor", "ceiling", "sky", "environment",
+            "navmesh", "light", "sprinkler", "receptacle", "outlet", "faucet",
+            "shower", "toilet", "cabinet", "dishwasher", "mullion", "plumbing", "fixture",
+            "specialty_equipment", "mechanical_equipment", "structural_framing", "casework",
+            "ducts", "walls", "windows", "doors", "stair", "interior", "roof", "panel",
+            "insulation", "stud", "framing", "pipe", "conduit", "curtain", "furniture",
+            "appliance", "range", "fridge", "refrigerator", "oven", "cooktop", "hood",
+            "dryer", "washer", "sink", "tub", "mirror", "bed", "chair", "table", "desk",
+            "sofa", "couch", "shelf", "wardrobe", "dresser", "counter", "air_terminal",
+            "generic_model", "support",
+            "runs", "landings", "railing", "electrical", "switches", "disconnect",
+            "grass", "trimmed", "instancer", "pointinstancer", "staircase", "tread",
+            "riser", "stringer", "hvac", "wire", "cable", "junction", "switchboard",
+            "panelboard", "transformer", "meter", "pump", "valve", "structural", "frame",
+            "tree", "trees", "leaves", "leaf", "trunk", "branch", "branches", "bark",
+            "topography", "rails", "rail", "hawthorn", "planter", "plant", "plants",
+            "foliage", "vegetation", "shrub", "bush", "bushes"
         )
 
         for prim in self.stage.TraverseAll():
@@ -265,7 +276,7 @@ class IsaacClientManager:
 
             if not np.all(np.isfinite(center)) or not np.all(np.isfinite(size)):
                 continue
-            if np.max(size) < 2.0 or np.max(size) > 100.0:
+            if np.max(size) < 2.0 * self.scale_to_stage or np.max(size) > 100.0 * self.scale_to_stage:
                 continue
             targets.append((prim, center))
 

@@ -16,7 +16,7 @@ class IsaacSensorManager:
         self.camera_prim = None
         self.rep = None
         
-    def create_camera(self):
+    def create_camera(self, clipping_range=None):
         """Creates a USD Camera prim with matching resolution and FOV attributes."""
         from isaacsim.core.utils.prims import create_prim, get_prim_at_path
         from pxr import Gf
@@ -38,8 +38,22 @@ class IsaacSensorManager:
         self.camera_prim.GetAttribute("focalLength").Set(focal_length)
         self.camera_prim.GetAttribute("horizontalAperture").Set(horiz_aperture)
         self.camera_prim.GetAttribute("verticalAperture").Set(vert_aperture)
-        self.camera_prim.GetAttribute("clippingRange").Set(Gf.Vec2f(0.1, 1000.0))
+        if clipping_range is None:
+            clipping_range = (0.1, 1000.0)
+        self.set_clipping_range(*clipping_range)
         return self.camera_prim
+
+    def set_clipping_range(self, near_distance, far_distance):
+        """Updates camera clipping distances in USD stage units."""
+        from pxr import Gf
+
+        if not self.camera_prim:
+            return
+        near_distance = max(float(near_distance), 1e-6)
+        far_distance = max(float(far_distance), near_distance + 1e-6)
+        self.camera_prim.GetAttribute("clippingRange").Set(
+            Gf.Vec2f(near_distance, far_distance)
+        )
 
     def set_fov(self, fov):
         """Updates the camera horizontal field of view in degrees."""
@@ -72,6 +86,35 @@ class IsaacSensorManager:
         # Set translation and orientation attributes directly
         self.camera_prim.GetAttribute("xformOp:translate").Set(pos_gf)
         self.camera_prim.GetAttribute("xformOp:orient").Set(quat_gf)
+
+    def look_at(self, position, target):
+        """Moves the camera using USD's native look-at transform."""
+        from pxr import Gf
+
+        if not self.camera_prim:
+            return
+
+        position_gf = Gf.Vec3d(
+            float(position[0]),
+            float(position[1]),
+            float(position[2]),
+        )
+        target_gf = Gf.Vec3d(
+            float(target[0]),
+            float(target[1]),
+            float(target[2]),
+        )
+        view_matrix = Gf.Matrix4d(1.0)
+        view_matrix.SetLookAt(
+            position_gf,
+            target_gf,
+            Gf.Vec3d(0.0, 0.0, 1.0),
+        )
+        camera_matrix = view_matrix.GetInverse()
+        orientation = camera_matrix.ExtractRotationQuat()
+
+        self.camera_prim.GetAttribute("xformOp:translate").Set(position_gf)
+        self.camera_prim.GetAttribute("xformOp:orient").Set(orientation)
         
     def initialize_replicator(self, simulation_app, warmup_frames=2, rt_subframes=4):
         """Attaches Replicator annotators for RGB, depth, and camera parameters."""

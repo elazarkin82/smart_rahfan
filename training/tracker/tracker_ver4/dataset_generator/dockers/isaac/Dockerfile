@@ -11,4 +11,7 @@ RUN mkdir -p /isaac-sim/kit/cache /var/cache/hub /isaac-sim/.nvidia-omniverse \
     && chmod -R a+rwX /isaac-sim/.nvidia-omniverse \
     && chmod 1777 /isaac-sim/kit/cache /var/cache/hub
 
+# Install pygame for visual manual testing
+RUN /isaac-sim/python.sh -m pip install pygame
+
 USER isaac-sim
