@@ -4,13 +4,18 @@ FROM smart-rahfan-keras-gpu:latest
 # Switch to root to install system packages
 USER root
 
-# Install system dependencies required by RKNN-Toolkit2 and ONNX
+# Install system dependencies required by RKNN-Toolkit2, ONNX, and C++ development
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     python3-pip \
     gcc \
     g++ \
     build-essential \
+    cmake \
+    libjpeg-dev \
+    libv4l-dev \
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
     libxslt1-dev \
     zlib1g-dev \
     libglib2.0-0 \

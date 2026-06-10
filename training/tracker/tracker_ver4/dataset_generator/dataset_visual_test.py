@@ -412,19 +412,24 @@ class DatasetVisualizer:
         # Convert Grayscale to RGB for color decorations
         img_rgb = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2RGB)
         
-        # Draw neon-pink crosshairs
+        # Draw neon-pink crosshairs if target is in frame
         target_2d = sample["target_2d"]
-        px, py = int(target_2d[0]), int(target_2d[1])
-        
-        color = (255, 51, 102) # #ff3366 Neon Pink
-        cv2.circle(img_rgb, (px, py), 15, color, 2)
-        cv2.circle(img_rgb, (px, py), 2, color, -1)
-        # Reticle crosshair ticks
-        cv2.line(img_rgb, (px - 22, py), (px - 8, py), color, 1)
-        cv2.line(img_rgb, (px + 8, py), (px + 22, py), color, 1)
-        cv2.line(img_rgb, (px, py - 22), (px, py - 8), color, 1)
-        cv2.line(img_rgb, (px, py + 8), (px, py + 22), color, 1)
-        
+        if target_2d is not None:
+            px, py = int(target_2d[0]), int(target_2d[1])
+            color = (255, 51, 102) # #ff3366 Neon Pink
+            cv2.circle(img_rgb, (px, py), 15, color, 2)
+            cv2.circle(img_rgb, (px, py), 2, color, -1)
+            # Reticle crosshair ticks
+            cv2.line(img_rgb, (px - 22, py), (px - 8, py), color, 1)
+            cv2.line(img_rgb, (px + 8, py), (px + 22, py), color, 1)
+            cv2.line(img_rgb, (px, py - 22), (px, py - 8), color, 1)
+            cv2.line(img_rgb, (px, py + 8), (px, py + 22), color, 1)
+            target_str = f"[{px}, {py}]"
+        else:
+            # Draw red out-of-frame indicator
+            cv2.putText(img_rgb, "Target Out of Frame (Negative)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            target_str = "None (Out of Frame)"
+            
         # Fit image dynamically into left panel, retaining aspect ratio if possible
         panel_w = self.search_image_label.winfo_width()
         panel_h = self.search_image_label.winfo_height()
@@ -450,21 +455,32 @@ class DatasetVisualizer:
         
         # Metadata
         dist = sample["distance_to_target"]
-        t3d = sample.get("target_3d", [0.0, 0.0, 0.0])
+        t3d = sample.get("target_3d")
         filename = self.raw_files[self.current_file_idx]
         
         hud_text = f"Flight Cache  |  File: {filename}  |  Frame: {self.current_frame_idx} / {len(self.loaded_data)-1}  |  " \
-                   f"Target 2D: [{px}, {py}]  |  Dist: {dist:.1f}m"
+                   f"Target 2D: {target_str}  |  Dist: {dist:.1f}m"
         self.info_label.config(text=hud_text, fg="#00ff66")
         
         self.detail_flight_lbl.config(text=f"Flight: {filename}")
         self.detail_frame_lbl.config(text=f"Frame: {self.current_frame_idx} / {len(self.loaded_data)-1}")
-        self.detail_pos2d_lbl.config(text=f"Target 2D: [{px}, {py}]")
+        self.detail_pos2d_lbl.config(text=f"Target 2D: {target_str}")
         self.detail_dist_lbl.config(text=f"Distance: {dist:.2f} m")
-        self.detail_pos3d_lbl.config(text=f"Target 3D: [{t3d[0]:.2f}, {t3d[1]:.2f}, {t3d[2]:.2f}]")
-        
-        # Build Reference Stack on the fly for raw cache visualizer (using Frame 0 as anchor)
+        if t3d is not None and not (isinstance(t3d, (list, np.ndarray)) and len(t3d) == 0):
+            self.detail_pos3d_lbl.config(text=f"Target 3D: [{t3d[0]:.2f}, {t3d[1]:.2f}, {t3d[2]:.2f}]")
+        else:
+            self.detail_pos3d_lbl.config(text="Target 3D: N/A")
+            
+        # Build Reference Stack on the fly for raw cache visualizer (using first valid frame as anchor)
         ref_frame = self.loaded_data[0]
+        ref_target = ref_frame.get("target_2d")
+        if ref_target is None:
+            # Search for a frame with a valid target
+            for f in self.loaded_data:
+                if f.get("target_2d") is not None:
+                    ref_frame = f
+                    ref_target = f["target_2d"]
+                    break
         ref_gray = ref_frame["image_gray"]
         ref_target = ref_frame["target_2d"]
         
