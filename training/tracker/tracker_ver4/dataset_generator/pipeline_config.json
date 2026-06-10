@@ -3,8 +3,8 @@
         "host": "127.0.0.1",
         "port": 2000,
         "timeout": 30.0,
-        "maps": ["Town10HD_Opt", "Town04_Opt", "Town05_Opt"],
-        "weather_presets": ["ClearNoon", "Sunset"]
+        "maps": ["Town10HD_Opt", "Town04_Opt", "Town05_Opt", "Town01_Opt", "Town02_Opt", "Town03_Opt", "Town06_Opt", "Town07_Opt", "Town08_Opt", "Town09_Opt", "Town11_Opt", "Town12_Opt"],
+        "weather_presets": ["Sunset"]
     },
     "isaac": {
         "maps": [
@@ -21,8 +21,8 @@
         "repair_missing_asset_paths": true,
         "max_attempts_per_flight": 100,
         "target_search_samples": 100,
-        "target_distance_range": [8.0, 80.0],
-        "stop_distance_range_m": [3.0, 6.0],
+        "target_distance_range": [20.0, 150.0],
+        "stop_distance_range_m": [20.0, 30.0],
         "camera_clipping_range_m": [0.1, 1000.0],
         "occlusion_tolerance_m": 5.0,
         "disable_async_rendering": true,
@@ -58,9 +58,9 @@
         "output_dir": "outputs",
         "cache_dir": "cache",
         "debug_dir": "debug",
-        "num_flights_to_cache": 5,
+        "num_flights_to_cache": 6000,
         "frames_per_flight": 6,
-        "num_false_negatives": 1,
+        "num_false_negatives": 2,
         "debug_interval": 50,
         "min_texture_std": 2.0,
         "noise_params": {
@@ -79,8 +79,8 @@
         "stack_target_size": 64,
         "crop_max_size": 512,
         "crop_min_size": 16,
-        "heatmap_sigma": 15.0,
-        "heatmap_relative_sigma": 0.0625,
+        "heatmap_sigma": 10.0,
+        "heatmap_relative_sigma": 0.125,
         "synthetic_negative_ratio": 0.00
     }
 }

@@ -9,9 +9,9 @@ import numpy as np
 import cv2
 import queue
 import argparse
-from carla.core.carla_client import CarlaClientManager
-from carla.core.sensor_manager import SensorManager
-from carla.core.geometry_utils import build_projection_matrix, get_3d_world_from_pixel, get_3d_world_to_pixel
+from carla_project.core.carla_client import CarlaClientManager
+from carla_project.core.sensor_manager import SensorManager
+from carla_project.core.geometry_utils import build_projection_matrix, get_3d_world_from_pixel, get_3d_world_to_pixel
 
 def load_config(path="pipeline_config.json"):
     with open(path, 'r') as f:

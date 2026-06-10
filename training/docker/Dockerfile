@@ -34,7 +34,9 @@ print("tqdm successfully loaded. Version:", tqdm.__version__)
 PY
 
 # Install dependencies for CARLA tracker_ver4 dataset_generator
-RUN python3 -m pip install pygame carla==0.9.15
+RUN python3 -m pip install pygame carla==0.9.16
+
+RUN apt-get update && apt-get install -y --no-install-recommends geany
 
 CMD ["/bin/bash"]
 
