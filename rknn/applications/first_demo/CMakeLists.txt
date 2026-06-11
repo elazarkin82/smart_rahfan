@@ -25,7 +25,15 @@ set(CIVETWEB_ENABLE_ASAN OFF CACHE BOOL "Disable ASAN for civetweb" FORCE)
 FetchContent_MakeAvailable(civetweb)
 
 # Find libjpeg (libjpeg-turbo) for grayscale image compression
-find_package(JPEG REQUIRED)
+find_library(JPEG_STATIC_LIB NAMES libjpeg.a PATHS /usr/lib/aarch64-linux-gnu)
+if(JPEG_STATIC_LIB)
+    message(STATUS "Found static libjpeg: ${JPEG_STATIC_LIB}")
+    find_package(JPEG REQUIRED)
+    set(JPEG_LIBRARIES ${JPEG_STATIC_LIB})
+else()
+    find_package(JPEG REQUIRED)
+endif()
+
 
 # Look for RKNN Runtime library (Rockchip NPU User-Space Library)
 # We search in the local rknpu2 repository first, and fall back to system library.
