@@ -193,6 +193,12 @@ bool TrackerService::is_target_defined() const
     return m_is_target_defined;
 }
 
+void TrackerService::clear_target()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_is_target_defined = false;
+}
+
 void TrackerService::set_tracker_callback(TrackerCallback* cb)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -333,6 +339,7 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
         if (m_callback != NULL)
         {
             m_callback->onTargetDetected(out_x, out_y);
+            m_callback->onHeatmapCreated(m_heatmap_buf, m_out_width_hm, m_out_height_hm);
         }
     }
 }

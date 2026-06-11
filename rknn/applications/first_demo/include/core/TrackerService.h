@@ -14,6 +14,7 @@ public:
     public:
         virtual ~TrackerCallback() {}
         virtual void onTargetDetected(int x, int y) = 0;
+        virtual void onHeatmapCreated(const float* heatmap, int w, int h) = 0;
     };
 
 private:
@@ -57,6 +58,7 @@ public:
     bool is_model_loaded() const;
     bool is_target_defined() const;
     void refresh_target(uchar* frame, int w, int h);
+    void clear_target();
     void set_tracker_callback(TrackerCallback* cb);
     void update_frame(uchar* frame, int w, int h);
 };

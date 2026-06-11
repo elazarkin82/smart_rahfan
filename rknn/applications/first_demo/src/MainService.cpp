@@ -173,6 +173,14 @@ void MainService::onTargetDetected(int x, int y)
     }
 }
 
+void MainService::onHeatmapCreated(const float* heatmap, int w, int h)
+{
+    if (m_web_server != NULL)
+    {
+        m_web_server->update_heatmap(heatmap, w, h);
+    }
+}
+
 void MainService::onCommand(WebServer::Command key, const char* values, int len)
 {
     std::lock_guard<std::mutex> lock(m_cmd_mutex);
@@ -304,6 +312,18 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
 
         case WebServer::CMD_SAVE_PARAMS:
             save_params_file(m_params_path, m_params);
+            break;
+
+        case WebServer::CMD_RESET_TARGET:
+            m_tracker->clear_target();
+            if (m_web_server != NULL)
+            {
+                m_web_server->update_heatmap(NULL, 256, 256);
+            }
+            m_target_x = -1;
+            m_target_y = -1;
+            StatusObject::instance()->update("tracking_status", "Target Not Selected");
+            StatusObject::instance()->update("target_position", "N/A");
             break;
 
         case WebServer::CMD_CHOOSE_TARGET:

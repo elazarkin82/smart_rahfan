@@ -41,7 +41,7 @@ const char* INDEX_HTML =
 "    color: #38bdf8;\n"
 "}\n"
 ".container {\n"
-"    max-width: 1200px;\n"
+"    max-width: 1400px;\n"
 "    display: flex;\n"
 "    flex-direction: row;\n"
 "    gap: 30px;\n"
@@ -136,6 +136,12 @@ const char* INDEX_HTML =
 ".btn-save:hover {\n"
 "    background: #059669;\n"
 "}\n"
+".btn-reset {\n"
+"    background: #ef4444;\n"
+"}\n"
+".btn-reset:hover {\n"
+"    background: #dc2626;\n"
+"}\n"
 ".coords-info {\n"
 "    font-size: 12px;\n"
 "    color: #9ca3af;\n"
@@ -154,6 +160,13 @@ const char* INDEX_HTML =
 "            <img class=\"stream-img\" id=\"streamImg\" src=\"/stream\" alt=\"Live Camera Stream\">\n"
 "        </div>\n"
 "        <div class=\"coords-info\" style=\"margin-top: 10px;\" id=\"coordsInfo\">Click to initialize tracker</div>\n"
+"    </div>\n"
+"    <div class=\"card\" style=\"width: 256px;\">\n"
+"        <h2>Heatmap Debug</h2>\n"
+"        <div class=\"stream-container\">\n"
+"            <img class=\"stream-img\" src=\"/heatmap_stream\" alt=\"Heatmap Stream\" style=\"width: 256px; height: 256px; border: 2px solid #ef4444;\">\n"
+"        </div>\n"
+"        <div class=\"coords-info\" style=\"margin-top: 10px;\">256x256 Filtered Output</div>\n"
 "    </div>\n"
 "    <div class=\"status-card\">\n"
 "        <div class=\"card\">\n"
@@ -176,6 +189,7 @@ const char* INDEX_HTML =
 "            </div>\n"
 "            <button class=\"btn\" onclick=\"updateConfig()\">Apply Configuration</button>\n"
 "            <button class=\"btn btn-save\" onclick=\"saveConfig()\" style=\"margin-top: 10px;\">Save Permanent</button>\n"
+"            <button class=\"btn btn-reset\" onclick=\"resetTarget()\" style=\"margin-top: 10px;\">Reset Target</button>\n"
 "        </div>\n"
 "    </div>\n"
 "</div>\n"
@@ -209,6 +223,14 @@ const char* INDEX_HTML =
 "function saveConfig() {\n"
 "    fetch('/command?cmd=SAVE_PARAMS')\n"
 "        .then(res => alert('Configuration saved to params.conf'));\n"
+"}\n"
+"\n"
+"function resetTarget() {\n"
+"    fetch('/command?cmd=RESET_TARGET')\n"
+"        .then(res => {\n"
+"            coordsInfo.innerText = 'Click to initialize tracker';\n"
+"            alert('Target cleared!');\n"
+"        });\n"
 "}\n"
 "\n"
 "function fetchStatus() {\n"
@@ -296,6 +318,10 @@ public:
         else if (strcmp(cmd_buf, "CHOOSE_TARGET") == 0)
         {
             cmd_key = WebServer::CMD_CHOOSE_TARGET;
+        }
+        else if (strcmp(cmd_buf, "RESET_TARGET") == 0)
+        {
+            cmd_key = WebServer::CMD_RESET_TARGET;
         }
 
         if (cmd_key != 0)
@@ -392,6 +418,76 @@ public:
     }
 };
 
+class HeatmapStreamHandler : public CivetHandler
+{
+private:
+    WebServer* m_web_server;
+
+public:
+    HeatmapStreamHandler(WebServer* ws) : m_web_server(ws) {}
+
+    bool handleGet(CivetServer* server, struct mg_connection* conn) override
+    {
+        uchar* jpeg_frame;
+        unsigned long jpeg_len;
+
+        if (m_web_server->is_heatmap_streaming())
+        {
+            mg_printf(conn, "HTTP/1.1 503 Service Unavailable\r\n"
+                            "Content-Type: text/plain\r\n"
+                            "Content-Length: 28\r\n"
+                            "Connection: close\r\n\r\n"
+                            "Another active stream exists");
+            return true;
+        }
+
+        m_web_server->set_heatmap_streaming(true);
+
+        mg_printf(conn, "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: multipart/x-mixed-replace; boundary=--frameboundary\r\n"
+                        "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                        "Pragma: no-cache\r\n"
+                        "Expires: 0\r\n"
+                        "Connection: close\r\n\r\n");
+
+        jpeg_frame = (uchar*)malloc(256 * 256 * 3);
+
+        while (true)
+        {
+            jpeg_len = 0;
+            m_web_server->wait_for_heatmap(jpeg_frame, &jpeg_len);
+
+            if (jpeg_len > 0)
+            {
+                if (mg_printf(conn, "--frameboundary\r\n"
+                                    "Content-Type: image/jpeg\r\n"
+                                    "Content-Length: %lu\r\n\r\n", jpeg_len) <= 0)
+                {
+                    break;
+                }
+
+                if (mg_write(conn, jpeg_frame, jpeg_len) <= 0)
+                {
+                    break;
+                }
+
+                if (mg_printf(conn, "\r\n") <= 0)
+                {
+                    break;
+                }
+            }
+            else
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+
+        free(jpeg_frame);
+        m_web_server->set_heatmap_streaming(false);
+        return true;
+    }
+};
+
 
 // WebServer Wrapper Class Implementation
 
@@ -409,9 +505,17 @@ WebServer::WebServer(int port)
     m_target_x = -1;
     m_target_y = -1;
 
+    m_has_new_heatmap = false;
+    m_is_heatmap_streaming = false;
+
     m_frame_buf = (uchar*)malloc(1920 * 1280);
     m_jpeg_buf = (uchar*)malloc(1920 * 1280);
     m_jpeg_size = 0;
+
+    m_heatmap_rgb_buf = (uchar*)malloc(256 * 256 * 3);
+    m_heatmap_jpeg_buf = (uchar*)malloc(256 * 256 * 3);
+    m_heatmap_jpeg_size = 0;
+    memset(m_heatmap_rgb_buf, 0, 256 * 256 * 3);
 
     snprintf(port_str, sizeof(port_str), "%d", port);
 
@@ -426,6 +530,7 @@ WebServer::WebServer(int port)
     m_server->addHandler("/status", new StatusHandler());
     m_server->addHandler("/command", new CommandHandler(this));
     m_server->addHandler("/stream", new StreamHandler(this));
+    m_server->addHandler("/heatmap_stream", new HeatmapStreamHandler(this));
 
     StatusObject::instance()->update("web_server_status", "Online");
     StatusObject::instance()->update("web_stream_status", "Inactive");
@@ -438,6 +543,8 @@ WebServer::~WebServer()
     delete m_server;
     free(m_frame_buf);
     free(m_jpeg_buf);
+    free(m_heatmap_rgb_buf);
+    free(m_heatmap_jpeg_buf);
 }
 
 void WebServer::set_command_callback(CommandCallback* cb)
@@ -597,4 +704,109 @@ void WebServer::compress_gray_to_jpeg(const uchar* gray_buf, int w, int h, uchar
 
     jpeg_destroy_compress(&cinfo);
     free(outbuffer);
+}
+
+static void jet_colormap(float v, uchar& r, uchar& g, uchar& b)
+{
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    
+    float r_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 3.0f)));
+    float g_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 2.0f)));
+    float b_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 1.0f)));
+    
+    r = (uchar)(r_f * 255.0f);
+    g = (uchar)(g_f * 255.0f);
+    b = (uchar)(b_f * 255.0f);
+}
+
+void WebServer::compress_rgb_to_jpeg(const uchar* rgb_buf, int w, int h, uchar* dest_buf, unsigned long* dest_size)
+{
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    uchar* outbuffer;
+    unsigned long outsize;
+    JSAMPROW row_pointer[1];
+
+    outbuffer = NULL;
+    outsize = 0;
+
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+
+    jpeg_mem_dest(&cinfo, &outbuffer, &outsize);
+
+    cinfo.image_width = w;
+    cinfo.image_height = h;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, 80, TRUE);
+    jpeg_start_compress(&cinfo, TRUE);
+
+    while (cinfo.next_scanline < cinfo.image_height)
+    {
+        row_pointer[0] = (JSAMPROW)(rgb_buf + cinfo.next_scanline * w * 3);
+        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+    }
+
+    jpeg_finish_compress(&cinfo);
+
+    if (outsize < 256 * 256 * 3)
+    {
+        memcpy(dest_buf, outbuffer, outsize);
+        *dest_size = outsize;
+    }
+
+    jpeg_destroy_compress(&cinfo);
+    free(outbuffer);
+}
+
+void WebServer::update_heatmap(const float* heatmap, int w, int h)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (heatmap != NULL)
+    {
+        for (int i = 0; i < w * h; ++i)
+        {
+            uchar r, g, b;
+            jet_colormap(heatmap[i], r, g, b);
+            m_heatmap_rgb_buf[i * 3 + 0] = r;
+            m_heatmap_rgb_buf[i * 3 + 1] = g;
+            m_heatmap_rgb_buf[i * 3 + 2] = b;
+        }
+    }
+    else
+    {
+        memset(m_heatmap_rgb_buf, 0, w * h * 3);
+    }
+
+    compress_rgb_to_jpeg(m_heatmap_rgb_buf, w, h, m_heatmap_jpeg_buf, &m_heatmap_jpeg_size);
+    m_has_new_heatmap = true;
+    m_condvar.notify_all();
+}
+
+bool WebServer::is_heatmap_streaming() const
+{
+    return m_is_heatmap_streaming;
+}
+
+void WebServer::set_heatmap_streaming(bool state)
+{
+    m_is_heatmap_streaming = state;
+}
+
+void WebServer::wait_for_heatmap(uchar* jpeg_dest, unsigned long* jpeg_len)
+{
+    std::unique_lock<std::mutex> lock(m_mutex);
+    m_condvar.wait_for(lock, std::chrono::milliseconds(100), [this]() { return m_has_new_heatmap; });
+
+    if (m_has_new_heatmap)
+    {
+        memcpy(jpeg_dest, m_heatmap_jpeg_buf, m_heatmap_jpeg_size);
+        *jpeg_len = m_heatmap_jpeg_size;
+        m_has_new_heatmap = false;
+    }
 }
