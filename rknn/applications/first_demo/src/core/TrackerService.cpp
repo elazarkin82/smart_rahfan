@@ -99,17 +99,53 @@ TrackerService::TrackerService(const char* model_path)
     out_attrs[0].index = 0;
     rknn_query(m_ctx, RKNN_QUERY_OUTPUT_ATTR, &out_attrs[0], sizeof(rknn_tensor_attr));
 
-    // Update internal dimension settings based on model queries
-    m_in_width_ref = in_attrs[0].dims[2];
-    m_in_height_ref = in_attrs[0].dims[1];
-    m_in_channels_ref = in_attrs[0].dims[3];
+    // Dynamic mapping of dimensions based on raw queried NPU attributes (supporting 4D/5D)
+    if (in_attrs[0].n_dims == 5)
+    {
+        m_in_width_ref = in_attrs[0].dims[3];
+        m_in_height_ref = in_attrs[0].dims[2];
+        m_in_channels_ref = in_attrs[0].dims[4];
+    }
+    else
+    {
+        m_in_width_ref = in_attrs[0].dims[3];
+        m_in_height_ref = in_attrs[0].dims[2];
+        m_in_channels_ref = in_attrs[0].dims[0] * in_attrs[0].dims[1];
+    }
 
-    m_in_width_search = in_attrs[1].dims[2];
-    m_in_height_search = in_attrs[1].dims[1];
-    m_in_channels_search = in_attrs[1].dims[3];
+    if (in_attrs[1].n_dims == 4 && in_attrs[1].dims[1] == 256 && in_attrs[1].dims[3] == 256)
+    {
+        m_in_width_search = in_attrs[1].dims[3];
+        m_in_height_search = in_attrs[1].dims[1];
+        m_in_channels_search = in_attrs[1].dims[2];
+    }
+    else
+    {
+        m_in_width_search = in_attrs[1].dims[3];
+        m_in_height_search = in_attrs[1].dims[2];
+        m_in_channels_search = in_attrs[1].dims[1];
+    }
 
-    m_out_width_hm = out_attrs[0].dims[2];
-    m_out_height_hm = out_attrs[0].dims[1];
+    if (out_attrs[0].n_dims == 4 && out_attrs[0].dims[1] == 256 && out_attrs[0].dims[2] == 256)
+    {
+        m_out_width_hm = out_attrs[0].dims[2];
+        m_out_height_hm = out_attrs[0].dims[1];
+    }
+    else
+    {
+        m_out_width_hm = out_attrs[0].dims[3];
+        m_out_height_hm = out_attrs[0].dims[2];
+    }
+
+    fprintf(stdout, "[DEBUG] Input 0 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
+            in_attrs[0].name, in_attrs[0].n_dims, in_attrs[0].dims[0], in_attrs[0].dims[1], in_attrs[0].dims[2], in_attrs[0].dims[3],
+            in_attrs[0].size, in_attrs[0].fmt, in_attrs[0].type);
+    fprintf(stdout, "[DEBUG] Input 1 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
+            in_attrs[1].name, in_attrs[1].n_dims, in_attrs[1].dims[0], in_attrs[1].dims[1], in_attrs[1].dims[2], in_attrs[1].dims[3],
+            in_attrs[1].size, in_attrs[1].fmt, in_attrs[1].type);
+    fprintf(stdout, "[DEBUG] Output 0 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
+            out_attrs[0].name, out_attrs[0].n_dims, out_attrs[0].dims[0], out_attrs[0].dims[1], out_attrs[0].dims[2], out_attrs[0].dims[3],
+            out_attrs[0].size, out_attrs[0].fmt, out_attrs[0].type);
 
     fprintf(stdout, "[TrackerService] Loaded RKNN model successfully.\n");
     fprintf(stdout, " - Input 0 (Reference): %dx%dx%d\n", m_in_width_ref, m_in_height_ref, m_in_channels_ref);
