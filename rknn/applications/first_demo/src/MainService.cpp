@@ -33,6 +33,17 @@ MainService::MainService(const char* params_path)
         snprintf(m_params.rknn_model_path, sizeof(m_params.rknn_model_path), "/usr/bin/tracker_model.rknn");
         save_params_file(m_params_path, m_params);
     }
+
+    // Initialize StatusObject telemetry defaults
+    StatusObject::instance()->update("camera_fps", "0.0 FPS");
+    StatusObject::instance()->update("tracker_fps", "0.0 FPS");
+    StatusObject::instance()->update("tracker_time_resize", "N/A");
+    StatusObject::instance()->update("tracker_time_npu", "N/A");
+    StatusObject::instance()->update("tracker_time_decode", "N/A");
+    StatusObject::instance()->update("tracker_time_total", "N/A");
+    StatusObject::instance()->update("web_time_jpeg", "N/A");
+    StatusObject::instance()->update("tracking_status", "Target Not Selected");
+    StatusObject::instance()->update("target_position", "N/A");
 }
 
 MainService::~MainService()
@@ -109,7 +120,7 @@ void MainService::stop()
     fprintf(stdout, "[MainService] All sub-services terminated successfully.\n");
 }
 
-void MainService::onFrame(uchar* frame, int w, int h, int frame_rate)
+void MainService::onFrame(uchar* frame, int w, int h)
 {
     std::lock_guard<std::mutex> lock(m_last_frame_copy_mutex);
     memcpy(m_lastFrame, frame, w * h);
@@ -117,10 +128,28 @@ void MainService::onFrame(uchar* frame, int w, int h, int frame_rate)
     m_lastFrame_h = h;
     m_has_last_frame = true;
 
-    // Report Camera FPS to Status
-    char fps_buf[16];
-    snprintf(fps_buf, sizeof(fps_buf), "%d FPS", frame_rate);
-    StatusObject::instance()->update("camera_fps", fps_buf);
+    // Report Camera FPS to Status using 5-second rolling window
+    auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
+        m_camera_frame_times.push(now);
+        while (!m_camera_frame_times.empty())
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_camera_frame_times.front()).count();
+            if (elapsed >= 5)
+            {
+                m_camera_frame_times.pop();
+            }
+            else
+            {
+                break;
+            }
+        }
+        float real_fps = m_camera_frame_times.size() / 5.0f;
+        char fps_buf[32];
+        snprintf(fps_buf, sizeof(fps_buf), "%.1f FPS", real_fps);
+        StatusObject::instance()->update("camera_fps", fps_buf);
+    }
 }
 
 void MainService::onTargetDetected(int x, int y)
@@ -359,6 +388,49 @@ void MainService::main_loop()
         if (has_frame)
         {
             m_tracker->update_frame(work_frame, work_w, work_h);
+            
+            // Calculate Tracker FPS using 5-second rolling window if target is defined
+            if (m_tracker->is_target_defined())
+            {
+                auto now = std::chrono::steady_clock::now();
+                {
+                    std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
+                    m_tracker_frame_times.push(now);
+                    while (!m_tracker_frame_times.empty())
+                    {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_tracker_frame_times.front()).count();
+                        if (elapsed >= 5)
+                        {
+                            m_tracker_frame_times.pop();
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+                    float real_fps = m_tracker_frame_times.size() / 5.0f;
+                    char fps_buf[32];
+                    snprintf(fps_buf, sizeof(fps_buf), "%.1f FPS", real_fps);
+                    StatusObject::instance()->update("tracker_fps", fps_buf);
+                }
+            }
+            else
+            {
+                // Clear rolling queue when idle
+                {
+                    std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
+                    while (!m_tracker_frame_times.empty())
+                    {
+                        m_tracker_frame_times.pop();
+                    }
+                }
+                StatusObject::instance()->update("tracker_fps", "0.0 FPS");
+                // Clear times in status
+                StatusObject::instance()->update("tracker_time_resize", "N/A");
+                StatusObject::instance()->update("tracker_time_npu", "N/A");
+                StatusObject::instance()->update("tracker_time_decode", "N/A");
+                StatusObject::instance()->update("tracker_time_total", "N/A");
+            }
             
             // Send tracking overlays to web server stream
             m_web_server->update(work_frame, work_w, work_h, m_target_x, m_target_y);

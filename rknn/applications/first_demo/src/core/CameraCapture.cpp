@@ -306,7 +306,7 @@ void CameraCapture::capture_thread_loop()
                 std::lock_guard<std::mutex> lock(m_mutex);
                 if (m_callback != NULL)
                 {
-                    m_callback->onFrame(m_gray_buffer, current_w, current_h, 30);
+                    m_callback->onFrame(m_gray_buffer, current_w, current_h);
                 }
             }
 

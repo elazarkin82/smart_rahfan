@@ -4,6 +4,8 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <queue>
+#include <chrono>
 #include "core/CameraCapture.h"
 #include "core/TrackerService.h"
 #include "core/WebServer.h"
@@ -51,6 +53,11 @@ private:
     WebServer::Command m_pending_command_key;
     char m_pending_command_val[512];
 
+    // Real FPS calculations (rolling 5-second window)
+    std::queue<std::chrono::steady_clock::time_point> m_camera_frame_times;
+    std::queue<std::chrono::steady_clock::time_point> m_tracker_frame_times;
+    std::mutex m_fps_mutex;
+
     // Helper functions
     bool parse_params_file(const char* params_path, Params& out);
     void save_params_file(const char* params_path, const Params& in);
@@ -65,7 +72,7 @@ public:
     void stop();
 
     // Callbacks implementation
-    void onFrame(uchar* frame, int w, int h, int frame_rate = 30) override;
+    void onFrame(uchar* frame, int w, int h) override;
     void onTargetDetected(int x, int y) override;
     void onCommand(WebServer::Command key, const char* values, int len) override;
 };
