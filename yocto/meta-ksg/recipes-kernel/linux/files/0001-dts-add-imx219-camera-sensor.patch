@@ -7,7 +7,7 @@ with a 24MHz camera-clk, reset GPIO, and necessary voltage regulators.
 
 --- a/arch/arm64/boot/dts/rockchip/rk3566-radxa-zero-3e.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3566-radxa-zero-3e.dts
-@@ -13,6 +13,24 @@
+@@ -13,5 +13,29 @@
  		ethernet0 = &gmac1;
  		mmc0 = &sdmmc0;
  	};
@@ -34,6 +34,6 @@ with a 24MHz camera-clk, reset GPIO, and necessary voltage regulators.
 +		VDIG-supply = <&vcc_1v8>;
 +		VDDL-supply = <&vcca_1v8>;
 +	};
- };
++};
  
  &gmac1 {
