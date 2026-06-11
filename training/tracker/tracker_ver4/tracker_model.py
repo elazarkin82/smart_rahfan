@@ -1053,6 +1053,37 @@ class TargetTrackerVer4:
 # Dataset Pipeline
 # =====================================================================
 
+def read_hdf5_sliced(dataset_obj, indices, chunk_size=10000):
+    """
+    Slices a large HDF5 dataset. If the dataset fits in less than 50% of available memory,
+    we read the entire dataset contiguously to RAM and slice it in memory, bypassing
+    h5py's extremely slow scattered index selection.
+    """
+    import numpy as np
+    import psutil
+    
+    mem = psutil.virtual_memory()
+    total_dataset_bytes = dataset_obj.shape[0] * np.prod(dataset_obj.shape[1:]) * 4
+    
+    if total_dataset_bytes < mem.available * 0.50:
+        # Contiguous block read (very fast)
+        data = dataset_obj[:]
+        return data[indices]
+        
+    # Fallback to memory-safe sorted index chunks
+    chunks = []
+    for i in range(0, len(indices), chunk_size):
+        batch_idx = indices[i:i + chunk_size]
+        sort_idx = np.argsort(batch_idx)
+        sorted_idx = batch_idx[sort_idx]
+        
+        chunk_data = dataset_obj[sorted_idx]
+        
+        unsort_idx = np.argsort(sort_idx)
+        chunks.append(chunk_data[unsort_idx])
+        
+    return np.concatenate(chunks, axis=0)
+
 def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mode="joint"):
     import h5py
     import psutil
@@ -1075,39 +1106,6 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
         selected_indices = indices[:val_size]
     else:
         selected_indices = indices[val_size:]
-        
-    # Now, read the qualities first to do filtering/balancing if needed
-    with h5py.File(h5_path, 'r') as f:
-        # Read all qualities into memory first to avoid unsorted indexing errors in h5py
-        all_qualities = f['ground_truth_quality'][:]
-        qualities = all_qualities[selected_indices]
-        
-    qualities = qualities.squeeze(-1) # shape (M,)
-    
-    if train_mode == "heatmap_only" and not is_val:
-        # Stage 1 positive filtering: keep only positive samples (quality > 0.5)
-        pos_mask = qualities > 0.5
-        selected_indices = selected_indices[pos_mask]
-    elif train_mode == "quality_only" and not is_val:
-        # Stage 2 50-50 balancing
-        pos_mask = qualities > 0.5
-        neg_mask = ~pos_mask
-        
-        pos_indices = selected_indices[pos_mask]
-        neg_indices = selected_indices[neg_mask]
-        
-        n_pos = len(pos_indices)
-        n_neg = len(neg_indices)
-        
-        n_balanced = min(n_pos, n_neg)
-        # Select matching number of negatives
-        neg_indices_balanced = neg_indices[:n_balanced]
-        pos_indices_balanced = pos_indices[:n_balanced]
-        
-        selected_indices = np.concatenate([pos_indices_balanced, neg_indices_balanced])
-        # Shuffle again deterministically
-        np.random.RandomState(42).shuffle(selected_indices)
-        
     # Make divisible by batch_size to avoid partial batch tails
     num_selected = len(selected_indices)
     if num_selected % batch_size != 0:
@@ -1118,94 +1116,95 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
         raise ValueError(f"No samples remaining after filtering/balancing for train_mode={train_mode}, is_val={is_val}")
         
     # Check RAM caching capability using psutil
-    # Calculate expected memory usage: total selected samples * ~768KB
     sample_size_bytes = (1 * 64 * 64 * 16 + 256 * 256 * 1 + 256 * 256 * 1) * 4 + 4
     total_expected_bytes = len(selected_indices) * sample_size_bytes
     
     mem = psutil.virtual_memory()
-    # If the dataset size is less than 75% of available memory, cache the whole thing in RAM
-    if total_expected_bytes < mem.available * 0.75:
+    
+    # Calculate fallback chunk size for dynamic disk streaming
+    target_chunk_bytes = mem.available * 0.15
+    disk_chunk_size = int(target_chunk_bytes // sample_size_bytes)
+    disk_chunk_size = max(2000, min(8000, disk_chunk_size))
+    disk_chunk_size = (disk_chunk_size // batch_size) * batch_size
+    if disk_chunk_size == 0:
+        disk_chunk_size = batch_size
+        
+    # Cache to RAM only if it occupies less than 40% of currently available memory
+    if total_expected_bytes < mem.available * 0.40:
         print(f"Caching dataset to RAM ({len(selected_indices)} samples, {total_expected_bytes / (1024**3):.2f} GB)...")
         with h5py.File(h5_path, 'r') as f:
-            # Efficient index sorting for faster HDF5 slicing
-            print("1")
-            sort_idx = np.argsort(selected_indices)
-            print("2")
-            sorted_indices = selected_indices[sort_idx]
-            print("3")
-            # Read in sorted order (much faster for H5 index slicing)
-            ref_data = f['reference_stack'][sorted_indices]
-            print("4")
-            search_data = f['search_frame'][sorted_indices]
-            print("5")
-            heatmap_data = f['ground_truth_heatmap'][sorted_indices]
-            print("6")
-            quality_data = f['ground_truth_quality'][sorted_indices]
-            print("7")
-            # Restore original shuffled order
-            unsort_idx = np.argsort(sort_idx)
-            print("8")
-            ref_data = ref_data[unsort_idx]
-            print("9")
-            search_data = search_data[unsort_idx]
-            print("10")
-            heatmap_data = heatmap_data[unsort_idx]
-            print("11")
-            quality_data = quality_data[unsort_idx]
-            print("12")
+            ref_data = read_hdf5_sliced(f['reference_stack'], selected_indices)
+            search_data = read_hdf5_sliced(f['search_frame'], selected_indices)
+            heatmap_data = read_hdf5_sliced(f['ground_truth_heatmap'], selected_indices)
+            quality_data = read_hdf5_sliced(f['ground_truth_quality'], selected_indices)
             
         print("Dataset successfully cached to RAM.")
         
-        # Create a tf.data.Dataset from generator
-        def ram_generator():
-            # Shuffle at the start of each epoch if training
+        # Generator yielding chunks from preloaded RAM arrays to prevent GPU OOM
+        def chunk_generator():
+            import math
             local_indices = np.arange(len(selected_indices))
             if not is_val:
                 np.random.shuffle(local_indices)
-            for idx in local_indices:
+                
+            ram_chunk_size = 5000
+            num_chunks = int(math.ceil(len(local_indices) / ram_chunk_size))
+            for i in range(num_chunks):
+                chunk_idx = local_indices[i * ram_chunk_size : (i + 1) * ram_chunk_size]
                 yield (
-                    ref_data[idx],
-                    search_data[idx]
+                    ref_data[chunk_idx],
+                    search_data[chunk_idx]
                 ), (
-                    heatmap_data[idx],
-                    quality_data[idx]
+                    heatmap_data[chunk_idx],
+                    quality_data[chunk_idx]
                 )
     else:
-        # Load in chunks or use generator direct from H5 file
-        print(f"Dataset does not fit in RAM (requires {total_expected_bytes / (1024**3):.2f} GB, available {mem.available / (1024**3):.2f} GB). Streaming from HDF5...")
+        # Load dynamically in memory-safe chunks directly from HDF5
+        print(f"Dataset streaming from HDF5 (requires {total_expected_bytes / (1024**3):.2f} GB, available {mem.available / (1024**3):.2f} GB). Chunk size: {disk_chunk_size} samples.")
         
-        # Generator streaming directly from HDF5
-        def ram_generator():
-            # Open and close the file within the generator loop to handle multiprocessing safety
-            with h5py.File(h5_path, 'r') as f:
-                local_indices = selected_indices.copy()
-                if not is_val:
-                    np.random.shuffle(local_indices)
-                for idx in local_indices:
-                    yield (
-                        f['reference_stack'][idx],
-                        f['search_frame'][idx]
-                    ), (
-                        f['ground_truth_heatmap'][idx],
-                        f['ground_truth_quality'][idx]
-                    )
+        def chunk_generator():
+            import math
+            local_indices = selected_indices.copy()
+            if not is_val:
+                np.random.shuffle(local_indices)
+                
+            num_chunks = int(math.ceil(len(local_indices) / disk_chunk_size))
+            for i in range(num_chunks):
+                chunk_idx = local_indices[i * disk_chunk_size : (i + 1) * disk_chunk_size]
+                
+                with h5py.File(h5_path, 'r') as f:
+                    ref_chunk = read_hdf5_sliced(f['reference_stack'], chunk_idx)
+                    search_chunk = read_hdf5_sliced(f['search_frame'], chunk_idx)
+                    heatmap_chunk = read_hdf5_sliced(f['ground_truth_heatmap'], chunk_idx)
+                    quality_chunk = read_hdf5_sliced(f['ground_truth_quality'], chunk_idx)
                     
-    # Define output signature (batch dimension will be added by ds.batch)
+                yield (ref_chunk, search_chunk), (heatmap_chunk, quality_chunk)
+                
+                ref_chunk = None
+                search_chunk = None
+                heatmap_chunk = None
+                quality_chunk = None
+                gc.collect()
+                
+    # Define output signature with dynamic leading dimension
     output_signature = (
         (
-            tf.TensorSpec(shape=(1, 64, 64, 16), dtype=tf.float32, name="reference_stack"),
-            tf.TensorSpec(shape=(256, 256, 1), dtype=tf.float32, name="search_frame")
+            tf.TensorSpec(shape=(None, 1, 64, 64, 16), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32)
         ),
         (
-            tf.TensorSpec(shape=(256, 256, 1), dtype=tf.float32, name="heatmap"),
-            tf.TensorSpec(shape=(1,), dtype=tf.float32, name="quality")
+            tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
         )
     )
-    
-    ds = tf.data.Dataset.from_generator(ram_generator, output_signature=output_signature)
-    
+        
+    ds = tf.data.Dataset.from_generator(chunk_generator, output_signature=output_signature)
+    ds = ds.unbatch()
+        
     # Map to format required by Keras models
     def process_element(inputs, targets):
+        if isinstance(inputs, dict):
+            return inputs, targets
         ref, search = inputs
         heatmap, quality = targets
         return {"reference_stack": ref, "search_frame": search}, {"predicted_heatmap": heatmap, "predicted_quality": quality}
@@ -1214,6 +1213,7 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     
+    gc.collect()
     return ds, len(selected_indices)
 
 def main():

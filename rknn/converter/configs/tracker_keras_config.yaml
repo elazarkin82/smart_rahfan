@@ -32,7 +32,7 @@ quantization:
 # Input tensor details
 inputs:
   - name: "reference_stack"
-    shape: [16, 32, 32, 1]
+    shape: [1, 64, 64, 16]
   - name: "search_frame"
     shape: [256, 256, 1]
 

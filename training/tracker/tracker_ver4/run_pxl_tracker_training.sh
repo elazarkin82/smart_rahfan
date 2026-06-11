@@ -43,7 +43,7 @@
 #   - joint         : Train both branches jointly (default).
 # =====================================================================
 
-mkdir -p outputs
+mkdir -p outputs_pxl
 
 # Note: Batch size is determined by how the dataset was batched during the 
 # create_batched_dataset.py step.
