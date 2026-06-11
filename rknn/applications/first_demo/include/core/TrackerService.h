@@ -17,6 +17,7 @@ public:
         }
         virtual void onTargetDetected(int x, int y) = 0;
         virtual void onHeatmapCreated(const float* heatmap, int w, int h) = 0;
+        virtual void onStackCreated(const uchar* stack, int w, int h, int c) = 0;
     };
 
 

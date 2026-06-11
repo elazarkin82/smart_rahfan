@@ -168,6 +168,18 @@ const char* INDEX_HTML =
 "        </div>\n"
 "        <div class=\"coords-info\" style=\"margin-top: 10px;\">256x256 Filtered Output</div>\n"
 "    </div>\n"
+"    <div class=\"card\" style=\"width: 256px;\">\n"
+"        <h2>Reference Stack</h2>\n"
+"        <div class=\"stream-container\" style=\"width: 256px; height: 256px; display: flex; justify-content: center; align-items: center; background: #000; border: 2px solid #3b82f6;\">\n"
+"            <img id=\"stackImg\" src=\"/stack_layer?idx=0\" alt=\"Stack Layer\" style=\"width: 128px; height: 128px; image-rendering: pixelated;\">\n"
+"        </div>\n"
+"        <div class=\"coords-info\" style=\"margin-top: 10px;\" id=\"stackInfo\">Layer 0 (Crop: N/A)</div>\n"
+"        <div class=\"form-group\" style=\"margin-top: 10px; display: flex; align-items: center; gap: 5px;\">\n"
+"            <button class=\"btn\" style=\"width: 40px; padding: 5px;\" onclick=\"stepStack(-1)\">&lt;</button>\n"
+"            <input type=\"range\" id=\"stackSlider\" min=\"0\" max=\"15\" value=\"0\" style=\"flex-grow: 1;\" oninput=\"onStackSlider(this.value)\">\n"
+"            <button class=\"btn\" style=\"width: 40px; padding: 5px;\" onclick=\"stepStack(1)\">&gt;</button>\n"
+"        </div>\n"
+"    </div>\n"
 "    <div class=\"status-card\">\n"
 "        <div class=\"card\">\n"
 "            <h2>Telemetry Status</h2>\n"
@@ -225,12 +237,63 @@ const char* INDEX_HTML =
 "        .then(res => alert('Configuration saved to params.conf'));\n"
 "}\n"
 "\n"
+"let cameraW = 640;\n"
+"let cameraH = 480;\n"
+"let currentStackIdx = 0;\n"
+"\n"
 "function resetTarget() {\n"
 "    fetch('/command?cmd=RESET_TARGET')\n"
 "        .then(res => {\n"
 "            coordsInfo.innerText = 'Click to initialize tracker';\n"
+"            currentStackIdx = 0;\n"
+"            document.getElementById('stackSlider').value = 0;\n"
+"            updateStackView();\n"
 "            alert('Target cleared!');\n"
 "        });\n"
+"}\n"
+"\n"
+"function onStackSlider(val) {\n"
+"    currentStackIdx = parseInt(val);\n"
+"    updateStackView();\n"
+"}\n"
+"\n"
+"function stepStack(dir) {\n"
+"    currentStackIdx += dir;\n"
+"    if (currentStackIdx < 0) {\n"
+"        currentStackIdx = 15;\n"
+"    }\n"
+"    if (currentStackIdx > 15) {\n"
+"        currentStackIdx = 0;\n"
+"    }\n"
+"    document.getElementById('stackSlider').value = currentStackIdx;\n"
+"    updateStackView();\n"
+"}\n"
+"\n"
+"function updateStackView() {\n"
+"    const stackImg = document.getElementById('stackImg');\n"
+"    stackImg.src = `/stack_layer?idx=${currentStackIdx}&t=${Date.now()}`;\n"
+"    updateStackLabel();\n"
+"}\n"
+"\n"
+"function updateStackLabel() {\n"
+"    const max_sz = Math.min(cameraW, cameraH);\n"
+"    const min_sz = 16;\n"
+"    const sz = Math.round(max_sz - (currentStackIdx * (max_sz - min_sz) / 15));\n"
+"    document.getElementById('stackInfo').innerText = `Layer ${currentStackIdx} (Crop: ${sz}x${sz})`;\n"
+"}\n"
+"\n"
+"function parseResolutionFromStatus(statusText) {\n"
+"    const lines = statusText.split('\\n');\n"
+"    for (let i = 0; i < lines.length; i++) {\n"
+"        if (lines[i].startsWith('camera_resolution=')) {\n"
+"            const val = lines[i].split('=')[1];\n"
+"            const parts = val.split('x');\n"
+"            if (parts.length === 2) {\n"
+"                cameraW = parseInt(parts[0]);\n"
+"                cameraH = parseInt(parts[1]);\n"
+"            }\n"
+"        }\n"
+"    }\n"
 "}\n"
 "\n"
 "function fetchStatus() {\n"
@@ -238,6 +301,8 @@ const char* INDEX_HTML =
 "        .then(res => res.text())\n"
 "        .then(text => {\n"
 "            document.getElementById('statusPre').innerText = text;\n"
+"            parseResolutionFromStatus(text);\n"
+"            updateStackLabel();\n"
 "        });\n"
 "}\n"
 "\n"
@@ -490,6 +555,62 @@ public:
     }
 };
 
+class StackLayerHandler : public CivetHandler
+{
+private:
+    WebServer* m_web_server;
+
+public:
+    StackLayerHandler(WebServer* ws) : m_web_server(ws)
+    {
+    }
+
+    bool handleGet(CivetServer* server, struct mg_connection* conn) override
+    {
+        char idx_buf[32];
+        int idx;
+        const uchar* jpeg_data;
+        unsigned long jpeg_len;
+        int ret;
+        const struct mg_request_info* req_info;
+
+        idx = 0;
+        req_info = mg_get_request_info(conn);
+        if (req_info != NULL && req_info->query_string != NULL)
+        {
+            ret = mg_get_var(req_info->query_string, strlen(req_info->query_string), "idx", idx_buf, sizeof(idx_buf));
+            if (ret >= 0)
+            {
+                idx = atoi(idx_buf);
+            }
+        }
+
+        if (idx < 0 || idx >= 16)
+        {
+            idx = 0;
+        }
+
+        jpeg_data = NULL;
+        jpeg_len = 0;
+        m_web_server->get_stack_layer(idx, &jpeg_data, &jpeg_len);
+
+        if (jpeg_data != NULL && jpeg_len > 0)
+        {
+            mg_printf(conn, "HTTP/1.1 200 OK\r\n"
+                            "Content-Type: image/jpeg\r\n"
+                            "Content-Length: %lu\r\n"
+                            "Connection: close\r\n\r\n", jpeg_len);
+            mg_write(conn, jpeg_data, jpeg_len);
+        }
+        else
+        {
+            mg_printf(conn, "HTTP/1.1 444 No Response\r\n"
+                            "Connection: close\r\n\r\n");
+        }
+        return true;
+    }
+};
+
 
 // WebServer Wrapper Class Implementation
 
@@ -497,6 +618,7 @@ WebServer::WebServer(int port)
 {
     char port_str[16];
     const char* options[5];
+    int i;
 
     m_cmd_callback = NULL;
     m_is_streaming = false;
@@ -519,6 +641,14 @@ WebServer::WebServer(int port)
     m_heatmap_jpeg_size = 0;
     memset(m_heatmap_rgb_buf, 0, 256 * 256 * 3);
 
+    for (i = 0; i < 16; ++i)
+    {
+        m_stack_jpeg_bufs[i] = (uchar*)malloc(16384);
+        m_stack_jpeg_sizes[i] = 0;
+    }
+
+    update_stack(NULL, 64, 64, 16);
+
     snprintf(port_str, sizeof(port_str), "%d", port);
 
     options[0] = "listening_ports";
@@ -533,6 +663,7 @@ WebServer::WebServer(int port)
     m_server->addHandler("/command", new CommandHandler(this));
     m_server->addHandler("/stream", new StreamHandler(this));
     m_server->addHandler("/heatmap_stream", new HeatmapStreamHandler(this));
+    m_server->addHandler("/stack_layer", new StackLayerHandler(this));
 
     StatusObject::instance()->update("web_server_status", "Online");
     StatusObject::instance()->update("web_stream_status", "Inactive");
@@ -541,12 +672,19 @@ WebServer::WebServer(int port)
 
 WebServer::~WebServer()
 {
+    int i;
+
     // Clean handlers
     delete m_server;
     free(m_frame_buf);
     free(m_jpeg_buf);
     free(m_heatmap_rgb_buf);
     free(m_heatmap_jpeg_buf);
+
+    for (i = 0; i < 16; ++i)
+    {
+        free(m_stack_jpeg_bufs[i]);
+    }
 }
 
 void WebServer::set_command_callback(CommandCallback* cb)
@@ -823,5 +961,46 @@ void WebServer::wait_for_heatmap(uchar* jpeg_dest, unsigned long* jpeg_len)
         memcpy(jpeg_dest, m_heatmap_jpeg_buf, m_heatmap_jpeg_size);
         *jpeg_len = m_heatmap_jpeg_size;
         m_has_new_heatmap = false;
+    }
+}
+
+void WebServer::update_stack(const uchar* stack, int w, int h, int c)
+{
+    int i;
+    uchar* temp_black;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (stack != NULL)
+    {
+        for (i = 0; i < c; ++i)
+        {
+            const uchar* layer_ptr = stack + (i * w * h);
+            compress_gray_to_jpeg(layer_ptr, w, h, m_stack_jpeg_bufs[i], &m_stack_jpeg_sizes[i]);
+        }
+    }
+    else
+    {
+        temp_black = (uchar*)calloc(w * h, 1);
+        for (i = 0; i < 16; ++i)
+        {
+            compress_gray_to_jpeg(temp_black, w, h, m_stack_jpeg_bufs[i], &m_stack_jpeg_sizes[i]);
+        }
+        free(temp_black);
+    }
+}
+
+void WebServer::get_stack_layer(int idx, const uchar** jpeg_dest, unsigned long* jpeg_len)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (idx >= 0 && idx < 16)
+    {
+        *jpeg_dest = m_stack_jpeg_bufs[idx];
+        *jpeg_len = m_stack_jpeg_sizes[idx];
+    }
+    else
+    {
+        *jpeg_dest = NULL;
+        *jpeg_len = 0;
     }
 }

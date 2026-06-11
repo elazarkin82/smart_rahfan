@@ -35,6 +35,7 @@ MainService::MainService(const char* params_path)
     }
 
     // Initialize StatusObject telemetry defaults
+    char res_buf[64];
     StatusObject::instance()->update("camera_fps", "0.0 FPS");
     StatusObject::instance()->update("tracker_fps", "0.0 FPS");
     StatusObject::instance()->update("tracker_time_resize", "N/A");
@@ -44,6 +45,8 @@ MainService::MainService(const char* params_path)
     StatusObject::instance()->update("web_time_jpeg", "N/A");
     StatusObject::instance()->update("tracking_status", "Target Not Selected");
     StatusObject::instance()->update("target_position", "N/A");
+    snprintf(res_buf, sizeof(res_buf), "%dx%d", m_params.width, m_params.height);
+    StatusObject::instance()->update("camera_resolution", res_buf);
 }
 
 MainService::~MainService()
@@ -185,6 +188,14 @@ void MainService::onHeatmapCreated(const float* heatmap, int w, int h)
     }
 }
 
+void MainService::onStackCreated(const uchar* stack, int w, int h, int c)
+{
+    if (m_web_server != NULL)
+    {
+        m_web_server->update_stack(stack, w, h, c);
+    }
+}
+
 void MainService::onCommand(WebServer::Command key, const char* values, int len)
 {
     std::lock_guard<std::mutex> lock(m_cmd_mutex);
@@ -275,6 +286,7 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
     float y_n;
     int target_px;
     int target_py;
+    char res_buf[64];
 
     w = 640;
     h = 480;
@@ -308,6 +320,9 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
                 m_params.cam_dev[sizeof(m_params.cam_dev) - 1] = '\0';
                 m_params.width = w;
                 m_params.height = h;
+
+                snprintf(res_buf, sizeof(res_buf), "%dx%d", w, h);
+                StatusObject::instance()->update("camera_resolution", res_buf);
             }
             break;
 
@@ -320,6 +335,7 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
             if (m_web_server != NULL)
             {
                 m_web_server->update_heatmap(NULL, 256, 256);
+                m_web_server->update_stack(NULL, 64, 64, 16);
             }
             m_target_x = -1;
             m_target_y = -1;

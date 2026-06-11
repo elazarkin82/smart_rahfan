@@ -75,6 +75,7 @@ public:
     void onFrame(uchar* frame, int w, int h) override;
     void onTargetDetected(int x, int y) override;
     void onHeatmapCreated(const float* heatmap, int w, int h) override;
+    void onStackCreated(const uchar* stack, int w, int h, int c) override;
     void onCommand(WebServer::Command key, const char* values, int len) override;
 };
 

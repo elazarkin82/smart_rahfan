@@ -253,6 +253,10 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
 
     std::lock_guard<std::mutex> lock(m_mutex);
     m_is_target_defined = true;
+    if (m_callback != NULL)
+    {
+        m_callback->onStackCreated(m_ref_stack_buf, m_in_width_ref, m_in_height_ref, m_in_channels_ref);
+    }
     fprintf(stdout, "[TrackerService] Target refreshed & initialized with multi-scale reference stack.\n");
 }
 

@@ -54,6 +54,10 @@ private:
     uchar* m_jpeg_buf;
     unsigned long m_jpeg_size;
 
+    // Stack layer JPEGs cache
+    uchar* m_stack_jpeg_bufs[16];
+    unsigned long m_stack_jpeg_sizes[16];
+
     // Helper compression functions
     void compress_gray_to_jpeg(const uchar* gray_buf, int w, int h, uchar* dest_buf, unsigned long* dest_size);
     void compress_rgb_to_jpeg(const uchar* rgb_buf, int w, int h, uchar* dest_buf, unsigned long* dest_size);
@@ -65,6 +69,8 @@ public:
     void set_command_callback(CommandCallback* cb);
     void update(uchar* frame, int w, int h, int target_x, int target_y);
     void update_heatmap(const float* heatmap, int w, int h);
+    void update_stack(const uchar* stack, int w, int h, int c);
+    void get_stack_layer(int idx, const uchar** jpeg_dest, unsigned long* jpeg_len);
     void trigger_command(Command key, const char* values);
 
     // Stream synchronization API called by CivetWeb handlers
