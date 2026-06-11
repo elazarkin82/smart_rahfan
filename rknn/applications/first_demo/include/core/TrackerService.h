@@ -19,6 +19,7 @@ public:
 private:
     rknn_context m_ctx;
     bool m_is_model_loaded;
+    bool m_is_target_defined;
     TrackerCallback* m_callback;
     std::mutex m_mutex;
 
@@ -54,6 +55,7 @@ public:
     ~TrackerService();
 
     bool is_model_loaded() const;
+    bool is_target_defined() const;
     void refresh_target(uchar* frame, int w, int h);
     void set_tracker_callback(TrackerCallback* cb);
     void update_frame(uchar* frame, int w, int h);

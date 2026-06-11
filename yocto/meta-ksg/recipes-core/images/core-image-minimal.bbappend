@@ -5,3 +5,5 @@ EXTRA_USERS_PARAMS = "\
     usermod -p '\$6\$tUt2X52o.aNjxxTu\$ZzXiDfbFJbEII.PPi5ZzZP0sUCIoK020koNej6burNH2NSPnXEOXhgrsd8Yf.oOD/FcLAJDSFDXDla7s0ed0w1' root; \
     userdel radxa; \
 "
+
+IMAGE_INSTALL:append = " rknpu2"

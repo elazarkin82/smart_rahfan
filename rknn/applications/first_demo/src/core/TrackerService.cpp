@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <chrono>
 
 TrackerService::TrackerService(const char* model_path)
 {
@@ -16,6 +17,7 @@ TrackerService::TrackerService(const char* model_path)
 
     m_ctx = 0;
     m_is_model_loaded = false;
+    m_is_target_defined = false;
     m_callback = NULL;
 
     m_in_width_ref = 32;
@@ -99,17 +101,53 @@ TrackerService::TrackerService(const char* model_path)
     out_attrs[0].index = 0;
     rknn_query(m_ctx, RKNN_QUERY_OUTPUT_ATTR, &out_attrs[0], sizeof(rknn_tensor_attr));
 
-    // Update internal dimension settings based on model queries
-    m_in_width_ref = in_attrs[0].dims[2];
-    m_in_height_ref = in_attrs[0].dims[1];
-    m_in_channels_ref = in_attrs[0].dims[3];
+    // Dynamic mapping of dimensions based on raw queried NPU attributes (supporting 4D/5D)
+    if (in_attrs[0].n_dims == 5)
+    {
+        m_in_width_ref = in_attrs[0].dims[3];
+        m_in_height_ref = in_attrs[0].dims[2];
+        m_in_channels_ref = in_attrs[0].dims[4];
+    }
+    else
+    {
+        m_in_width_ref = in_attrs[0].dims[3];
+        m_in_height_ref = in_attrs[0].dims[2];
+        m_in_channels_ref = in_attrs[0].dims[0] * in_attrs[0].dims[1];
+    }
 
-    m_in_width_search = in_attrs[1].dims[2];
-    m_in_height_search = in_attrs[1].dims[1];
-    m_in_channels_search = in_attrs[1].dims[3];
+    if (in_attrs[1].n_dims == 4 && in_attrs[1].dims[1] == 256 && in_attrs[1].dims[3] == 256)
+    {
+        m_in_width_search = in_attrs[1].dims[3];
+        m_in_height_search = in_attrs[1].dims[1];
+        m_in_channels_search = in_attrs[1].dims[2];
+    }
+    else
+    {
+        m_in_width_search = in_attrs[1].dims[3];
+        m_in_height_search = in_attrs[1].dims[2];
+        m_in_channels_search = in_attrs[1].dims[1];
+    }
 
-    m_out_width_hm = out_attrs[0].dims[2];
-    m_out_height_hm = out_attrs[0].dims[1];
+    if (out_attrs[0].n_dims == 4 && out_attrs[0].dims[1] == 256 && out_attrs[0].dims[2] == 256)
+    {
+        m_out_width_hm = out_attrs[0].dims[2];
+        m_out_height_hm = out_attrs[0].dims[1];
+    }
+    else
+    {
+        m_out_width_hm = out_attrs[0].dims[3];
+        m_out_height_hm = out_attrs[0].dims[2];
+    }
+
+    fprintf(stdout, "[DEBUG] Input 0 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
+            in_attrs[0].name, in_attrs[0].n_dims, in_attrs[0].dims[0], in_attrs[0].dims[1], in_attrs[0].dims[2], in_attrs[0].dims[3],
+            in_attrs[0].size, in_attrs[0].fmt, in_attrs[0].type);
+    fprintf(stdout, "[DEBUG] Input 1 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
+            in_attrs[1].name, in_attrs[1].n_dims, in_attrs[1].dims[0], in_attrs[1].dims[1], in_attrs[1].dims[2], in_attrs[1].dims[3],
+            in_attrs[1].size, in_attrs[1].fmt, in_attrs[1].type);
+    fprintf(stdout, "[DEBUG] Output 0 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
+            out_attrs[0].name, out_attrs[0].n_dims, out_attrs[0].dims[0], out_attrs[0].dims[1], out_attrs[0].dims[2], out_attrs[0].dims[3],
+            out_attrs[0].size, out_attrs[0].fmt, out_attrs[0].type);
 
     fprintf(stdout, "[TrackerService] Loaded RKNN model successfully.\n");
     fprintf(stdout, " - Input 0 (Reference): %dx%dx%d\n", m_in_width_ref, m_in_height_ref, m_in_channels_ref);
@@ -150,6 +188,11 @@ bool TrackerService::is_model_loaded() const
     return m_is_model_loaded;
 }
 
+bool TrackerService::is_target_defined() const
+{
+    return m_is_target_defined;
+}
+
 void TrackerService::set_tracker_callback(TrackerCallback* cb)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -179,6 +222,8 @@ void TrackerService::refresh_target(uchar* frame, int w, int h)
         memcpy(m_ref_stack_buf + (c * m_in_width_ref * m_in_height_ref), temp_crop, m_in_width_ref * m_in_height_ref);
     }
 
+    m_is_target_defined = true;
+
     free(temp_crop);
     fprintf(stdout, "[TrackerService] Target refreshed & initialized.\n");
 }
@@ -191,13 +236,17 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     int out_x;
     int out_y;
 
-    if (!m_is_model_loaded)
+    if (!m_is_model_loaded || !m_is_target_defined)
     {
         return;
     }
 
+    auto t_start = std::chrono::steady_clock::now();
+
     // 1. Resize incoming frame to search window size (using Bilinear Interpolation)
+    auto t_resize_start = std::chrono::steady_clock::now();
     resize_bilinear_gray(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
+    auto t_resize_end = std::chrono::steady_clock::now();
 
     // 2. Setup inputs
     memset(inputs, 0, sizeof(inputs));
@@ -223,7 +272,9 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     }
 
     // 3. Run inference on NPU
+    auto t_npu_start = std::chrono::steady_clock::now();
     ret = rknn_run(m_ctx, NULL);
+    auto t_npu_end = std::chrono::steady_clock::now();
     if (ret < 0)
     {
         fprintf(stderr, "[TrackerService] rknn_run failed: %d\n", ret);
@@ -248,9 +299,33 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     rknn_outputs_release(m_ctx, 1, outputs);
 
     // 5. Decode heatmap using local 5x5 sub-pixel centroid
+    auto t_decode_start = std::chrono::steady_clock::now();
     out_x = -1;
     out_y = -1;
     decode_heatmap(m_heatmap_buf, &out_x, &out_y);
+    auto t_decode_end = std::chrono::steady_clock::now();
+
+    auto t_end = std::chrono::steady_clock::now();
+
+    // Calculate times in milliseconds
+    float resize_ms = std::chrono::duration<float, std::milli>(t_resize_end - t_resize_start).count();
+    float npu_ms = std::chrono::duration<float, std::milli>(t_npu_end - t_npu_start).count();
+    float decode_ms = std::chrono::duration<float, std::milli>(t_decode_end - t_decode_start).count();
+    float total_ms = std::chrono::duration<float, std::milli>(t_end - t_start).count();
+
+    // Update StatusObject
+    char time_buf[64];
+    snprintf(time_buf, sizeof(time_buf), "%.2f ms", resize_ms);
+    StatusObject::instance()->update("tracker_time_resize", time_buf);
+
+    snprintf(time_buf, sizeof(time_buf), "%.2f ms", npu_ms);
+    StatusObject::instance()->update("tracker_time_npu", time_buf);
+
+    snprintf(time_buf, sizeof(time_buf), "%.2f ms", decode_ms);
+    StatusObject::instance()->update("tracker_time_decode", time_buf);
+
+    snprintf(time_buf, sizeof(time_buf), "%.2f ms", total_ms);
+    StatusObject::instance()->update("tracker_time_total", time_buf);
 
     // 6. Trigger TrackerCallback
     {

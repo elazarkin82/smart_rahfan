@@ -5,6 +5,7 @@
 #include <string.h>
 #include <jpeglib.h>
 #include "civetweb.h"
+#include <chrono>
 
 // Web browser UI HTML
 const char* INDEX_HTML = 
@@ -510,7 +511,14 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
     }
 
     // Perform the grayscale JPEG compression inside Web context thread trigger
+    auto t_comp_start = std::chrono::steady_clock::now();
     compress_gray_to_jpeg(m_frame_buf, m_frame_w, m_frame_h, m_jpeg_buf, &m_jpeg_size);
+    auto t_comp_end = std::chrono::steady_clock::now();
+
+    float comp_ms = std::chrono::duration<float, std::milli>(t_comp_end - t_comp_start).count();
+    char comp_buf[64];
+    snprintf(comp_buf, sizeof(comp_buf), "%.2f ms", comp_ms);
+    StatusObject::instance()->update("web_time_jpeg", comp_buf);
 
     m_has_new_frame = true;
     m_condvar.notify_all();

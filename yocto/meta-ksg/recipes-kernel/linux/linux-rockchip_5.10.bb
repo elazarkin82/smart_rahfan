@@ -26,4 +26,24 @@ do_configure:prepend() {
     # Disable Rockchip WLAN drivers that fail to compile under modern GCC and out-of-tree builds
     ${S}/scripts/config --file ${B}/.config --disable CONFIG_WL_ROCKCHIP
     ${S}/scripts/config --file ${B}/.config --disable CONFIG_RTL8852BE
+
+    # Enable Rockchip NPU drivers
+    ${S}/scripts/config --file ${B}/.config --enable CONFIG_ROCKCHIP_RKNPU
+    ${S}/scripts/config --file ${B}/.config --enable CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+    ${S}/scripts/config --file ${B}/.config --enable CONFIG_ROCKCHIP_RKNPU_DEBUG_FS
+
+    # Set default CMA size to 256MB
+    ${S}/scripts/config --file ${B}/.config --set-val CONFIG_CMA_SIZE_MBYTES 256
+
+    # Restore the DTS file to clean state before appending to prevent duplication
+    (cd ${S} && git checkout arch/arm64/boot/dts/rockchip/rk3566-radxa-zero-3e.dts)
+
+
+    # Enable NPU in the Device Tree by appending to the DTS file
+    printf "\n/ {\n\tnpu@fde40000 {\n\t\tstatus = \"okay\";\n\t};\n};\n" >> ${S}/arch/arm64/boot/dts/rockchip/rk3566-radxa-zero-3e.dts
 }
+
+
+
+
+

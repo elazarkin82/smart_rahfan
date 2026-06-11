@@ -14,7 +14,7 @@ public:
     {
     public:
         virtual ~CaptureCallback() {}
-        virtual void onFrame(uchar* frame, int w, int h, int frame_rate = 30) = 0;
+        virtual void onFrame(uchar* frame, int w, int h) = 0;
     };
 
 private:
