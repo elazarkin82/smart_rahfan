@@ -69,11 +69,11 @@ def main():
             # Load Keras model without compilation (using safe_mode=False to allow lambda layers)
             keras_model = tf.keras.models.load_model(keras_path, compile=False, custom_objects=custom_objs, safe_mode=False)
             
-            # Build TensorSpecs for conversion (prepending batch dimension None)
+            # Build TensorSpecs for conversion (prepending batch dimension 1)
             input_specs = []
             for inp in config["inputs"]:
-                # Convert shape to tuple with None batch dimension
-                spec_shape = [None] + list(inp["shape"])
+                # Convert shape to tuple with 1 as batch dimension
+                spec_shape = [1] + list(inp["shape"])
                 input_specs.append(tf.TensorSpec(spec_shape, tf.float32, name=inp["name"]))
                 
             tf2onnx.convert.from_keras(

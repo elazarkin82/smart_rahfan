@@ -87,13 +87,23 @@ class DepthwiseCorrelationFusion(layers.Layer):
         
     def call(self, inputs):
         search_feat, ref_feat = inputs
-        def corr_single(x):
-            s, r = x
-            s = tf.expand_dims(s, 0)
-            r = tf.expand_dims(r, -1)
-            out = tf.nn.depthwise_conv2d(s, r, strides=[1, 1, 1, 1], padding="SAME")
-            return out[0]
-        return tf.map_fn(corr_single, [search_feat, ref_feat], fn_output_signature=tf.float32)
+        batch_size = search_feat.shape[0]
+        if batch_size is None:
+            batch_size = tf.shape(search_feat)[0]
+        h_s, w_s, c = search_feat.shape[1], search_feat.shape[2], search_feat.shape[3]
+        h_r, w_r = ref_feat.shape[1], ref_feat.shape[2]
+        
+        # Group batch elements along the channel dimension
+        s_transposed = tf.transpose(search_feat, [1, 2, 0, 3])
+        s_reshaped = tf.reshape(s_transposed, [1, h_s, w_s, batch_size * c])
+        
+        r_transposed = tf.transpose(ref_feat, [1, 2, 0, 3])
+        r_filter = tf.reshape(r_transposed, [h_r, w_r, batch_size * c, 1])
+        
+        out = tf.nn.depthwise_conv2d(s_reshaped, r_filter, strides=[1, 1, 1, 1], padding="SAME")
+        
+        out_reshaped = tf.reshape(out, [h_s, w_s, batch_size, c])
+        return tf.transpose(out_reshaped, [2, 0, 1, 3])
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 class DepthToSpace(layers.Layer):
@@ -381,7 +391,10 @@ def fold_model_weights(unfolded_model, folded_model):
     for bn_layer in unfolded_leafs:
         if bn_layer.__class__.__name__ == 'BatchNormalization':
             try:
-                parent_layer, _, _ = bn_layer.input.keras_history
+                if hasattr(bn_layer.input, '_keras_history'):
+                    parent_layer, _, _ = bn_layer.input._keras_history
+                else:
+                    parent_layer, _, _ = bn_layer.input.keras_history
             except Exception:
                 continue
                 
@@ -1420,14 +1433,12 @@ def main():
         print(f"Val samples: {val_samples} ({val_steps} steps/epoch)")
         
         tracker = TargetTrackerVer4()
+        print("Building TargetTrackerVer4 model...")
+        tracker.create_model()
         
         if args.init_keras_file and os.path.exists(args.init_keras_file):
-            import tensorflow as tf
-            print(f"Resuming training: loading model from {args.init_keras_file}...")
-            tracker.model = tf.keras.models.load_model(args.init_keras_file, compile=False, safe_mode=False)
-        else:
-            print("Building new TargetTrackerVer4 model...")
-            tracker.create_model()
+            print(f"Resuming training: loading weights from {args.init_keras_file}...")
+            tracker.model.load_weights(args.init_keras_file, by_name=True, skip_mismatch=True)
             
         tracker.train(
             train_dataset=train_ds,
