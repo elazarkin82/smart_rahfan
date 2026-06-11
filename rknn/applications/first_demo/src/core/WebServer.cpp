@@ -424,7 +424,9 @@ private:
     WebServer* m_web_server;
 
 public:
-    HeatmapStreamHandler(WebServer* ws) : m_web_server(ws) {}
+    HeatmapStreamHandler(WebServer* ws) : m_web_server(ws)
+    {
+    }
 
     bool handleGet(CivetServer* server, struct mg_connection* conn) override
     {
@@ -559,6 +561,10 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
     int box_size, half;
     int x_start, x_end, y_start, y_end;
     int cx, cy;
+    std::chrono::steady_clock::time_point t_comp_start;
+    std::chrono::steady_clock::time_point t_comp_end;
+    float comp_ms;
+    char comp_buf[64];
 
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -618,12 +624,11 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
     }
 
     // Perform the grayscale JPEG compression inside Web context thread trigger
-    auto t_comp_start = std::chrono::steady_clock::now();
+    t_comp_start = std::chrono::steady_clock::now();
     compress_gray_to_jpeg(m_frame_buf, m_frame_w, m_frame_h, m_jpeg_buf, &m_jpeg_size);
-    auto t_comp_end = std::chrono::steady_clock::now();
+    t_comp_end = std::chrono::steady_clock::now();
 
-    float comp_ms = std::chrono::duration<float, std::milli>(t_comp_end - t_comp_start).count();
-    char comp_buf[64];
+    comp_ms = std::chrono::duration<float, std::milli>(t_comp_end - t_comp_start).count();
     snprintf(comp_buf, sizeof(comp_buf), "%.2f ms", comp_ms);
     StatusObject::instance()->update("web_time_jpeg", comp_buf);
 
@@ -708,12 +713,22 @@ void WebServer::compress_gray_to_jpeg(const uchar* gray_buf, int w, int h, uchar
 
 static void jet_colormap(float v, uchar& r, uchar& g, uchar& b)
 {
-    if (v < 0.0f) v = 0.0f;
-    if (v > 1.0f) v = 1.0f;
+    float r_f;
+    float g_f;
+    float b_f;
+
+    if (v < 0.0f)
+    {
+        v = 0.0f;
+    }
+    if (v > 1.0f)
+    {
+        v = 1.0f;
+    }
     
-    float r_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 3.0f)));
-    float g_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 2.0f)));
-    float b_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 1.0f)));
+    r_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 3.0f)));
+    g_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 2.0f)));
+    b_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 1.0f)));
     
     r = (uchar)(r_f * 255.0f);
     g = (uchar)(g_f * 255.0f);

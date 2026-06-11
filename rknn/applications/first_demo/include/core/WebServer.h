@@ -22,7 +22,9 @@ public:
     class CommandCallback
     {
     public:
-        virtual ~CommandCallback() {}
+        virtual ~CommandCallback()
+        {
+        }
         virtual void onCommand(Command key, const char* values, int len) = 0;
     };
 

@@ -123,19 +123,24 @@ void MainService::stop()
 void MainService::onFrame(uchar* frame, int w, int h)
 {
     std::lock_guard<std::mutex> lock(m_last_frame_copy_mutex);
+    std::chrono::steady_clock::time_point now;
+    long long elapsed;
+    float real_fps;
+    char fps_buf[32];
+
     memcpy(m_lastFrame, frame, w * h);
     m_lastFrame_w = w;
     m_lastFrame_h = h;
     m_has_last_frame = true;
 
     // Report Camera FPS to Status using 5-second rolling window
-    auto now = std::chrono::steady_clock::now();
+    now = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
         m_camera_frame_times.push(now);
         while (!m_camera_frame_times.empty())
         {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_camera_frame_times.front()).count();
+            elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_camera_frame_times.front()).count();
             if (elapsed >= 5)
             {
                 m_camera_frame_times.pop();
@@ -145,8 +150,7 @@ void MainService::onFrame(uchar* frame, int w, int h)
                 break;
             }
         }
-        float real_fps = m_camera_frame_times.size() / 5.0f;
-        char fps_buf[32];
+        real_fps = m_camera_frame_times.size() / 5.0f;
         snprintf(fps_buf, sizeof(fps_buf), "%.1f FPS", real_fps);
         StatusObject::instance()->update("camera_fps", fps_buf);
     }
@@ -271,9 +275,6 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
     float y_n;
     int target_px;
     int target_py;
-    uchar* crop_buf;
-    int cy, cx;
-    int sy, sx;
 
     w = 640;
     h = 480;
@@ -335,29 +336,8 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
                 target_px = (int)(x_n * m_lastFrame_w);
                 target_py = (int)(y_n * m_lastFrame_h);
 
-                // Crop a 64x64 template buffer around the click position
-                crop_buf = (uchar*)malloc(64 * 64);
-                
-                for (cy = 0; cy < 64; ++cy)
-                {
-                    sy = target_py - 32 + cy;
-                    for (cx = 0; cx < 64; ++cx)
-                    {
-                        sx = target_px - 32 + cx;
-                        if (sx >= 0 && sx < m_lastFrame_w && sy >= 0 && sy < m_lastFrame_h)
-                        {
-                            crop_buf[cy * 64 + cx] = m_lastFrame[sy * m_lastFrame_w + sx];
-                        }
-                        else
-                        {
-                            crop_buf[cy * 64 + cx] = 0;
-                        }
-                    }
-                }
-
-                // Initialize tracker reference templates
-                m_tracker->refresh_target(crop_buf, 64, 64);
-                free(crop_buf);
+                // Initialize tracker reference templates with full frame and target pixel coordinates
+                m_tracker->refresh_target(m_lastFrame, m_lastFrame_w, m_lastFrame_h, target_px, target_py);
 
                 // Reset tracker outputs coordinates to start fresh
                 m_target_x = (int)(x_n * 256.0f);
@@ -373,6 +353,10 @@ void MainService::main_loop()
     int work_w;
     int work_h;
     bool has_frame;
+    std::chrono::steady_clock::time_point now;
+    long long elapsed;
+    float real_fps;
+    char fps_buf[32];
 
     work_frame = (uchar*)malloc(1920 * 1280);
     work_w = 0;
@@ -412,13 +396,13 @@ void MainService::main_loop()
             // Calculate Tracker FPS using 5-second rolling window if target is defined
             if (m_tracker->is_target_defined())
             {
-                auto now = std::chrono::steady_clock::now();
+                now = std::chrono::steady_clock::now();
                 {
                     std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
                     m_tracker_frame_times.push(now);
                     while (!m_tracker_frame_times.empty())
                     {
-                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_tracker_frame_times.front()).count();
+                        elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_tracker_frame_times.front()).count();
                         if (elapsed >= 5)
                         {
                             m_tracker_frame_times.pop();
@@ -428,8 +412,7 @@ void MainService::main_loop()
                             break;
                         }
                     }
-                    float real_fps = m_tracker_frame_times.size() / 5.0f;
-                    char fps_buf[32];
+                    real_fps = m_tracker_frame_times.size() / 5.0f;
                     snprintf(fps_buf, sizeof(fps_buf), "%.1f FPS", real_fps);
                     StatusObject::instance()->update("tracker_fps", fps_buf);
                 }

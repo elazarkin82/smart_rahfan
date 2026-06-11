@@ -12,10 +12,13 @@ public:
     class TrackerCallback
     {
     public:
-        virtual ~TrackerCallback() {}
+        virtual ~TrackerCallback()
+        {
+        }
         virtual void onTargetDetected(int x, int y) = 0;
         virtual void onHeatmapCreated(const float* heatmap, int w, int h) = 0;
     };
+
 
 private:
     rknn_context m_ctx;
@@ -57,7 +60,7 @@ public:
 
     bool is_model_loaded() const;
     bool is_target_defined() const;
-    void refresh_target(uchar* frame, int w, int h);
+    void refresh_target(const uchar* frame, int w, int h, int target_x, int target_y);
     void clear_target();
     void set_tracker_callback(TrackerCallback* cb);
     void update_frame(uchar* frame, int w, int h);
