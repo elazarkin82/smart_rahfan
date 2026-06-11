@@ -2,7 +2,7 @@
 
 model:
   name: "tracker_ver4_keras"
-  keras_model_path: "../../training/tracker/tracker_ver4/outputs/tracker.keras"
+  keras_model_path: "../../training/tracker/tracker_ver4/outputs_multihead_attention_good/tracker_best_train_loss.keras"
   output_rknn_path: "./outputs/tracker_keras.rknn"
 
 rknn_config:

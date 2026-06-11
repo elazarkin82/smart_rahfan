@@ -6,6 +6,28 @@ import numpy as np
 import configparser
 from tqdm.auto import tqdm
 
+# Global Normalization setting for dynamic layer configuration
+_NORMALIZATION_TYPE = "group_norm"
+_OVERRIDE_USE_BIAS = False
+
+_orig_conv2d = layers.Conv2D
+_orig_dw_conv2d = layers.DepthwiseConv2D
+
+def _smart_conv2d(*args, **kwargs):
+    global _NORMALIZATION_TYPE, _OVERRIDE_USE_BIAS
+    if _OVERRIDE_USE_BIAS and _NORMALIZATION_TYPE in ["batch_norm", "folded"]:
+        kwargs["use_bias"] = True
+    return _orig_conv2d(*args, **kwargs)
+
+def _smart_dw_conv2d(*args, **kwargs):
+    global _NORMALIZATION_TYPE, _OVERRIDE_USE_BIAS
+    if _OVERRIDE_USE_BIAS and _NORMALIZATION_TYPE in ["batch_norm", "folded"]:
+        kwargs["use_bias"] = True
+    return _orig_dw_conv2d(*args, **kwargs)
+
+layers.Conv2D = _smart_conv2d
+layers.DepthwiseConv2D = _smart_dw_conv2d
+
 # Save the original GroupNormalization
 if hasattr(layers, 'GroupNormalization'):
     GroupNormClass = layers.GroupNormalization
@@ -48,8 +70,14 @@ def get_safe_groups(channels, requested_groups=8):
     return 1
 
 def _GroupNormalization(channels, name=None, **kwargs):
-    g = get_safe_groups(channels)
-    return GroupNormClass(groups=g, name=name, **kwargs)
+    global _NORMALIZATION_TYPE
+    if _NORMALIZATION_TYPE == "batch_norm":
+        return layers.BatchNormalization(name=name, **kwargs)
+    elif _NORMALIZATION_TYPE == "folded":
+        return layers.Activation("linear", name=name, **kwargs)
+    else:
+        g = get_safe_groups(channels)
+        return SafeGroupNormalization(groups=g, name=name, **kwargs)
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 class DepthwiseCorrelationFusion(layers.Layer):
@@ -98,13 +126,15 @@ def load_model_config(config_path="model.conf"):
     attn_mech = config.get("Attention", "mechanism", fallback="multi_head_cross")
     dec_type = config.get("Decoder", "type", fallback="unet")
     hm_loss_default = config.get("Loss", "heatmap_loss_default", fallback="adaptive_wing")
+    norm_type = config.get("Normalization", "type", fallback="group_norm")
     
     return {
         "shared_backbone": shared_backbone,
         "width_multiplier": width_mult,
         "attention_mechanism": attn_mech,
         "decoder_type": dec_type,
-        "heatmap_loss_default": hm_loss_default
+        "heatmap_loss_default": hm_loss_default,
+        "normalization_type": norm_type
     }
 
 def check_and_create_default_config(config_path="model.conf"):
@@ -132,6 +162,11 @@ type = unet
 # Default loss function for heatmap regression
 # Options: adaptive_wing, dbsz_relu, dbsz_soft, dbsz_hard, centernet_dice, focal_dice, mse
 heatmap_loss_default = adaptive_wing
+
+[Normalization]
+# Normalization Type
+# Options: group_norm, batch_norm
+type = group_norm
 """
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(default_content)
@@ -252,6 +287,84 @@ def centernet_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha
     return focal_weight * cn_loss + dice_weight * dice_loss_val
 
 # =====================================================================
+# Batch Normalization Folding Helper
+# =====================================================================
+
+def get_all_leaf_layers(model):
+    leaf_layers = []
+    for layer in model.layers:
+        if hasattr(layer, "layers"):
+            leaf_layers.extend(get_all_leaf_layers(layer))
+        else:
+            leaf_layers.append(layer)
+    return leaf_layers
+
+def fold_model_weights(unfolded_model, folded_model):
+    unfolded_leafs = get_all_leaf_layers(unfolded_model)
+    folded_leafs = get_all_leaf_layers(folded_model)
+    
+    folded_layers = {layer.name: layer for layer in folded_leafs}
+    folded_bn_names = set()
+    folded_conv_names = set()
+    
+    for bn_layer in unfolded_leafs:
+        if bn_layer.__class__.__name__ == 'BatchNormalization':
+            try:
+                parent_layer, _, _ = bn_layer.input.keras_history
+            except Exception:
+                continue
+                
+            if parent_layer.__class__.__name__ in ('Conv2D', 'DepthwiseConv2D', 'Conv2DTranspose'):
+                bn_weights = bn_layer.get_weights()
+                if not bn_weights or len(bn_weights) < 4:
+                    continue
+                gamma, beta, mean, var = bn_weights
+                epsilon = bn_layer.epsilon
+                
+                conv_weights = parent_layer.get_weights()
+                if len(conv_weights) == 2:
+                    kernel, bias = conv_weights
+                elif len(conv_weights) == 1:
+                    kernel = conv_weights[0]
+                    bias = np.zeros((kernel.shape[-1],), dtype=np.float32)
+                else:
+                    continue
+                
+                scale = gamma / np.sqrt(var + epsilon)
+                
+                if parent_layer.__class__.__name__ == 'DepthwiseConv2D':
+                    depth_multiplier = kernel.shape[-1]
+                    c_in = kernel.shape[-2]
+                    scale_reshaped = np.reshape(scale, (1, 1, c_in, depth_multiplier))
+                    kernel_folded = kernel * scale_reshaped
+                elif parent_layer.__class__.__name__ == 'Conv2DTranspose':
+                    scale_reshaped = np.reshape(scale, (1, 1, -1, 1))
+                    kernel_folded = kernel * scale_reshaped
+                else:
+                    scale_reshaped = np.reshape(scale, (1, 1, 1, -1))
+                    kernel_folded = kernel * scale_reshaped
+                    
+                bias_folded = (bias - mean) * scale + beta
+                
+                folded_conv_layer = folded_layers.get(parent_layer.name)
+                if folded_conv_layer is not None:
+                    folded_conv_layer.set_weights([kernel_folded, bias_folded])
+                    folded_bn_names.add(bn_layer.name)
+                    folded_conv_names.add(parent_layer.name)
+                    print(f"Folded BN '{bn_layer.name}' into Conv '{parent_layer.name}'")
+                    
+    for layer in unfolded_leafs:
+        if layer.__class__.__name__ == 'BatchNormalization':
+            continue
+        if layer.name in folded_bn_names or layer.name in folded_conv_names:
+            continue
+        folded_layer = folded_layers.get(layer.name)
+        if folded_layer is not None:
+            weights = layer.get_weights()
+            if weights:
+                folded_layer.set_weights(weights)
+
+# =====================================================================
 # Target Tracker Ver Pixel Class
 # =====================================================================
 
@@ -270,7 +383,8 @@ class TargetTrackerVerPixel:
                 "width_multiplier": 1.0,
                 "attention_mechanism": "multi_head_cross",
                 "decoder_type": "unet",
-                "heatmap_loss_default": "adaptive_wing"
+                "heatmap_loss_default": "adaptive_wing",
+                "normalization_type": "group_norm"
             }
 
     def _inverted_residual_block(self, inputs, expansion, filters, strides, name_prefix):
@@ -452,6 +566,15 @@ class TargetTrackerVerPixel:
         return models.Model(inputs, [x1, x2, x3, x], name="shared_siamese_backbone")
 
     def create_model(self):
+        global _NORMALIZATION_TYPE, _OVERRIDE_USE_BIAS
+        _NORMALIZATION_TYPE = self.config.get("normalization_type", "group_norm")
+        _OVERRIDE_USE_BIAS = True
+        try:
+            return self._create_model_impl()
+        finally:
+            _OVERRIDE_USE_BIAS = False
+
+    def _create_model_impl(self):
         ref_input = layers.Input(shape=self.ref_shape, name="reference_stack") # (1, 64, 64, 16)
         search_input = layers.Input(shape=self.search_shape, name="search_frame") # (256, 256, 1)
         
@@ -659,6 +782,23 @@ class TargetTrackerVerPixel:
         
         return self.model
 
+    def fold_and_save(self, folded_output_path):
+        if self.model is None:
+            raise ValueError("Model is not built yet.")
+            
+        import copy
+        folded_tracker = self.__class__(ref_shape=self.ref_shape, search_shape=self.search_shape)
+        folded_tracker.config = copy.deepcopy(self.config)
+        folded_tracker.config["normalization_type"] = "folded"
+        
+        folded_model = folded_tracker.create_model()
+        fold_model_weights(self.model, folded_model)
+        
+        if os.path.dirname(folded_output_path):
+            os.makedirs(os.path.dirname(folded_output_path), exist_ok=True)
+        folded_model.save(folded_output_path)
+        print(f"Saved folded model to {folded_output_path}")
+
     def log(self, message, log_file=None):
         import tqdm
         tqdm.tqdm.write(message)
@@ -832,6 +972,9 @@ class TargetTrackerVerPixel:
                 if os.path.dirname(best_train_loss_output):
                     os.makedirs(os.path.dirname(best_train_loss_output), exist_ok=True)
                 self.model.save(best_train_loss_output)
+                if self.config.get("normalization_type", "group_norm") == "batch_norm":
+                    base, ext = os.path.splitext(best_train_loss_output)
+                    self.fold_and_save(f"{base}_fbn{ext}")
             
             val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, train_mode=train_mode, steps=val_steps)
             self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} (HM: {epoch_hm:.6f}, Q: {epoch_q:.6f}) | Val Loss: {val_loss:.6f} (HM: {val_hm:.6f}, Q: {val_q:.6f})", log_file)
@@ -843,6 +986,12 @@ class TargetTrackerVerPixel:
                     if os.path.dirname(output_path):
                         os.makedirs(os.path.dirname(output_path), exist_ok=True)
                     self.model.save(output_path)
+                    if self.config.get("normalization_type", "group_norm") == "batch_norm":
+                        base, ext = os.path.splitext(output_path)
+                        self.fold_and_save(f"{base}_fbn{ext}")
+                        dir_name = os.path.dirname(output_path)
+                        self.fold_and_save(os.path.join(dir_name, "tracker_pxl_fbn.keras"))
+                        self.fold_and_save(os.path.join(dir_name, "tracker_model_fbn.keras"))
             
             import gc
             gc.collect()

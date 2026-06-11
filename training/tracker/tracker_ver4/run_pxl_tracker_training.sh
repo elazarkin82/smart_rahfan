@@ -55,7 +55,7 @@ mkdir -p outputs_pxl
 python3 tracker_ver4_pxl.py train \
     --dataset_dir dataset_generator/compiled \
     --num_of_epochs 10 \
-    --lr 1e-4 \
+    --lr 1e-3 \
     --loss_heatmap dbsz_relu \
     --loss_quality bce \
     --train_mode joint \

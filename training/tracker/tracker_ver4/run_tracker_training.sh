@@ -66,6 +66,6 @@ python3 tracker_model.py train \
     --best_train_loss_output outputs/tracker_best_train_loss.keras \
     --log_file outputs/train.log \
     --train_mode heatmap_only \
-    --batch_size 64
+    --batch_size 32
 
 # --eval_pkl_num 	50 \

@@ -85,8 +85,13 @@ def main():
                 np.save(ref_filename, ref_expanded.astype(np.float32))
                 np.save(search_filename, search_expanded.astype(np.float32))
                 
+                # Resolve paths relative to the directory containing dataset.txt
+                txt_dir = os.path.dirname(args.dataset_txt)
+                ref_rel = os.path.relpath(ref_filename, txt_dir) if txt_dir else ref_filename
+                search_rel = os.path.relpath(search_filename, txt_dir) if txt_dir else search_filename
+                
                 # Write paths to dataset.txt (separated by space)
-                txt_file.write(f"{ref_filename} {search_filename}\n")
+                txt_file.write(f"{ref_rel} {search_rel}\n")
                 
                 if (i + 1) % 100 == 0 or (i + 1) == num_samples:
                     print(f"  Processed {i + 1}/{num_samples} samples...")
