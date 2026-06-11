@@ -344,7 +344,7 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
             break;
 
         case WebServer::CMD_CHOOSE_TARGET:
-            sscanf(values, "%f#%f", &x_n, &y_n);
+            sscanf(values, "%f,%f", &x_n, &y_n);
             
             // Only crop if we have valid camera frames active
             if (m_lastFrame_w > 0 && m_lastFrame_h > 0)

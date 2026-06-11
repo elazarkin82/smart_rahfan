@@ -216,7 +216,7 @@ const char* INDEX_HTML =
 "    \n"
 "    coordsInfo.innerText = `Selected target coordinates: X=${x.toFixed(3)}, Y=${y.toFixed(3)}`;\n"
 "    \n"
-"    fetch(`/command?cmd=CHOOSE_TARGET&val=${x.toFixed(3)}#${y.toFixed(3)}`)\n"
+"    fetch(`/command?cmd=CHOOSE_TARGET&val=${x.toFixed(3)},${y.toFixed(3)}`)\n"
 "        .then(res => console.log('Command sent:', res.status));\n"
 "});\n"
 "\n"
@@ -968,16 +968,26 @@ void WebServer::update_stack(const uchar* stack, int w, int h, int c)
 {
     int i;
     uchar* temp_black;
+    uchar* temp_planar;
+    int y, x;
 
     std::lock_guard<std::mutex> lock(m_mutex);
 
     if (stack != NULL)
     {
+        temp_planar = (uchar*)malloc(w * h);
         for (i = 0; i < c; ++i)
         {
-            const uchar* layer_ptr = stack + (i * w * h);
-            compress_gray_to_jpeg(layer_ptr, w, h, m_stack_jpeg_bufs[i], &m_stack_jpeg_sizes[i]);
+            for (y = 0; y < h; ++y)
+            {
+                for (x = 0; x < w; ++x)
+                {
+                    temp_planar[y * w + x] = stack[(y * w + x) * c + i];
+                }
+            }
+            compress_gray_to_jpeg(temp_planar, w, h, m_stack_jpeg_bufs[i], &m_stack_jpeg_sizes[i]);
         }
+        free(temp_planar);
     }
     else
     {

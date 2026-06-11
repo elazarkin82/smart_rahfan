@@ -211,6 +211,8 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
     int c;
     float max_sz;
     float min_sz;
+    int y, x;
+    uchar* temp_64x64;
 
     if (!m_is_model_loaded)
     {
@@ -219,6 +221,7 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
 
     max_sz = (float)(w < h ? w : h);
     min_sz = 16.0f;
+    temp_64x64 = (uchar*)malloc(m_in_width_ref * m_in_height_ref);
 
     for (c = 0; c < m_in_channels_ref; ++c)
     {
@@ -228,7 +231,6 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
         int y1 = (int)roundf((float)target_y - half);
         int sz_int = (int)sz;
         uchar* crop_buf = (uchar*)calloc(sz_int * sz_int, 1);
-        uchar* resized_buf = m_ref_stack_buf + (c * m_in_width_ref * m_in_height_ref);
         int cy, cx;
 
         for (cy = 0; cy < sz_int; ++cy)
@@ -247,9 +249,20 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
             }
         }
 
-        resize_bilinear_gray(crop_buf, sz_int, sz_int, resized_buf, m_in_width_ref, m_in_height_ref);
+        resize_bilinear_gray(crop_buf, sz_int, sz_int, temp_64x64, m_in_width_ref, m_in_height_ref);
+        
+        for (y = 0; y < m_in_height_ref; ++y)
+        {
+            for (x = 0; x < m_in_width_ref; ++x)
+            {
+                m_ref_stack_buf[(y * m_in_width_ref + x) * m_in_channels_ref + c] = temp_64x64[y * m_in_width_ref + x];
+            }
+        }
+
         free(crop_buf);
     }
+
+    free(temp_64x64);
 
     std::lock_guard<std::mutex> lock(m_mutex);
     m_is_target_defined = true;
