@@ -12,7 +12,15 @@ high-accuracy INT8 TFLite conversion. It supports:
 import os
 import sys
 import argparse
+
+# Disable XLA auto-clustering JIT compilation to bypass ptxas issues
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=-1"
+
 import tensorflow as tf
+tf.config.optimizer.set_jit(False)
+# Run functions eagerly to bypass graph compilation and ptxas assembly issues on this system
+tf.config.run_functions_eagerly(True)
+
 import numpy as np
 import tqdm
 
@@ -77,6 +85,18 @@ def main():
         print("[ERROR] Could not import tracker_model.py.", file=sys.stderr)
         sys.exit(1)
         
+    # Restore original Conv2D and DepthwiseConv2D classes if they were overridden by tracker_model
+    import tensorflow.keras.layers as keras_layers
+    from tensorflow_model_optimization.python.core.keras.compat import keras as tfmot_keras
+    if hasattr(tracker_model, '_orig_conv2d'):
+        tf.keras.layers.Conv2D = tracker_model._orig_conv2d
+        keras_layers.Conv2D = tracker_model._orig_conv2d
+        tfmot_keras.layers.Conv2D = tracker_model._orig_conv2d
+    if hasattr(tracker_model, '_orig_dw_conv2d'):
+        tf.keras.layers.DepthwiseConv2D = tracker_model._orig_dw_conv2d
+        keras_layers.DepthwiseConv2D = tracker_model._orig_dw_conv2d
+        tfmot_keras.layers.DepthwiseConv2D = tracker_model._orig_dw_conv2d
+        
     # 2. Load the pre-trained float32 model
     print(f"[*] Loading pre-trained model from: {args.keras_in} ...")
     custom_objects = {
@@ -85,35 +105,37 @@ def main():
         "DepthToSpace": tracker_model.DepthToSpace,
         "HeatmapNormalization": tracker_model.HeatmapNormalization,
     }
-    teacher_model = tf.keras.models.load_model(args.keras_in, compile=False, safe_mode=False, custom_objects=custom_objects)
     
-    # 3. Create the QAT annotated model
-    print("[*] Annotating model layers for QAT...")
-    
-    def annotate_layer(layer):
-        # Only annotate standard weight/trainable layers to avoid breaking custom layer graphs
-        if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D, tf.keras.layers.Dense)):
-            return tfmot.quantization.keras.quantize_annotate_layer(layer)
-        # Check if it is a Functional sub-model
-        if isinstance(layer, tf.keras.Model):
-            return tf.keras.models.clone_model(layer, clone_function=annotate_layer)
-        return layer
+    with tfmot.quantization.keras.quantize_scope(custom_objects):
+        teacher_model = tf.keras.models.load_model(args.keras_in, compile=False, safe_mode=False, custom_objects=custom_objects)
         
-    # Clone model and apply annotations
-    qat_annotated = tf.keras.models.clone_model(teacher_model, clone_function=annotate_layer)
-    
-    # Instantiate the QAT model
-    print("[*] Applying quantization wrappers...")
-    qat_model = tfmot.quantization.keras.quantize_apply(qat_annotated)
+        # 3. Create the QAT annotated model
+        print("[*] Annotating model layers for QAT...")
+        
+        def annotate_layer(layer):
+            # Only annotate standard weight/trainable layers to avoid breaking custom layer graphs
+            if layer.__class__.__name__ in ("Conv2D", "DepthwiseConv2D", "Dense"):
+                return tfmot.quantization.keras.quantize_annotate_layer(layer)
+            # Check if it is a Functional sub-model
+            if isinstance(layer, tf.keras.Model):
+                return tf.keras.models.clone_model(layer, clone_function=annotate_layer)
+            return layer
+            
+        # Clone model and apply annotations
+        qat_annotated = tf.keras.models.clone_model(teacher_model, clone_function=annotate_layer)
+        
+        # Instantiate the QAT model
+        print("[*] Applying quantization wrappers...")
+        qat_model = tfmot.quantization.keras.quantize_apply(qat_annotated)
     
     # 4. Load dataset
     print(f"[*] Loading calibration dataset from: {args.h5_dataset} ...")
-    dataset = tracker_model.load_hdf5_dataset(args.h5_dataset, args.batch_size, is_val=False)
+    dataset, num_samples = tracker_model.load_hdf5_dataset(args.h5_dataset, args.batch_size, is_val=False)
     
     # 5. Define QAT optimization loss and train steps
     optimizer = tf.keras.optimizers.Adam(learning_rate=args.lr)
     loss_fn_heatmap = tf.keras.losses.MeanSquaredError()
-    loss_fn_quality = tf.keras.losses.BinaryCrossEntropy()
+    loss_fn_quality = tf.keras.losses.BinaryCrossentropy()
     
     @tf.function
     def train_step_distill(ref, search):
@@ -156,8 +178,15 @@ def main():
         steps = 0
         
         # Stream over training samples
-        pbar = tqdm.tqdm(dataset, desc=f"Epoch {epoch+1}")
-        for (ref, search), (gt_hm, gt_q) in pbar:
+        steps_per_epoch = num_samples // args.batch_size
+        pbar = tqdm.tqdm(dataset, total=steps_per_epoch, desc=f"Epoch {epoch+1}")
+        for batch in pbar:
+            inputs, targets = batch
+            ref = inputs["reference_stack"]
+            search = inputs["search_frame"]
+            gt_hm = targets["predicted_heatmap"]
+            gt_q = targets["predicted_quality"]
+            
             if args.train_mode == "teacher-student":
                 loss_val, l_hm, l_q = train_step_distill(ref, search)
             else:
@@ -177,7 +206,8 @@ def main():
         
     # 7. Strip quantization wrappers and save Keras model
     print("[*] Stripping quantization wrappers for TFLite compliance...")
-    stripped_model = tfmot.quantization.keras.quantize_strip(qat_model)
+    with tfmot.quantization.keras.quantize_scope(custom_objects):
+        stripped_model = tfmot.quantization.keras.quantize_strip(qat_model)
     
     # Save the resulting model
     out_dir = os.path.dirname(args.keras_out)
