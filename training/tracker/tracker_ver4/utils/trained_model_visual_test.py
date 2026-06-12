@@ -12,7 +12,9 @@ from PIL import Image, ImageDraw, ImageTk
 class ModelInferenceVisualizer:
     def __init__(self, root, dataset_dir, model_path, threshold=0.5, min_blob_size=30):
         # Import tracker_model to register custom layers (like SafeGroupNormalization)
-        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.append(script_dir)
+        sys.path.append(os.path.dirname(script_dir))
         import tracker_model
         
         import tensorflow as tf

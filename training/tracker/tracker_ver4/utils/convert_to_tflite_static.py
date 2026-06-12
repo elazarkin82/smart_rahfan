@@ -64,9 +64,10 @@ def main():
         print("Error: TensorFlow is not installed in this Python environment.", file=sys.stderr)
         sys.exit(1)
         
-    # Append current dir to sys.path to load tracker_model
+    # Append current dir and parent dir to sys.path to load tracker_model
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.append(script_dir)
+    sys.path.append(os.path.dirname(script_dir))
     
     try:
         from tracker_model import TargetTrackerVer4
