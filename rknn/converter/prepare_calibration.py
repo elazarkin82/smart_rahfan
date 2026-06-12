@@ -70,11 +70,11 @@ def main():
         with open(args.dataset_txt, 'w', encoding='utf-8') as txt_file:
             for i, idx in enumerate(indices):
                 # Extract input features
-                ref_data = f['reference_stack'][idx]  # Shape: (1, 64, 64, 16)
+                ref_data = f['reference_stack'][idx]  # Shape: (64, 64, 16)
                 search_data = f['search_frame'][idx]  # Shape: (256, 256, 1)
                 
                 # Prepend batch dimension 1 since the ONNX model is built with static batch size = 1
-                ref_expanded = np.expand_dims(ref_data, axis=0)      # Shape: (1, 1, 64, 64, 16)
+                ref_expanded = np.expand_dims(ref_data, axis=0)      # Shape: (1, 64, 64, 16)
                 search_expanded = np.expand_dims(search_data, axis=0)  # Shape: (1, 256, 256, 1)
                 
                 # Define filenames

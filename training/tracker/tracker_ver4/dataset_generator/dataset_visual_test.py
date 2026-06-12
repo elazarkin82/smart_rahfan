@@ -573,8 +573,13 @@ class DatasetVisualizer:
         self.display_ref_stack(ref_stack)
 
     def display_ref_stack(self, ref_stack):
-        # ref_stack is shape: (num_layers, size, size, 1) in legacy, or (1, size, size, num_layers) in new
-        if ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
+        # ref_stack can be:
+        # 1) New 3D shape (64, 64, 16) - ndim == 3
+        # 2) 4D shape (1, 64, 64, 16) - ndim == 4 and shape[0] == 1
+        # 3) Legacy shape (16, size, size, 1) - ndim == 4 and shape[0] == 16 or other
+        if ref_stack.ndim == 3:
+            num_layers = ref_stack.shape[2]
+        elif ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
             num_layers = ref_stack.shape[3]
         else:
             num_layers = ref_stack.shape[0]
@@ -583,7 +588,9 @@ class DatasetVisualizer:
         
         for i in range(16):
             if i < num_layers:
-                if ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
+                if ref_stack.ndim == 3:
+                    layer_gray = ref_stack[:, :, i]
+                elif ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
                     layer_gray = ref_stack[0, :, :, i]
                 else:
                     layer_gray = ref_stack[i, :, :, 0]

@@ -382,7 +382,7 @@ def fold_model_weights(unfolded_model, folded_model):
 # =====================================================================
 
 class TargetTrackerVerPixel:
-    def __init__(self, ref_shape=(1, 64, 64, 16), search_shape=(256, 256, 1), config_path="model.conf"):
+    def __init__(self, ref_shape=(64, 64, 16), search_shape=(256, 256, 1), config_path="model.conf"):
         self.ref_shape = ref_shape
         self.search_shape = search_shape
         self.model = None
@@ -595,7 +595,11 @@ class TargetTrackerVerPixel:
         shared_backbone = self._create_shared_backbone()
         
         # 2. Process Reference Stack (Template)
-        if self.ref_shape[0] == 1:
+        if len(self.ref_shape) == 3:
+            # Native 4D format: (B, 64, 64, 16) -> transpose to (B, 16, 64, 64) -> reshape to (B*16, 64, 64, 1)
+            ref_transposed = tf.transpose(ref_input, perm=[0, 3, 1, 2])
+            ref_reshaped = tf.reshape(ref_transposed, (-1, self.ref_shape[0], self.ref_shape[1], 1))
+        elif self.ref_shape[0] == 1:
             # New format: (B, 1, 64, 64, 16) -> transpose to (B, 16, 64, 64, 1) -> reshape to (B*16, 64, 64, 1)
             ref_transposed = tf.transpose(ref_input, perm=[0, 4, 2, 3, 1])
             ref_reshaped = tf.reshape(ref_transposed, (-1, self.ref_shape[1], self.ref_shape[2], 1))
@@ -608,7 +612,10 @@ class TargetTrackerVerPixel:
         ref_outputs = shared_backbone(ref_resized)
         ref_final_features = ref_outputs[-1] # Shape: (None * 16, 8, 8, C)
         
-        num_layers = self.ref_shape[0] if self.ref_shape[0] > 1 else self.ref_shape[3]
+        if len(self.ref_shape) == 3:
+            num_layers = self.ref_shape[2]
+        else:
+            num_layers = self.ref_shape[0] if self.ref_shape[0] > 1 else self.ref_shape[3]
         ref_features_split = tf.reshape(ref_final_features, (-1, num_layers, 8, 8, ref_final_features.shape[-1]))
         ref_features = tf.reduce_mean(ref_features_split, axis=1)
         
@@ -1076,7 +1083,7 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
         raise ValueError(f"No samples remaining after filtering/balancing for train_mode={train_mode}, is_val={is_val}")
         
     # Check RAM caching capability using psutil
-    sample_size_bytes = (1 * 64 * 64 * 16 + 256 * 256 * 1 + 256 * 256 * 1) * 4 + 4
+    sample_size_bytes = (64 * 64 * 16 + 256 * 256 * 1 + 256 * 256 * 1) * 4 + 4
     total_expected_bytes = len(selected_indices) * sample_size_bytes
     
     mem = psutil.virtual_memory()
@@ -1149,7 +1156,7 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
     # Define output signature with dynamic leading dimension
     output_signature = (
         (
-            tf.TensorSpec(shape=(None, 1, 64, 64, 16), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, 64, 64, 16), dtype=tf.float32),
             tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32)
         ),
         (

@@ -172,14 +172,24 @@ class KerasFCNVisualizer:
                 curr_lbl_fg = "#ff3366"
             
             # Show the largest reference crop (layer 0) scaled up
-            ref_layer_0 = ref_stack[0, :, :, 0]
+            if ref_stack.ndim == 3:
+                ref_layer_0 = ref_stack[:, :, 0]
+            elif ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
+                ref_layer_0 = ref_stack[0, :, :, 0]
+            else:
+                ref_layer_0 = ref_stack[0, :, :, 0]
+                
             if ref_layer_0.dtype != np.uint8:
                 ref_layer_0 = (ref_layer_0 * 255.0).astype(np.uint8)
             ref_vis = cv2.resize(ref_layer_0, (256, 256), interpolation=cv2.INTER_NEAREST)
             self.tk_img_ref = ImageTk.PhotoImage(Image.fromarray(ref_vis))
             
             # Prepare inputs for model
-            ref_tensor = tf.expand_dims(tf.cast(ref_stack, tf.float32), 0)
+            if ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
+                ref_tensor = tf.cast(ref_stack, tf.float32)
+            else:
+                ref_tensor = tf.expand_dims(tf.cast(ref_stack, tf.float32), 0)
+                
             if tf.reduce_max(ref_tensor) > 1.001:
                 ref_tensor = ref_tensor / 255.0
             

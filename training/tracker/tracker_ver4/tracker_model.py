@@ -1280,7 +1280,7 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
         raise ValueError(f"No samples remaining after filtering/balancing for train_mode={train_mode}, is_val={is_val}")
         
     # Check RAM caching capability using psutil
-    sample_size_bytes = (1 * 64 * 64 * 16 + 256 * 256 * 1 + 256 * 256 * 1) * 4 + 4
+    sample_size_bytes = (64 * 64 * 16 + 256 * 256 * 1 + 256 * 256 * 1) * 4 + 4
     total_expected_bytes = len(selected_indices) * sample_size_bytes
     
     mem = psutil.virtual_memory()
@@ -1353,7 +1353,7 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
     # Define output signature with dynamic leading dimension
     output_signature = (
         (
-            tf.TensorSpec(shape=(None, 1, 64, 64, 16), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, 64, 64, 16), dtype=tf.float32),
             tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32)
         ),
         (
