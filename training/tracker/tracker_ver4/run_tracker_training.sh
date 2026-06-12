@@ -55,7 +55,7 @@ mkdir -p outputs
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/compiled \
     --num_of_epochs 50 \
-    --lr 1e-5 \
+    --lr 1e-4 \
     --loss_heatmap dbsz_relu \
     --loss_quality bce \
     --train_mode joint \
