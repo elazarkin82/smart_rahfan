@@ -19,6 +19,7 @@ import os
 import sys
 import argparse
 import shutil
+import numpy as np
 
 def main():
     parser = argparse.ArgumentParser(description="Statically convert Tracker Ver 4 Keras model to TFLite.")
@@ -36,6 +37,17 @@ def main():
         "--copy_to_android",
         action="store_true",
         help="Copy the compiled TFLite model directly to Android assets"
+    )
+    parser.add_argument(
+        "--quant",
+        default="none",
+        choices=["none", "fp16", "int8", "int8_io"],
+        help="Quantization type: none (FP32), fp16 (float16), int8 (integer weights/activations), int8_io (integer inputs/outputs)"
+    )
+    parser.add_argument(
+        "--h5_dataset",
+        default="dataset_generator/compiled/dataset.h5",
+        help="Path to HDF5 dataset.h5 file to use as calibration data for INT8 quantization"
     )
     
     args = parser.parse_args()
@@ -260,6 +272,48 @@ def main():
     print("[*] Converting model to static TFLite format (this may take a moment)...")
     try:
         converter = tf.lite.TFLiteConverter.from_concrete_functions([concrete_func])
+        
+        # Configure quantization options
+        if args.quant == "fp16":
+            print("[*] Applying Float16 quantization...")
+            converter.optimizations = [tf.lite.Optimize.DEFAULT]
+            converter.target_spec.supported_types = [tf.float16]
+        elif args.quant in ["int8", "int8_io"]:
+            print(f"[*] Applying INT8 quantization (mode: {args.quant})...")
+            
+            # Define representative dataset generator for integer calibration
+            def representative_dataset_gen():
+                import h5py
+                h5_path = args.h5_dataset
+                if not os.path.isabs(h5_path):
+                    h5_path = os.path.join(script_dir, h5_path)
+                
+                if not os.path.exists(h5_path):
+                    raise FileNotFoundError(f"HDF5 dataset for calibration not found at: {h5_path}")
+                    
+                with h5py.File(h5_path, 'r') as f:
+                    ref_ds = f['reference_stack']
+                    search_ds = f['search_frame']
+                    total_samples = ref_ds.shape[0]
+                    
+                    # Calibrate on up to 100 representative samples
+                    num_calibration = min(100, total_samples)
+                    indices = np.linspace(0, total_samples - 1, num_calibration, dtype=int)
+                    
+                    for idx in indices:
+                        ref_val = np.expand_dims(ref_ds[idx], axis=0).astype(np.float32)
+                        search_val = np.expand_dims(search_ds[idx], axis=0).astype(np.float32)
+                        yield [ref_val, search_val]
+            
+            converter.optimizations = [tf.lite.Optimize.DEFAULT]
+            converter.representative_dataset = representative_dataset_gen
+            converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+            
+            if args.quant == "int8_io":
+                print("[*] Enforcing integer input/output tensors...")
+                converter.inference_input_type = tf.int8
+                converter.inference_output_type = tf.int8
+                
         tflite_model = converter.convert()
         print("[+] Model converted to TFLite successfully.")
     except Exception as e:
