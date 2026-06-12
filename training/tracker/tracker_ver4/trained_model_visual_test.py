@@ -9,7 +9,7 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageTk
 
-class KerasFCNVisualizer:
+class ModelInferenceVisualizer:
     def __init__(self, root, dataset_dir, model_path, threshold=0.5, min_blob_size=30):
         # Import tracker_model to register custom layers (like SafeGroupNormalization)
         sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -19,10 +19,50 @@ class KerasFCNVisualizer:
         
         self.threshold = threshold
         self.min_blob_size = min_blob_size
+        self.model_path = model_path
+        self.is_tflite = model_path.endswith('.tflite')
         
-        print(f"Loading Keras TargetTrackerVer4 from {model_path}...")
-        self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
-        self.model.summary()
+        if self.is_tflite:
+            print(f"Loading TFLite model from {model_path}...")
+            self.interpreter = tf.lite.Interpreter(model_path=model_path)
+            self.interpreter.allocate_tensors()
+            self.input_details = self.interpreter.get_input_details()
+            self.output_details = self.interpreter.get_output_details()
+            
+            # Map input tensors
+            self.ref_input_idx = None
+            self.search_input_idx = None
+            for detail in self.input_details:
+                name = detail['name'].lower()
+                if 'reference_stack' in name:
+                    self.ref_input_idx = detail['index']
+                elif 'search_frame' in name:
+                    self.search_input_idx = detail['index']
+            
+            if self.ref_input_idx is None or self.search_input_idx is None:
+                # Fallback to shape matching
+                for detail in self.input_details:
+                    shape = list(detail['shape'])
+                    if 16 in shape or 64 in shape:
+                        self.ref_input_idx = detail['index']
+                    else:
+                        self.search_input_idx = detail['index']
+                        
+            # Map output tensors
+            self.heatmap_output_idx = None
+            self.quality_output_idx = None
+            for detail in self.output_details:
+                shape = list(detail['shape'])
+                if 256 in shape:
+                    self.heatmap_output_idx = detail['index']
+                else:
+                    self.quality_output_idx = detail['index']
+            print(f"Mapped inputs: ref={self.ref_input_idx}, search={self.search_input_idx}")
+            print(f"Mapped outputs: heatmap={self.heatmap_output_idx}, quality={self.quality_output_idx}")
+        else:
+            print(f"Loading Keras model from {model_path}...")
+            self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+            self.model.summary()
         
         self.dataset_dir = dataset_dir
         if not os.path.exists(self.dataset_dir):
@@ -91,7 +131,8 @@ class KerasFCNVisualizer:
         return panel, coord_lbl
 
     def setup_ui(self):
-        header = tk.Label(self.root, text="TargetTrackerVer4 Visualizer", font=("Outfit", 15, "bold"), bg="#121212", fg="#ffffff")
+        backend_name = "TFLite" if self.is_tflite else "Keras"
+        header = tk.Label(self.root, text=f"TargetTrackerVer4 Visualizer ({backend_name} Backend)", font=("Outfit", 15, "bold"), bg="#121212", fg="#ffffff")
         header.pack(pady=15)
         
         self.frames_frame = tk.Frame(self.root, bg="#121212")
@@ -114,7 +155,7 @@ class KerasFCNVisualizer:
                 self.current_sample_idx = (self.current_sample_idx + 1) % self.h5_size
                 import h5py
                 with h5py.File(os.path.join(self.dataset_dir, "dataset.h5"), 'r') as f:
-                    ref_stack = f["reference_stack"][self.current_sample_idx]  # shape: (1, 64, 64, 16)
+                    ref_stack = f["reference_stack"][self.current_sample_idx]  # shape: (64, 64, 16)
                     search_raw = f["search_frame"][self.current_sample_idx]    # shape: (256, 256, 1)
                     gt_heatmap = f["ground_truth_heatmap"][self.current_sample_idx]  # shape: (256, 256, 1)
                     gt_quality = f["ground_truth_quality"][self.current_sample_idx][0]
@@ -201,9 +242,20 @@ class KerasFCNVisualizer:
             search_tensor = tf.expand_dims(tf.expand_dims(search_256_float, -1), 0)
             
             # Predict
-            pred = self.model([ref_tensor, search_tensor], training=False)
-            pred_heatmap = pred[0].numpy()[0]  # (256, 256, 1)
-            pred_quality = pred[1].numpy()[0][0]  # scalar float
+            if self.is_tflite:
+                ref_array = ref_tensor.numpy() if hasattr(ref_tensor, "numpy") else np.array(ref_tensor)
+                search_array = search_tensor.numpy() if hasattr(search_tensor, "numpy") else np.array(search_tensor)
+                
+                self.interpreter.set_tensor(self.ref_input_idx, ref_array)
+                self.interpreter.set_tensor(self.search_input_idx, search_array)
+                self.interpreter.invoke()
+                
+                pred_heatmap = self.interpreter.get_tensor(self.heatmap_output_idx)[0]
+                pred_quality = self.interpreter.get_tensor(self.quality_output_idx)[0][0]
+            else:
+                pred = self.model([ref_tensor, search_tensor], training=False)
+                pred_heatmap = pred[0].numpy()[0]  # (256, 256, 1)
+                pred_quality = pred[1].numpy()[0][0]  # scalar float
             
             # Local Refined Argmax Centroid Method for sub-pixel prediction
             raw_heatmap = pred_heatmap[:, :, 0].copy()
@@ -262,7 +314,7 @@ class KerasFCNVisualizer:
                 pred_norm = [x_c / 256.0, y_c / 256.0]
             else:
                 pred_norm = [x_max / 256.0, y_max / 256.0]
-
+ 
             search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
             search_vis = (search_rgb.copy()*255).astype(np.uint8)
             
@@ -335,7 +387,7 @@ def main():
     args = parser.parse_args()
     
     root = tk.Tk()
-    app = KerasFCNVisualizer(
+    app = ModelInferenceVisualizer(
         root, 
         args.dataset_dir, 
         args.model_path, 
