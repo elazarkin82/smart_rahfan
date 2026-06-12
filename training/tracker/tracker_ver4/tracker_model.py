@@ -453,7 +453,7 @@ def fold_model_weights(unfolded_model, folded_model):
 # =====================================================================
 
 class TargetTrackerVer4:
-    def __init__(self, ref_shape=(1, 64, 64, 16), search_shape=(256, 256, 1), config_path="model.conf"):
+    def __init__(self, ref_shape=(64, 64, 16), search_shape=(256, 256, 1), config_path="model.conf"):
         self.ref_shape = ref_shape
         self.search_shape = search_shape
         self.model = None
@@ -651,7 +651,10 @@ class TargetTrackerVer4:
         inputs = layers.Input(shape=self.ref_shape, name="ref_encoder_input")
         
         # 1. Reshape dynamically based on the input structure
-        if self.ref_shape[0] == 1:
+        if len(self.ref_shape) == 3:
+            # Native 4D format: (64, 64, 16)
+            x = inputs
+        elif self.ref_shape[0] == 1:
             # New format: (1, 64, 64, 16) -> (64, 64, 16)
             x = layers.Reshape((self.ref_shape[1], self.ref_shape[2], self.ref_shape[3]), name="ref_reshape")(inputs)
         else:

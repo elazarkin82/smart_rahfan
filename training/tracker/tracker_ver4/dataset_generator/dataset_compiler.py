@@ -71,8 +71,7 @@ def build_reference_stack(image, center, num_layers, max_size, min_size, target_
         
     # Stack along channels axis to form (H, W, Layers)
     stack = np.stack(stack_layers, axis=-1).astype(np.uint8)
-    # Expand dims on first axis to form (1, H, W, Layers)
-    return np.expand_dims(stack, axis=0)
+    return stack
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -115,7 +114,7 @@ def main():
     f_h5 = h5py.File(h5_path, 'w')
     
     # Extendable datasets
-    ref_ds = f_h5.create_dataset('reference_stack', shape=(0, 1, tgt_sz, tgt_sz, layers), maxshape=(None, 1, tgt_sz, tgt_sz, layers), dtype='float32', chunks=(16, 1, tgt_sz, tgt_sz, layers))
+    ref_ds = f_h5.create_dataset('reference_stack', shape=(0, tgt_sz, tgt_sz, layers), maxshape=(None, tgt_sz, tgt_sz, layers), dtype='float32', chunks=(16, tgt_sz, tgt_sz, layers))
     search_ds = f_h5.create_dataset('search_frame', shape=(0, 256, 256, 1), maxshape=(None, 256, 256, 1), dtype='float32', chunks=(16, 256, 256, 1))
     heatmap_ds = f_h5.create_dataset('ground_truth_heatmap', shape=(0, 256, 256, 1), maxshape=(None, 256, 256, 1), dtype='float32', chunks=(16, 256, 256, 1))
     quality_ds = f_h5.create_dataset('ground_truth_quality', shape=(0, 1), maxshape=(None, 1), dtype='float32', chunks=(16, 1))
@@ -179,7 +178,7 @@ def main():
                 
                 heatmap_float = np.zeros((256, 256, 1), dtype=np.float32)
                 
-                flight_refs.append(ref_float[0])
+                flight_refs.append(ref_float)
                 flight_searches.append(search_float)
                 flight_heatmaps.append(heatmap_float)
                 flight_qualities.append(np.array([0.0], dtype=np.float32))
@@ -214,7 +213,7 @@ def main():
             
             quality_score = 1.0
             
-            flight_refs.append(ref_float[0])
+            flight_refs.append(ref_float)
             flight_searches.append(search_float)
             flight_heatmaps.append(heatmap_float)
             flight_qualities.append(np.array([quality_score], dtype=np.float32))
@@ -235,7 +234,7 @@ def main():
                 
                 heatmap_float_neg = np.zeros((256, 256, 1), dtype=np.float32)
                 
-                flight_refs.append(ref_float[0])
+                flight_refs.append(ref_float)
                 flight_searches.append(search_float_neg)
                 flight_heatmaps.append(heatmap_float_neg)
                 flight_qualities.append(np.array([0.0], dtype=np.float32))
@@ -250,8 +249,8 @@ def main():
             heatmap_ds.resize(n_existing + n_new, axis=0)
             quality_ds.resize(n_existing + n_new, axis=0)
             
-            # reference_stack input requires shape (N, 1, 64, 64, 16)
-            ref_ds[n_existing:] = np.expand_dims(np.stack(flight_refs, axis=0), axis=1)
+            # reference_stack input requires shape (N, 64, 64, 16)
+            ref_ds[n_existing:] = np.stack(flight_refs, axis=0)
             search_ds[n_existing:] = np.stack(flight_searches, axis=0)
             heatmap_ds[n_existing:] = np.stack(flight_heatmaps, axis=0)
             quality_ds[n_existing:] = np.stack(flight_qualities, axis=0)
