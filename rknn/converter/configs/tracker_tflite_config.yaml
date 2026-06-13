@@ -18,7 +18,7 @@ rknn_config:
 
 quantization:
   # Enable INT8 quantization. If false, model compiles in FP16.
-  do_quantization: true
+  do_quantization: false
   
   # Path to the calibration dataset descriptor file
   dataset_path: "./configs/dataset.txt"
@@ -32,6 +32,6 @@ quantization:
 # Input tensor details
 inputs:
   - name: "reference_stack"
-    shape: [16, 32, 32, 1]
+    shape: [64, 64, 16]
   - name: "search_frame"
     shape: [256, 256, 1]

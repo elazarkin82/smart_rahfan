@@ -76,9 +76,11 @@ def main():
                 spec_shape = [1] + list(inp["shape"])
                 input_specs.append(tf.TensorSpec(spec_shape, tf.float32, name=inp["name"]))
                 
+            input_names = [inp["name"] for inp in config["inputs"]]
             tf2onnx.convert.from_keras(
                 keras_model,
                 input_signature=tuple(input_specs),
+                inputs_as_nchw=input_names,
                 opset=13,
                 output_path=temp_onnx_path
             )
@@ -92,14 +94,37 @@ def main():
             traceback.print_exc()
             sys.exit(1)
     else:
-        # If user has a Keras model but did not specify the conversion flag, throw a helpful error
         if keras_path and not onnx_path and not tflite_path:
-            print("[ERROR] Keras models are not natively supported by RKNN-Toolkit2.")
-            print("Please run this script with the --convert-to-onnx flag to automatically convert it to ONNX first:")
-            print(f"  python3 convert.py --config {args.config} --convert-to-onnx")
+            print("[*] Direct Keras load requested. Proceeding without pre-conversion...")
+
+    # TFLite loading is not supported on ARM64 by RKNN Toolkit2, so convert to ONNX first if on ARM64
+    import platform
+    is_arm64 = platform.machine() in ["aarch64", "arm64"]
+    if tflite_path and is_arm64:
+        print("[*] ARM64 platform detected. TFLite model loading is not natively supported by RKNN-Toolkit2 on ARM64.")
+        print("--> Automatically converting TFLite model to ONNX first...")
+        temp_onnx_path = "/tmp/temp_tflite_model.onnx"
+        try:
+            import subprocess
+            input_names = [inp["name"] for inp in config["inputs"]]
+            inputs_as_nchw_str = ",".join(input_names)
+            cmd = [
+                sys.executable, "-m", "tf2onnx.convert",
+                "--tflite", tflite_path,
+                "--output", temp_onnx_path,
+                "--inputs-as-nchw", inputs_as_nchw_str,
+                "--opset", "13"
+            ]
+            print(f"Running command: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
+            print("[SUCCESS] TFLite model successfully converted to ONNX.")
+            onnx_path = temp_onnx_path
+            tflite_path = None
+        except Exception as e:
+            print(f"[ERROR] Failed to convert TFLite model to ONNX: {e}")
             sys.exit(1)
 
-    input_source = onnx_path or tflite_path
+    input_source = onnx_path or tflite_path or keras_path
 
     print(f"=== Starting RKNN Conversion for model: {model_name} ===")
     print(f"  Source path: {input_source}")
@@ -121,6 +146,12 @@ def main():
     rknn = RKNN(verbose=True)
 
     # 3. Inspect ONNX model input shapes to get expected ranks and channel sizes
+    config_input_channels = {}
+    for inp in config.get("inputs", []):
+        shape = inp.get("shape", [])
+        if len(shape) >= 1:
+            config_input_channels[inp["name"]] = shape[-1]
+
     onnx_input_ranks = {}
     onnx_input_channels = {}
     if onnx_path and os.path.exists(onnx_path):
@@ -131,8 +162,26 @@ def main():
                 dim_len = len(onnx_inp.type.tensor_type.shape.dim)
                 onnx_input_ranks[onnx_inp.name] = dim_len
                 if dim_len > 1:
-                    # RKNN treats the second dimension (index 1) of NCHW as the channel size
-                    chan_size = onnx_inp.type.tensor_type.shape.dim[1].dim_value
+                    dim1 = onnx_inp.type.tensor_type.shape.dim[1].dim_value
+                    dim3 = onnx_inp.type.tensor_type.shape.dim[3].dim_value if dim_len > 3 else None
+                    cfg_chan = config_input_channels.get(onnx_inp.name)
+                    
+                    if cfg_chan is not None:
+                        if dim_len == 4 and dim3 == cfg_chan:
+                            chan_size = dim3
+                        elif dim1 == cfg_chan:
+                            chan_size = dim1
+                        else:
+                            if dim_len == 4 and isinstance(dim3, int) and dim3 in [1, 3, 16] and dim1 not in [1, 3, 16]:
+                                chan_size = dim3
+                            else:
+                                chan_size = dim1
+                    else:
+                        if dim_len == 4 and isinstance(dim3, int) and dim3 in [1, 3, 16] and dim1 not in [1, 3, 16]:
+                            chan_size = dim3
+                        else:
+                            chan_size = dim1
+                            
                     if not isinstance(chan_size, int) or chan_size <= 0:
                         chan_size = 1
                     onnx_input_channels[onnx_inp.name] = chan_size
@@ -188,6 +237,10 @@ def main():
         if expected_rank and len(shape) < expected_rank:
             print(f"--> [Shape Adjust] Prepending batch dimension 1 to input '{name}' (shape: {shape} -> {[1] + shape}) to match ONNX rank {expected_rank}")
             shape = [1] + shape
+        # Transpose NHWC [1, H, W, C] to NCHW [1, C, H, W] for ONNX model to match NCHW layout
+        if onnx_path and len(shape) == 4:
+            print(f"--> [Shape Transpose] Transposing shape for ONNX NCHW layout: {shape} -> {[shape[0], shape[3], shape[1], shape[2]]}")
+            shape = [shape[0], shape[3], shape[1], shape[2]]
         input_shapes.append(shape)
 
     if onnx_path:
@@ -202,8 +255,20 @@ def main():
         ret = rknn.load_tflite(
             model=tflite_path
         )
+    elif keras_path:
+        print(f"--> [Keras direct load] Attempting to load Keras model directly from: {keras_path}...")
+        try:
+            ret = rknn.load_keras(
+                model=keras_path,
+                inputs=input_names,
+                input_size_list=input_shapes
+            )
+        except Exception as e:
+            print(f"[ERROR] Direct Keras load failed: {e}")
+            print("Please run this script with --convert-to-onnx to convert it to ONNX first.")
+            sys.exit(1)
     else:
-        print("[ERROR] No valid source model path (onnx_model_path or tflite_model_path) provided in config.")
+        print("[ERROR] No valid source model path (onnx_model_path, tflite_model_path, or keras_model_path) provided in config.")
         sys.exit(1)
 
     if ret != 0:

@@ -102,39 +102,39 @@ TrackerService::TrackerService(const char* model_path)
     out_attrs[0].index = 0;
     rknn_query(m_ctx, RKNN_QUERY_OUTPUT_ATTR, &out_attrs[0], sizeof(rknn_tensor_attr));
 
-    // Dynamic mapping of dimensions based on raw queried NPU attributes (supporting 4D/5D)
-    if (in_attrs[0].n_dims == 5)
+    // Dynamic mapping of dimensions based on raw queried NPU attributes format (NHWC or NCHW)
+    if (in_attrs[0].fmt == RKNN_TENSOR_NHWC)
     {
-        m_in_width_ref = in_attrs[0].dims[3];
-        m_in_height_ref = in_attrs[0].dims[2];
-        m_in_channels_ref = in_attrs[0].dims[4];
+        m_in_width_ref = in_attrs[0].dims[2];
+        m_in_height_ref = in_attrs[0].dims[1];
+        m_in_channels_ref = in_attrs[0].dims[3];
     }
-    else
+    else // RKNN_TENSOR_NCHW
     {
         m_in_width_ref = in_attrs[0].dims[3];
         m_in_height_ref = in_attrs[0].dims[2];
-        m_in_channels_ref = in_attrs[0].dims[0] * in_attrs[0].dims[1];
+        m_in_channels_ref = in_attrs[0].dims[1];
     }
 
-    if (in_attrs[1].n_dims == 4 && in_attrs[1].dims[1] == 256 && in_attrs[1].dims[3] == 256)
+    if (in_attrs[1].fmt == RKNN_TENSOR_NHWC)
     {
-        m_in_width_search = in_attrs[1].dims[3];
+        m_in_width_search = in_attrs[1].dims[2];
         m_in_height_search = in_attrs[1].dims[1];
-        m_in_channels_search = in_attrs[1].dims[2];
+        m_in_channels_search = in_attrs[1].dims[3];
     }
-    else
+    else // RKNN_TENSOR_NCHW
     {
         m_in_width_search = in_attrs[1].dims[3];
         m_in_height_search = in_attrs[1].dims[2];
         m_in_channels_search = in_attrs[1].dims[1];
     }
 
-    if (out_attrs[0].n_dims == 4 && out_attrs[0].dims[1] == 256 && out_attrs[0].dims[2] == 256)
+    if (out_attrs[0].fmt == RKNN_TENSOR_NHWC)
     {
         m_out_width_hm = out_attrs[0].dims[2];
         m_out_height_hm = out_attrs[0].dims[1];
     }
-    else
+    else // RKNN_TENSOR_NCHW
     {
         m_out_width_hm = out_attrs[0].dims[3];
         m_out_height_hm = out_attrs[0].dims[2];

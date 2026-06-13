@@ -49,6 +49,11 @@ def main():
         default="dataset_generator/compiled/dataset.h5",
         help="Path to HDF5 dataset.h5 file to use as calibration data for INT8 quantization"
     )
+    parser.add_argument(
+        "--qat",
+        action="store_true",
+        help="Enable QAT preservation mode: converts the loaded QAT model directly to retain activation scale factors instead of reconstructing"
+    )
     
     args = parser.parse_args()
     
@@ -239,26 +244,32 @@ def main():
         print(f"Error: Failed to build model architecture. Details: {e}", file=sys.stderr)
         sys.exit(1)
         
-    # 3. Load weights only (bypasses any serialized bytecode/namespace issues)
-    print(f"[*] Copying weights layer-by-layer from: {args.keras_in} ...")
-    try:
-        for layer in model.layers:
-            # Skip layers that do not contain any weights (e.g. TFOpLambda, Input, Reshape, Transpose)
-            if len(layer.weights) == 0:
-                continue
-            loaded_layer = loaded_model.get_layer(layer.name)
-            layer.set_weights(loaded_layer.get_weights())
-        print("[+] Weights loaded successfully via layer-by-layer copy.")
-    except Exception as e:
-        print(f"Error: Failed to load weights. Ensure the Keras file contains compatible weights.\nDetails: {e}", file=sys.stderr)
-        sys.exit(1)
+    # 3. Choose conversion target model
+    if args.qat or "qat" in os.path.basename(args.keras_in).lower():
+        print("[*] QAT mode detected or enabled. Converting the loaded model directly to preserve learned scale factors...")
+        conversion_model = loaded_model
+    else:
+        # Reconstruct and copy weights
+        print(f"[*] Copying weights layer-by-layer from: {args.keras_in} ...")
+        try:
+            for layer in model.layers:
+                # Skip layers that do not contain any weights (e.g. TFOpLambda, Input, Reshape, Transpose)
+                if len(layer.weights) == 0:
+                    continue
+                loaded_layer = loaded_model.get_layer(layer.name)
+                layer.set_weights(loaded_layer.get_weights())
+            print("[+] Weights loaded successfully via layer-by-layer copy.")
+        except Exception as e:
+            print(f"Error: Failed to load weights. Ensure the Keras file contains compatible weights.\nDetails: {e}", file=sys.stderr)
+            sys.exit(1)
+        conversion_model = model
         
     # 4. Generate Concrete Function with Static Batch Shape (batch_size = 1)
     print("[*] Defining concrete function with static input shapes (forcing batch_size=1)...")
     try:
         @tf.function
         def run_model(ref, search):
-            return model([ref, search])
+            return conversion_model([ref, search])
             
         concrete_func = run_model.get_concrete_function(
             tf.TensorSpec([1, 64, 64, 16], tf.float32, name="reference_stack"),

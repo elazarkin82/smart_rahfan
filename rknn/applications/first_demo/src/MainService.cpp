@@ -131,6 +131,12 @@ void MainService::onFrame(uchar* frame, int w, int h)
     float real_fps;
     char fps_buf[32];
 
+    if (w * h > 1920 * 1280)
+    {
+        fprintf(stderr, "[MainService] Frame size %dx%d exceeds pre-allocated buffer size!\n", w, h);
+        return;
+    }
+
     memcpy(m_lastFrame, frame, w * h);
     m_lastFrame_w = w;
     m_lastFrame_h = h;

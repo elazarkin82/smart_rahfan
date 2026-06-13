@@ -54,7 +54,7 @@ mkdir -p outputs_pxl
 # --loss_heatmap dbsz_relu: (Default) Uses the Relu-based DBSZ loss for flat background suppression.
 python3 tracker_ver4_pxl.py train \
     --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 10 \
+    --num_of_epochs 50 \
     --lr 1e-3 \
     --loss_heatmap dbsz_relu \
     --loss_quality bce \

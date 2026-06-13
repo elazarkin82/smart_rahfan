@@ -105,6 +105,14 @@ bool CameraCapture::config_device()
         return false;
     }
 
+    if (fmt.fmt.pix.width != (unsigned int)m_width || fmt.fmt.pix.height != (unsigned int)m_height)
+    {
+        fprintf(stdout, "[CameraCapture] Negotiated resolution: %dx%d (requested %dx%d)\n",
+                fmt.fmt.pix.width, fmt.fmt.pix.height, m_width, m_height);
+        m_width = fmt.fmt.pix.width;
+        m_height = fmt.fmt.pix.height;
+    }
+
     // 2. Request memory-mapped buffers
     memset(&req, 0, sizeof(req));
     req.count = 4;
@@ -245,7 +253,12 @@ void CameraCapture::capture_thread_loop()
         }
 
         StatusObject::instance()->update("camera_status", "Connected & Streaming");
-        fprintf(stdout, "[CameraCapture] Successfully started capture on %s\n", current_dev);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            current_w = m_width;
+            current_h = m_height;
+        }
+        fprintf(stdout, "[CameraCapture] Successfully started capture on %s (%dx%d)\n", current_dev, current_w, current_h);
 
         // 3. Capture frames loop as long as the device path has not changed
         while (true)
@@ -292,10 +305,32 @@ void CameraCapture::capture_thread_loop()
                 break;
             }
 
+            if (buf.index >= m_buffer_count)
+            {
+                fprintf(stderr, "[CameraCapture] Invalid buffer index: %d\n", buf.index);
+                break;
+            }
+            src = (unsigned char*)m_buffers[buf.index].start;
+            if (!src)
+            {
+                fprintf(stderr, "[CameraCapture] Buffer start is NULL for index: %d\n", buf.index);
+                break;
+            }
+            if (m_buffers[buf.index].length < (size_t)(current_w * current_h * 2))
+            {
+                fprintf(stderr, "[CameraCapture] Buffer too small: %zu, expected %d\n", 
+                        m_buffers[buf.index].length, current_w * current_h * 2);
+                break;
+            }
+            if (current_w * current_h > 1920 * 1280)
+            {
+                fprintf(stderr, "[CameraCapture] Resolution %dx%d exceeds max pre-allocated buffer size!\n", current_w, current_h);
+                break;
+            }
+
             // Extract only the Y-channel (Grayscale) from YUYV buffer
             // YUYV structure: Y0 U0 Y1 V0 Y2 U1 Y3 V1 ...
             // Y0 is byte 0, Y1 is byte 2, Y2 is byte 4...
-            src = (unsigned char*)m_buffers[buf.index].start;
             for (i = 0; i < current_w * current_h; ++i)
             {
                 m_gray_buffer[i] = src[i * 2];
