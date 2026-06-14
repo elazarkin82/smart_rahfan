@@ -1,14 +1,10 @@
 # step 1
-	mkdir -p ~/yocto-radxa/sources
-	cd ~/yocto-radxa/sources
-
 	git clone https://git.yoctoproject.org/poky -b scarthgap
 	git clone https://git.yoctoproject.org/meta-arm -b scarthgap
 	git clone https://git.openembedded.org/meta-openembedded -b scarthgap
 	git clone https://github.com/radxa/meta-rockchip.git -b scarthgap
 
-	cd ~/yocto-radxa
-	source sources/poky/oe-init-build-env build
+	source poky/oe-init-build-env build
 
 # step 2
 	bitbake-layers add-layer ../meta-arm/meta-arm-toolchain
@@ -60,3 +56,7 @@
 
 # build
 	bitbake core-image-minimal
+
+# flash to sd
+	(not in docker!)
+	./meta-ksg/flash-sd.sh
