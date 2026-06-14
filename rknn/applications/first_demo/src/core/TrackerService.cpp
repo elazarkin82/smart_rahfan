@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <chrono>
+#include <math.h>
 
 TrackerService::TrackerService(const char* model_path)
 {
@@ -101,39 +102,39 @@ TrackerService::TrackerService(const char* model_path)
     out_attrs[0].index = 0;
     rknn_query(m_ctx, RKNN_QUERY_OUTPUT_ATTR, &out_attrs[0], sizeof(rknn_tensor_attr));
 
-    // Dynamic mapping of dimensions based on raw queried NPU attributes (supporting 4D/5D)
-    if (in_attrs[0].n_dims == 5)
+    // Dynamic mapping of dimensions based on raw queried NPU attributes format (NHWC or NCHW)
+    if (in_attrs[0].fmt == RKNN_TENSOR_NHWC)
     {
-        m_in_width_ref = in_attrs[0].dims[3];
-        m_in_height_ref = in_attrs[0].dims[2];
-        m_in_channels_ref = in_attrs[0].dims[4];
+        m_in_width_ref = in_attrs[0].dims[2];
+        m_in_height_ref = in_attrs[0].dims[1];
+        m_in_channels_ref = in_attrs[0].dims[3];
     }
-    else
+    else // RKNN_TENSOR_NCHW
     {
         m_in_width_ref = in_attrs[0].dims[3];
         m_in_height_ref = in_attrs[0].dims[2];
-        m_in_channels_ref = in_attrs[0].dims[0] * in_attrs[0].dims[1];
+        m_in_channels_ref = in_attrs[0].dims[1];
     }
 
-    if (in_attrs[1].n_dims == 4 && in_attrs[1].dims[1] == 256 && in_attrs[1].dims[3] == 256)
+    if (in_attrs[1].fmt == RKNN_TENSOR_NHWC)
     {
-        m_in_width_search = in_attrs[1].dims[3];
+        m_in_width_search = in_attrs[1].dims[2];
         m_in_height_search = in_attrs[1].dims[1];
-        m_in_channels_search = in_attrs[1].dims[2];
+        m_in_channels_search = in_attrs[1].dims[3];
     }
-    else
+    else // RKNN_TENSOR_NCHW
     {
         m_in_width_search = in_attrs[1].dims[3];
         m_in_height_search = in_attrs[1].dims[2];
         m_in_channels_search = in_attrs[1].dims[1];
     }
 
-    if (out_attrs[0].n_dims == 4 && out_attrs[0].dims[1] == 256 && out_attrs[0].dims[2] == 256)
+    if (out_attrs[0].fmt == RKNN_TENSOR_NHWC)
     {
         m_out_width_hm = out_attrs[0].dims[2];
         m_out_height_hm = out_attrs[0].dims[1];
     }
-    else
+    else // RKNN_TENSOR_NCHW
     {
         m_out_width_hm = out_attrs[0].dims[3];
         m_out_height_hm = out_attrs[0].dims[2];
@@ -193,39 +194,83 @@ bool TrackerService::is_target_defined() const
     return m_is_target_defined;
 }
 
+void TrackerService::clear_target()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_is_target_defined = false;
+}
+
 void TrackerService::set_tracker_callback(TrackerCallback* cb)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_callback = cb;
 }
 
-void TrackerService::refresh_target(uchar* frame, int w, int h)
+void TrackerService::refresh_target(const uchar* frame, int w, int h, int target_x, int target_y)
 {
     int c;
-    uchar* temp_crop;
+    float max_sz;
+    float min_sz;
+    int y, x;
+    uchar* temp_64x64;
 
     if (!m_is_model_loaded)
     {
         return;
     }
 
-    // Allocate a temporary crop buffer
-    temp_crop = (uchar*)malloc(m_in_width_ref * m_in_height_ref);
+    max_sz = (float)(w < h ? w : h);
+    min_sz = 16.0f;
+    temp_64x64 = (uchar*)malloc(m_in_width_ref * m_in_height_ref);
 
-    // Rescale input frame into the target reference resolution (using Nearest-Neighbor as configured)
-    resize_nearest_gray(frame, w, h, temp_crop, m_in_width_ref, m_in_height_ref);
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-    // Fill the historical reference stack with the newly initialized target template
     for (c = 0; c < m_in_channels_ref; ++c)
     {
-        memcpy(m_ref_stack_buf + (c * m_in_width_ref * m_in_height_ref), temp_crop, m_in_width_ref * m_in_height_ref);
+        float sz = max_sz - (c * (max_sz - min_sz) / (m_in_channels_ref - 1));
+        float half = sz / 2.0f;
+        int x1 = (int)roundf((float)target_x - half);
+        int y1 = (int)roundf((float)target_y - half);
+        int sz_int = (int)sz;
+        uchar* crop_buf = (uchar*)calloc(sz_int * sz_int, 1);
+        int cy, cx;
+
+        for (cy = 0; cy < sz_int; ++cy)
+        {
+            int sy = y1 + cy;
+            if (sy >= 0 && sy < h)
+            {
+                for (cx = 0; cx < sz_int; ++cx)
+                {
+                    int sx = x1 + cx;
+                    if (sx >= 0 && sx < w)
+                    {
+                        crop_buf[cy * sz_int + cx] = frame[sy * w + sx];
+                    }
+                }
+            }
+        }
+
+        resize_bilinear_gray(crop_buf, sz_int, sz_int, temp_64x64, m_in_width_ref, m_in_height_ref);
+        
+        for (y = 0; y < m_in_height_ref; ++y)
+        {
+            for (x = 0; x < m_in_width_ref; ++x)
+            {
+                m_ref_stack_buf[(y * m_in_width_ref + x) * m_in_channels_ref + c] = temp_64x64[y * m_in_width_ref + x];
+            }
+        }
+
+        free(crop_buf);
     }
 
-    m_is_target_defined = true;
+    free(temp_64x64);
 
-    free(temp_crop);
-    fprintf(stdout, "[TrackerService] Target refreshed & initialized.\n");
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_is_target_defined = true;
+    if (m_callback != NULL)
+    {
+        m_callback->onStackCreated(m_ref_stack_buf, m_in_width_ref, m_in_height_ref, m_in_channels_ref);
+    }
+    fprintf(stdout, "[TrackerService] Target refreshed & initialized with multi-scale reference stack.\n");
 }
 
 void TrackerService::update_frame(uchar* frame, int w, int h)
@@ -235,18 +280,31 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     int ret;
     int out_x;
     int out_y;
+    std::chrono::steady_clock::time_point t_start;
+    std::chrono::steady_clock::time_point t_resize_start;
+    std::chrono::steady_clock::time_point t_resize_end;
+    std::chrono::steady_clock::time_point t_npu_start;
+    std::chrono::steady_clock::time_point t_npu_end;
+    std::chrono::steady_clock::time_point t_decode_start;
+    std::chrono::steady_clock::time_point t_decode_end;
+    std::chrono::steady_clock::time_point t_end;
+    float resize_ms;
+    float npu_ms;
+    float decode_ms;
+    float total_ms;
+    char time_buf[64];
 
     if (!m_is_model_loaded || !m_is_target_defined)
     {
         return;
     }
 
-    auto t_start = std::chrono::steady_clock::now();
+    t_start = std::chrono::steady_clock::now();
 
     // 1. Resize incoming frame to search window size (using Bilinear Interpolation)
-    auto t_resize_start = std::chrono::steady_clock::now();
+    t_resize_start = std::chrono::steady_clock::now();
     resize_bilinear_gray(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
-    auto t_resize_end = std::chrono::steady_clock::now();
+    t_resize_end = std::chrono::steady_clock::now();
 
     // 2. Setup inputs
     memset(inputs, 0, sizeof(inputs));
@@ -272,9 +330,9 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     }
 
     // 3. Run inference on NPU
-    auto t_npu_start = std::chrono::steady_clock::now();
+    t_npu_start = std::chrono::steady_clock::now();
     ret = rknn_run(m_ctx, NULL);
-    auto t_npu_end = std::chrono::steady_clock::now();
+    t_npu_end = std::chrono::steady_clock::now();
     if (ret < 0)
     {
         fprintf(stderr, "[TrackerService] rknn_run failed: %d\n", ret);
@@ -299,22 +357,21 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     rknn_outputs_release(m_ctx, 1, outputs);
 
     // 5. Decode heatmap using local 5x5 sub-pixel centroid
-    auto t_decode_start = std::chrono::steady_clock::now();
+    t_decode_start = std::chrono::steady_clock::now();
     out_x = -1;
     out_y = -1;
     decode_heatmap(m_heatmap_buf, &out_x, &out_y);
-    auto t_decode_end = std::chrono::steady_clock::now();
+    t_decode_end = std::chrono::steady_clock::now();
 
-    auto t_end = std::chrono::steady_clock::now();
+    t_end = std::chrono::steady_clock::now();
 
     // Calculate times in milliseconds
-    float resize_ms = std::chrono::duration<float, std::milli>(t_resize_end - t_resize_start).count();
-    float npu_ms = std::chrono::duration<float, std::milli>(t_npu_end - t_npu_start).count();
-    float decode_ms = std::chrono::duration<float, std::milli>(t_decode_end - t_decode_start).count();
-    float total_ms = std::chrono::duration<float, std::milli>(t_end - t_start).count();
+    resize_ms = std::chrono::duration<float, std::milli>(t_resize_end - t_resize_start).count();
+    npu_ms = std::chrono::duration<float, std::milli>(t_npu_end - t_npu_start).count();
+    decode_ms = std::chrono::duration<float, std::milli>(t_decode_end - t_decode_start).count();
+    total_ms = std::chrono::duration<float, std::milli>(t_end - t_start).count();
 
     // Update StatusObject
-    char time_buf[64];
     snprintf(time_buf, sizeof(time_buf), "%.2f ms", resize_ms);
     StatusObject::instance()->update("tracker_time_resize", time_buf);
 
@@ -333,6 +390,7 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
         if (m_callback != NULL)
         {
             m_callback->onTargetDetected(out_x, out_y);
+            m_callback->onHeatmapCreated(m_heatmap_buf, m_out_width_hm, m_out_height_hm);
         }
     }
 }

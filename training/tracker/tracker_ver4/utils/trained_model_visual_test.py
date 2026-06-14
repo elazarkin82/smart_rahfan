@@ -9,20 +9,63 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageTk
 
-class KerasFCNVisualizer:
-    def __init__(self, root, dataset_dir, model_path, threshold=0.5, min_blob_size=30):
+class ModelInferenceVisualizer:
+    def __init__(self, root, dataset_dir, model_path, threshold=0.5, min_blob_size=30, no_filters=False):
         # Import tracker_model to register custom layers (like SafeGroupNormalization)
-        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.append(script_dir)
+        sys.path.append(os.path.dirname(script_dir))
         import tracker_model
         
         import tensorflow as tf
         
         self.threshold = threshold
         self.min_blob_size = min_blob_size
+        self.no_filters = no_filters
+        self.model_path = model_path
+        self.is_tflite = model_path.endswith('.tflite')
         
-        print(f"Loading Keras TargetTrackerVer4 from {model_path}...")
-        self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
-        self.model.summary()
+        if self.is_tflite:
+            print(f"Loading TFLite model from {model_path}...")
+            self.interpreter = tf.lite.Interpreter(model_path=model_path)
+            self.interpreter.allocate_tensors()
+            self.input_details = self.interpreter.get_input_details()
+            self.output_details = self.interpreter.get_output_details()
+            
+            # Map input tensors
+            self.ref_input_idx = None
+            self.search_input_idx = None
+            for detail in self.input_details:
+                name = detail['name'].lower()
+                if 'reference_stack' in name:
+                    self.ref_input_idx = detail['index']
+                elif 'search_frame' in name:
+                    self.search_input_idx = detail['index']
+            
+            if self.ref_input_idx is None or self.search_input_idx is None:
+                # Fallback to shape matching
+                for detail in self.input_details:
+                    shape = list(detail['shape'])
+                    if 16 in shape or 64 in shape:
+                        self.ref_input_idx = detail['index']
+                    else:
+                        self.search_input_idx = detail['index']
+                        
+            # Map output tensors
+            self.heatmap_output_idx = None
+            self.quality_output_idx = None
+            for detail in self.output_details:
+                shape = list(detail['shape'])
+                if 256 in shape:
+                    self.heatmap_output_idx = detail['index']
+                else:
+                    self.quality_output_idx = detail['index']
+            print(f"Mapped inputs: ref={self.ref_input_idx}, search={self.search_input_idx}")
+            print(f"Mapped outputs: heatmap={self.heatmap_output_idx}, quality={self.quality_output_idx}")
+        else:
+            print(f"Loading Keras model from {model_path}...")
+            self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+            self.model.summary()
         
         self.dataset_dir = dataset_dir
         if not os.path.exists(self.dataset_dir):
@@ -91,7 +134,8 @@ class KerasFCNVisualizer:
         return panel, coord_lbl
 
     def setup_ui(self):
-        header = tk.Label(self.root, text="TargetTrackerVer4 Visualizer", font=("Outfit", 15, "bold"), bg="#121212", fg="#ffffff")
+        backend_name = "TFLite" if self.is_tflite else "Keras"
+        header = tk.Label(self.root, text=f"TargetTrackerVer4 Visualizer ({backend_name} Backend)", font=("Outfit", 15, "bold"), bg="#121212", fg="#ffffff")
         header.pack(pady=15)
         
         self.frames_frame = tk.Frame(self.root, bg="#121212")
@@ -114,14 +158,14 @@ class KerasFCNVisualizer:
                 self.current_sample_idx = (self.current_sample_idx + 1) % self.h5_size
                 import h5py
                 with h5py.File(os.path.join(self.dataset_dir, "dataset.h5"), 'r') as f:
-                    ref_stack = f["reference_stack"][self.current_sample_idx]  # shape: (1, 64, 64, 16)
+                    ref_stack = f["reference_stack"][self.current_sample_idx]  # shape: (64, 64, 16)
                     search_raw = f["search_frame"][self.current_sample_idx]    # shape: (256, 256, 1)
                     gt_heatmap = f["ground_truth_heatmap"][self.current_sample_idx]  # shape: (256, 256, 1)
                     gt_quality = f["ground_truth_quality"][self.current_sample_idx][0]
                 
                 # Compute target_2d dynamically from the peak of gt_heatmap
                 hm_np = gt_heatmap[:, :, 0]
-                if np.max(hm_np) > 0.1:
+                if np.max(hm_np) > 1e-6:
                     py, px = np.unravel_index(np.argmax(hm_np), hm_np.shape)
                     target_2d = (px, py)
                 else:
@@ -172,14 +216,24 @@ class KerasFCNVisualizer:
                 curr_lbl_fg = "#ff3366"
             
             # Show the largest reference crop (layer 0) scaled up
-            ref_layer_0 = ref_stack[0, :, :, 0]
+            if ref_stack.ndim == 3:
+                ref_layer_0 = ref_stack[:, :, 0]
+            elif ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
+                ref_layer_0 = ref_stack[0, :, :, 0]
+            else:
+                ref_layer_0 = ref_stack[0, :, :, 0]
+                
             if ref_layer_0.dtype != np.uint8:
                 ref_layer_0 = (ref_layer_0 * 255.0).astype(np.uint8)
             ref_vis = cv2.resize(ref_layer_0, (256, 256), interpolation=cv2.INTER_NEAREST)
             self.tk_img_ref = ImageTk.PhotoImage(Image.fromarray(ref_vis))
             
             # Prepare inputs for model
-            ref_tensor = tf.expand_dims(tf.cast(ref_stack, tf.float32), 0)
+            if ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
+                ref_tensor = tf.cast(ref_stack, tf.float32)
+            else:
+                ref_tensor = tf.expand_dims(tf.cast(ref_stack, tf.float32), 0)
+                
             if tf.reduce_max(ref_tensor) > 1.001:
                 ref_tensor = ref_tensor / 255.0
             
@@ -191,46 +245,59 @@ class KerasFCNVisualizer:
             search_tensor = tf.expand_dims(tf.expand_dims(search_256_float, -1), 0)
             
             # Predict
-            pred = self.model([ref_tensor, search_tensor], training=False)
-            pred_heatmap = pred[0].numpy()[0]  # (256, 256, 1)
-            pred_quality = pred[1].numpy()[0][0]  # scalar float
+            if self.is_tflite:
+                ref_array = ref_tensor.numpy() if hasattr(ref_tensor, "numpy") else np.array(ref_tensor)
+                search_array = search_tensor.numpy() if hasattr(search_tensor, "numpy") else np.array(search_tensor)
+                
+                self.interpreter.set_tensor(self.ref_input_idx, ref_array)
+                self.interpreter.set_tensor(self.search_input_idx, search_array)
+                self.interpreter.invoke()
+                
+                pred_heatmap = self.interpreter.get_tensor(self.heatmap_output_idx)[0]
+                pred_quality = self.interpreter.get_tensor(self.quality_output_idx)[0][0]
+            else:
+                pred = self.model([ref_tensor, search_tensor], training=False)
+                pred_heatmap = pred[0].numpy()[0]  # (256, 256, 1)
+                pred_quality = pred[1].numpy()[0][0]  # scalar float
             
             # Local Refined Argmax Centroid Method for sub-pixel prediction
             raw_heatmap = pred_heatmap[:, :, 0].copy()
             heatmap = pred_heatmap[:, :, 0]
             
-            # Apply threshold filter (noise gate)
-            heatmap = np.where(heatmap >= self.threshold, heatmap, 0.0)
-            
-            # Apply connected component (blob size) filter
-            if self.min_blob_size > 0:
-                h, w = heatmap.shape
-                visited = np.zeros((h, w), dtype=bool)
-                for y in range(h):
-                    for x in range(w):
-                        if heatmap[y, x] > 0.0 and not visited[y, x]:
-                            blob_pixels = []
-                            queue = [(y, x)]
-                            visited[y, x] = True
-                            head = 0
-                            while head < len(queue):
-                                cy, cx = queue[head]
-                                head += 1
-                                blob_pixels.append((cy, cx))
+            # Apply threshold filter (noise gate) and connected component filter if enabled
+            if not self.no_filters:
+                # Apply threshold filter (noise gate)
+                heatmap = np.where(heatmap >= self.threshold, heatmap, 0.0)
+                
+                # Apply connected component (blob size) filter
+                if self.min_blob_size > 0:
+                    h, w = heatmap.shape
+                    visited = np.zeros((h, w), dtype=bool)
+                    for y in range(h):
+                        for x in range(w):
+                            if heatmap[y, x] > 0.0 and not visited[y, x]:
+                                blob_pixels = []
+                                queue = [(y, x)]
+                                visited[y, x] = True
+                                head = 0
+                                while head < len(queue):
+                                    cy, cx = queue[head]
+                                    head += 1
+                                    blob_pixels.append((cy, cx))
+                                    
+                                    for dy in [-1, 0, 1]:
+                                        for dx in [-1, 0, 1]:
+                                            if dy == 0 and dx == 0:
+                                                continue
+                                            ny, nx = cy + dy, cx + dx
+                                            if 0 <= ny < h and 0 <= nx < w:
+                                                if heatmap[ny, nx] > 0.0 and not visited[ny, nx]:
+                                                    visited[ny, nx] = True
+                                                    queue.append((ny, nx))
                                 
-                                for dy in [-1, 0, 1]:
-                                    for dx in [-1, 0, 1]:
-                                        if dy == 0 and dx == 0:
-                                            continue
-                                        ny, nx = cy + dy, cx + dx
-                                        if 0 <= ny < h and 0 <= nx < w:
-                                            if heatmap[ny, nx] > 0.0 and not visited[ny, nx]:
-                                                visited[ny, nx] = True
-                                                queue.append((ny, nx))
-                            
-                            if len(blob_pixels) < self.min_blob_size:
-                                for cy, cx in blob_pixels:
-                                    heatmap[cy, cx] = 0.0
+                                if len(blob_pixels) < self.min_blob_size:
+                                    for cy, cx in blob_pixels:
+                                        heatmap[cy, cx] = 0.0
             
             flat_idx = np.argmax(heatmap)
             y_max, x_max = np.unravel_index(flat_idx, heatmap.shape)
@@ -252,7 +319,7 @@ class KerasFCNVisualizer:
                 pred_norm = [x_c / 256.0, y_c / 256.0]
             else:
                 pred_norm = [x_max / 256.0, y_max / 256.0]
-
+ 
             search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
             search_vis = (search_rgb.copy()*255).astype(np.uint8)
             
@@ -296,15 +363,25 @@ class KerasFCNVisualizer:
             self.ref_lbl.config(text="Target Features")
             self.search_lbl.config(text=curr_lbl_text, fg=curr_lbl_fg)
             
+            gt_q_base = meta.get("quality")
+            if gt_q_base is None:
+                gt_q_base = meta.get("ground_truth_quality", 1.0)
+
             if target_2d is not None:
                 error = np.sqrt((pred_norm[0] - norm_x)**2 + (pred_norm[1] - norm_y)**2) * 256.0
                 error_str = f"Error: {error:.1f}px"
+                # Calculate dynamic True Quality exactly as done during training:
+                if gt_q_base > 0.5:
+                    true_quality = max(1.0 - (error / 30.0), 0.0)
+                else:
+                    true_quality = 0.0
             else:
                 error_str = "Error: N/A"
+                true_quality = 0.0
             
             self.expected_heatmap_lbl.config(text="GT Heatmap")
             self.raw_predicted_heatmap_lbl.config(text="Raw Predicted HM")
-            self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {pred_quality:.2f}", fg="#33ff33")
+            self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {true_quality:.2f}", fg="#33ff33")
             
             self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
             
@@ -322,15 +399,17 @@ def main():
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--threshold", type=float, default=0.5, help="Heatmap noise threshold")
     parser.add_argument("--min_blob_size", type=int, default=30, help="Minimum connected component size to keep")
+    parser.add_argument("--no_filters", action="store_true", help="Disable heatmap threshold and blob size filters")
     args = parser.parse_args()
     
     root = tk.Tk()
-    app = KerasFCNVisualizer(
+    app = ModelInferenceVisualizer(
         root, 
         args.dataset_dir, 
         args.model_path, 
         threshold=args.threshold, 
-        min_blob_size=args.min_blob_size
+        min_blob_size=args.min_blob_size,
+        no_filters=args.no_filters
     )
     root.mainloop()
 

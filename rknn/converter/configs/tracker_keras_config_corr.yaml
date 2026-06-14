@@ -1,9 +1,9 @@
-# RKNN Model Conversion Configuration (TFLite)
+# RKNN Model Conversion Configuration (Keras)
 
 model:
-  name: "tracker_ver4_tflite"
-  tflite_model_path: "../../training/tracker/tracker_ver4/outputs/tracker.tflite"
-  output_rknn_path: "./outputs/tracker_tflite.rknn"
+  name: "tracker_ver4_keras"
+  keras_model_path: "../../training/tracker/tracker_ver4/outputs/tracker_fbn.keras"
+  output_rknn_path: "./outputs/tracker_keras.rknn"
 
 rknn_config:
   # Target platform for Radxa Zero 3 (RK3566)
@@ -35,3 +35,9 @@ inputs:
     shape: [64, 64, 16]
   - name: "search_frame"
     shape: [256, 256, 1]
+
+# Custom Keras layers/objects to load before converting to ONNX
+custom_objects:
+  - name: "SafeGroupNormalization"
+    module: "tracker_model"
+    path: "../../training/tracker/tracker_ver4"

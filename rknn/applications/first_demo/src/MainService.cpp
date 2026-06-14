@@ -35,6 +35,7 @@ MainService::MainService(const char* params_path)
     }
 
     // Initialize StatusObject telemetry defaults
+    char res_buf[64];
     StatusObject::instance()->update("camera_fps", "0.0 FPS");
     StatusObject::instance()->update("tracker_fps", "0.0 FPS");
     StatusObject::instance()->update("tracker_time_resize", "N/A");
@@ -44,6 +45,8 @@ MainService::MainService(const char* params_path)
     StatusObject::instance()->update("web_time_jpeg", "N/A");
     StatusObject::instance()->update("tracking_status", "Target Not Selected");
     StatusObject::instance()->update("target_position", "N/A");
+    snprintf(res_buf, sizeof(res_buf), "%dx%d", m_params.width, m_params.height);
+    StatusObject::instance()->update("camera_resolution", res_buf);
 }
 
 MainService::~MainService()
@@ -123,19 +126,30 @@ void MainService::stop()
 void MainService::onFrame(uchar* frame, int w, int h)
 {
     std::lock_guard<std::mutex> lock(m_last_frame_copy_mutex);
+    std::chrono::steady_clock::time_point now;
+    long long elapsed;
+    float real_fps;
+    char fps_buf[32];
+
+    if (w * h > 1920 * 1280)
+    {
+        fprintf(stderr, "[MainService] Frame size %dx%d exceeds pre-allocated buffer size!\n", w, h);
+        return;
+    }
+
     memcpy(m_lastFrame, frame, w * h);
     m_lastFrame_w = w;
     m_lastFrame_h = h;
     m_has_last_frame = true;
 
     // Report Camera FPS to Status using 5-second rolling window
-    auto now = std::chrono::steady_clock::now();
+    now = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
         m_camera_frame_times.push(now);
         while (!m_camera_frame_times.empty())
         {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_camera_frame_times.front()).count();
+            elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_camera_frame_times.front()).count();
             if (elapsed >= 5)
             {
                 m_camera_frame_times.pop();
@@ -145,8 +159,7 @@ void MainService::onFrame(uchar* frame, int w, int h)
                 break;
             }
         }
-        float real_fps = m_camera_frame_times.size() / 5.0f;
-        char fps_buf[32];
+        real_fps = m_camera_frame_times.size() / 5.0f;
         snprintf(fps_buf, sizeof(fps_buf), "%.1f FPS", real_fps);
         StatusObject::instance()->update("camera_fps", fps_buf);
     }
@@ -170,6 +183,22 @@ void MainService::onTargetDetected(int x, int y)
     {
         StatusObject::instance()->update("tracking_status", "Target Lost");
         StatusObject::instance()->update("target_position", "N/A");
+    }
+}
+
+void MainService::onHeatmapCreated(const float* heatmap, int w, int h)
+{
+    if (m_web_server != NULL)
+    {
+        m_web_server->update_heatmap(heatmap, w, h);
+    }
+}
+
+void MainService::onStackCreated(const uchar* stack, int w, int h, int c)
+{
+    if (m_web_server != NULL)
+    {
+        m_web_server->update_stack(stack, w, h, c);
     }
 }
 
@@ -263,9 +292,7 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
     float y_n;
     int target_px;
     int target_py;
-    uchar* crop_buf;
-    int cy, cx;
-    int sy, sx;
+    char res_buf[64];
 
     w = 640;
     h = 480;
@@ -299,6 +326,9 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
                 m_params.cam_dev[sizeof(m_params.cam_dev) - 1] = '\0';
                 m_params.width = w;
                 m_params.height = h;
+
+                snprintf(res_buf, sizeof(res_buf), "%dx%d", w, h);
+                StatusObject::instance()->update("camera_resolution", res_buf);
             }
             break;
 
@@ -306,8 +336,21 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
             save_params_file(m_params_path, m_params);
             break;
 
+        case WebServer::CMD_RESET_TARGET:
+            m_tracker->clear_target();
+            if (m_web_server != NULL)
+            {
+                m_web_server->update_heatmap(NULL, 256, 256);
+                m_web_server->update_stack(NULL, 64, 64, 16);
+            }
+            m_target_x = -1;
+            m_target_y = -1;
+            StatusObject::instance()->update("tracking_status", "Target Not Selected");
+            StatusObject::instance()->update("target_position", "N/A");
+            break;
+
         case WebServer::CMD_CHOOSE_TARGET:
-            sscanf(values, "%f#%f", &x_n, &y_n);
+            sscanf(values, "%f,%f", &x_n, &y_n);
             
             // Only crop if we have valid camera frames active
             if (m_lastFrame_w > 0 && m_lastFrame_h > 0)
@@ -315,29 +358,8 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
                 target_px = (int)(x_n * m_lastFrame_w);
                 target_py = (int)(y_n * m_lastFrame_h);
 
-                // Crop a 64x64 template buffer around the click position
-                crop_buf = (uchar*)malloc(64 * 64);
-                
-                for (cy = 0; cy < 64; ++cy)
-                {
-                    sy = target_py - 32 + cy;
-                    for (cx = 0; cx < 64; ++cx)
-                    {
-                        sx = target_px - 32 + cx;
-                        if (sx >= 0 && sx < m_lastFrame_w && sy >= 0 && sy < m_lastFrame_h)
-                        {
-                            crop_buf[cy * 64 + cx] = m_lastFrame[sy * m_lastFrame_w + sx];
-                        }
-                        else
-                        {
-                            crop_buf[cy * 64 + cx] = 0;
-                        }
-                    }
-                }
-
-                // Initialize tracker reference templates
-                m_tracker->refresh_target(crop_buf, 64, 64);
-                free(crop_buf);
+                // Initialize tracker reference templates with full frame and target pixel coordinates
+                m_tracker->refresh_target(m_lastFrame, m_lastFrame_w, m_lastFrame_h, target_px, target_py);
 
                 // Reset tracker outputs coordinates to start fresh
                 m_target_x = (int)(x_n * 256.0f);
@@ -353,6 +375,10 @@ void MainService::main_loop()
     int work_w;
     int work_h;
     bool has_frame;
+    std::chrono::steady_clock::time_point now;
+    long long elapsed;
+    float real_fps;
+    char fps_buf[32];
 
     work_frame = (uchar*)malloc(1920 * 1280);
     work_w = 0;
@@ -392,13 +418,13 @@ void MainService::main_loop()
             // Calculate Tracker FPS using 5-second rolling window if target is defined
             if (m_tracker->is_target_defined())
             {
-                auto now = std::chrono::steady_clock::now();
+                now = std::chrono::steady_clock::now();
                 {
                     std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
                     m_tracker_frame_times.push(now);
                     while (!m_tracker_frame_times.empty())
                     {
-                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_tracker_frame_times.front()).count();
+                        elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_tracker_frame_times.front()).count();
                         if (elapsed >= 5)
                         {
                             m_tracker_frame_times.pop();
@@ -408,8 +434,7 @@ void MainService::main_loop()
                             break;
                         }
                     }
-                    float real_fps = m_tracker_frame_times.size() / 5.0f;
-                    char fps_buf[32];
+                    real_fps = m_tracker_frame_times.size() / 5.0f;
                     snprintf(fps_buf, sizeof(fps_buf), "%.1f FPS", real_fps);
                     StatusObject::instance()->update("tracker_fps", fps_buf);
                 }

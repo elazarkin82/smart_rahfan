@@ -6,6 +6,28 @@ import numpy as np
 import configparser
 from tqdm.auto import tqdm
 
+# Global Normalization setting for dynamic layer configuration
+_NORMALIZATION_TYPE = "group_norm"
+_OVERRIDE_USE_BIAS = False
+
+_orig_conv2d = layers.Conv2D
+_orig_dw_conv2d = layers.DepthwiseConv2D
+
+def _smart_conv2d(*args, **kwargs):
+    global _NORMALIZATION_TYPE, _OVERRIDE_USE_BIAS
+    if _OVERRIDE_USE_BIAS and _NORMALIZATION_TYPE in ["batch_norm", "folded"]:
+        kwargs["use_bias"] = True
+    return _orig_conv2d(*args, **kwargs)
+
+def _smart_dw_conv2d(*args, **kwargs):
+    global _NORMALIZATION_TYPE, _OVERRIDE_USE_BIAS
+    if _OVERRIDE_USE_BIAS and _NORMALIZATION_TYPE in ["batch_norm", "folded"]:
+        kwargs["use_bias"] = True
+    return _orig_dw_conv2d(*args, **kwargs)
+
+layers.Conv2D = _smart_conv2d
+layers.DepthwiseConv2D = _smart_dw_conv2d
+
 # Save the original GroupNormalization
 if hasattr(layers, 'GroupNormalization'):
     GroupNormClass = layers.GroupNormalization
@@ -48,8 +70,14 @@ def get_safe_groups(channels, requested_groups=8):
     return 1
 
 def _GroupNormalization(channels, name=None, **kwargs):
-    g = get_safe_groups(channels)
-    return GroupNormClass(groups=g, name=name, **kwargs)
+    global _NORMALIZATION_TYPE
+    if _NORMALIZATION_TYPE == "batch_norm":
+        return layers.BatchNormalization(name=name, **kwargs)
+    elif _NORMALIZATION_TYPE == "folded":
+        return layers.Activation("linear", name=name, **kwargs)
+    else:
+        g = get_safe_groups(channels)
+        return SafeGroupNormalization(groups=g, name=name, **kwargs)
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 class DepthwiseCorrelationFusion(layers.Layer):
@@ -58,13 +86,23 @@ class DepthwiseCorrelationFusion(layers.Layer):
         
     def call(self, inputs):
         search_feat, ref_feat = inputs
-        def corr_single(x):
-            s, r = x
-            s = tf.expand_dims(s, 0)
-            r = tf.expand_dims(r, -1)
-            out = tf.nn.depthwise_conv2d(s, r, strides=[1, 1, 1, 1], padding="SAME")
-            return out[0]
-        return tf.map_fn(corr_single, [search_feat, ref_feat], fn_output_signature=tf.float32)
+        batch_size = search_feat.shape[0]
+        if batch_size is None:
+            batch_size = tf.shape(search_feat)[0]
+        h_s, w_s, c = search_feat.shape[1], search_feat.shape[2], search_feat.shape[3]
+        h_r, w_r = ref_feat.shape[1], ref_feat.shape[2]
+        
+        # Group batch elements along the channel dimension
+        s_transposed = tf.transpose(search_feat, [1, 2, 0, 3])
+        s_reshaped = tf.reshape(s_transposed, [1, h_s, w_s, batch_size * c])
+        
+        r_transposed = tf.transpose(ref_feat, [1, 2, 0, 3])
+        r_filter = tf.reshape(r_transposed, [h_r, w_r, batch_size * c, 1])
+        
+        out = tf.nn.depthwise_conv2d(s_reshaped, r_filter, strides=[1, 1, 1, 1], padding="SAME")
+        
+        out_reshaped = tf.reshape(out, [h_s, w_s, batch_size, c])
+        return tf.transpose(out_reshaped, [2, 0, 1, 3])
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 class DepthToSpace(layers.Layer):
@@ -98,13 +136,15 @@ def load_model_config(config_path="model.conf"):
     attn_mech = config.get("Attention", "mechanism", fallback="multi_head_cross")
     dec_type = config.get("Decoder", "type", fallback="unet")
     hm_loss_default = config.get("Loss", "heatmap_loss_default", fallback="adaptive_wing")
+    norm_type = config.get("Normalization", "type", fallback="group_norm")
     
     return {
         "shared_backbone": shared_backbone,
         "width_multiplier": width_mult,
         "attention_mechanism": attn_mech,
         "decoder_type": dec_type,
-        "heatmap_loss_default": hm_loss_default
+        "heatmap_loss_default": hm_loss_default,
+        "normalization_type": norm_type
     }
 
 def check_and_create_default_config(config_path="model.conf"):
@@ -132,6 +172,11 @@ type = unet
 # Default loss function for heatmap regression
 # Options: adaptive_wing, dbsz_relu, dbsz_soft, dbsz_hard, centernet_dice, focal_dice, mse
 heatmap_loss_default = adaptive_wing
+
+[Normalization]
+# Normalization Type
+# Options: group_norm, batch_norm
+type = group_norm
 """
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(default_content)
@@ -251,12 +296,112 @@ def centernet_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha
     dice_loss_val = 1.0 - (2.0 * intersection + eps) / (denominator + eps)
     return focal_weight * cn_loss + dice_weight * dice_loss_val
 
+def get_peak_coords_tf(heatmap, threshold=0.5, filter_size=5):
+    # 1. Apply threshold gate using the ReLU trick (NPU-friendly, no branching)
+    thresholded = tf.nn.relu(heatmap - threshold)
+    
+    # 2. Smooth using average pooling (strides=1 keeps dimensions intact)
+    smoothed = tf.nn.avg_pool2d(thresholded, ksize=filter_size, strides=1, padding='SAME')
+    
+    H = tf.shape(smoothed)[1]
+    W = tf.shape(smoothed)[2]
+    # Flatten spatial dimensions to (B, H*W)
+    flat_hm = tf.reshape(smoothed, [-1, H * W])
+    flat_idx = tf.argmax(flat_hm, axis=-1)
+    
+    # Convert flat indices back to y, x coordinates
+    W_64 = tf.cast(W, tf.int64)
+    y = tf.cast(flat_idx // W_64, tf.float32)
+    x = tf.cast(flat_idx % W_64, tf.float32)
+    return tf.stack([y, x], axis=-1)
+
+# =====================================================================
+# Batch Normalization Folding Helper
+# =====================================================================
+
+def get_all_leaf_layers(model):
+    leaf_layers = []
+    for layer in model.layers:
+        if hasattr(layer, "layers"):
+            leaf_layers.extend(get_all_leaf_layers(layer))
+        else:
+            leaf_layers.append(layer)
+    return leaf_layers
+
+def fold_model_weights(unfolded_model, folded_model):
+    unfolded_leafs = get_all_leaf_layers(unfolded_model)
+    folded_leafs = get_all_leaf_layers(folded_model)
+    
+    folded_layers = {layer.name: layer for layer in folded_leafs}
+    folded_bn_names = set()
+    folded_conv_names = set()
+    
+    for bn_layer in unfolded_leafs:
+        if bn_layer.__class__.__name__ == 'BatchNormalization':
+            try:
+                if hasattr(bn_layer.input, '_keras_history'):
+                    parent_layer, _, _ = bn_layer.input._keras_history
+                else:
+                    parent_layer, _, _ = bn_layer.input.keras_history
+            except Exception:
+                continue
+                
+            if parent_layer.__class__.__name__ in ('Conv2D', 'DepthwiseConv2D', 'Conv2DTranspose'):
+                bn_weights = bn_layer.get_weights()
+                if not bn_weights or len(bn_weights) < 4:
+                    continue
+                gamma, beta, mean, var = bn_weights
+                epsilon = bn_layer.epsilon
+                
+                conv_weights = parent_layer.get_weights()
+                if len(conv_weights) == 2:
+                    kernel, bias = conv_weights
+                elif len(conv_weights) == 1:
+                    kernel = conv_weights[0]
+                    bias = np.zeros((kernel.shape[-1],), dtype=np.float32)
+                else:
+                    continue
+                
+                scale = gamma / np.sqrt(var + epsilon)
+                
+                if parent_layer.__class__.__name__ == 'DepthwiseConv2D':
+                    depth_multiplier = kernel.shape[-1]
+                    c_in = kernel.shape[-2]
+                    scale_reshaped = np.reshape(scale, (1, 1, c_in, depth_multiplier))
+                    kernel_folded = kernel * scale_reshaped
+                elif parent_layer.__class__.__name__ == 'Conv2DTranspose':
+                    scale_reshaped = np.reshape(scale, (1, 1, -1, 1))
+                    kernel_folded = kernel * scale_reshaped
+                else:
+                    scale_reshaped = np.reshape(scale, (1, 1, 1, -1))
+                    kernel_folded = kernel * scale_reshaped
+                    
+                bias_folded = (bias - mean) * scale + beta
+                
+                folded_conv_layer = folded_layers.get(parent_layer.name)
+                if folded_conv_layer is not None:
+                    folded_conv_layer.set_weights([kernel_folded, bias_folded])
+                    folded_bn_names.add(bn_layer.name)
+                    folded_conv_names.add(parent_layer.name)
+                    print(f"Folded BN '{bn_layer.name}' into Conv '{parent_layer.name}'")
+                    
+    for layer in unfolded_leafs:
+        if layer.__class__.__name__ == 'BatchNormalization':
+            continue
+        if layer.name in folded_bn_names or layer.name in folded_conv_names:
+            continue
+        folded_layer = folded_layers.get(layer.name)
+        if folded_layer is not None:
+            weights = layer.get_weights()
+            if weights:
+                folded_layer.set_weights(weights)
+
 # =====================================================================
 # Target Tracker Ver Pixel Class
 # =====================================================================
 
 class TargetTrackerVerPixel:
-    def __init__(self, ref_shape=(1, 64, 64, 16), search_shape=(256, 256, 1), config_path="model.conf"):
+    def __init__(self, ref_shape=(64, 64, 16), search_shape=(256, 256, 1), config_path="model.conf"):
         self.ref_shape = ref_shape
         self.search_shape = search_shape
         self.model = None
@@ -270,7 +415,8 @@ class TargetTrackerVerPixel:
                 "width_multiplier": 1.0,
                 "attention_mechanism": "multi_head_cross",
                 "decoder_type": "unet",
-                "heatmap_loss_default": "adaptive_wing"
+                "heatmap_loss_default": "adaptive_wing",
+                "normalization_type": "group_norm"
             }
 
     def _inverted_residual_block(self, inputs, expansion, filters, strides, name_prefix):
@@ -452,6 +598,15 @@ class TargetTrackerVerPixel:
         return models.Model(inputs, [x1, x2, x3, x], name="shared_siamese_backbone")
 
     def create_model(self):
+        global _NORMALIZATION_TYPE, _OVERRIDE_USE_BIAS
+        _NORMALIZATION_TYPE = self.config.get("normalization_type", "group_norm")
+        _OVERRIDE_USE_BIAS = True
+        try:
+            return self._create_model_impl()
+        finally:
+            _OVERRIDE_USE_BIAS = False
+
+    def _create_model_impl(self):
         ref_input = layers.Input(shape=self.ref_shape, name="reference_stack") # (1, 64, 64, 16)
         search_input = layers.Input(shape=self.search_shape, name="search_frame") # (256, 256, 1)
         
@@ -459,7 +614,11 @@ class TargetTrackerVerPixel:
         shared_backbone = self._create_shared_backbone()
         
         # 2. Process Reference Stack (Template)
-        if self.ref_shape[0] == 1:
+        if len(self.ref_shape) == 3:
+            # Native 4D format: (B, 64, 64, 16) -> transpose to (B, 16, 64, 64) -> reshape to (B*16, 64, 64, 1)
+            ref_transposed = tf.transpose(ref_input, perm=[0, 3, 1, 2])
+            ref_reshaped = tf.reshape(ref_transposed, (-1, self.ref_shape[0], self.ref_shape[1], 1))
+        elif self.ref_shape[0] == 1:
             # New format: (B, 1, 64, 64, 16) -> transpose to (B, 16, 64, 64, 1) -> reshape to (B*16, 64, 64, 1)
             ref_transposed = tf.transpose(ref_input, perm=[0, 4, 2, 3, 1])
             ref_reshaped = tf.reshape(ref_transposed, (-1, self.ref_shape[1], self.ref_shape[2], 1))
@@ -472,7 +631,10 @@ class TargetTrackerVerPixel:
         ref_outputs = shared_backbone(ref_resized)
         ref_final_features = ref_outputs[-1] # Shape: (None * 16, 8, 8, C)
         
-        num_layers = self.ref_shape[0] if self.ref_shape[0] > 1 else self.ref_shape[3]
+        if len(self.ref_shape) == 3:
+            num_layers = self.ref_shape[2]
+        else:
+            num_layers = self.ref_shape[0] if self.ref_shape[0] > 1 else self.ref_shape[3]
         ref_features_split = tf.reshape(ref_final_features, (-1, num_layers, 8, 8, ref_final_features.shape[-1]))
         ref_features = tf.reduce_mean(ref_features_split, axis=1)
         
@@ -659,6 +821,23 @@ class TargetTrackerVerPixel:
         
         return self.model
 
+    def fold_and_save(self, folded_output_path):
+        if self.model is None:
+            raise ValueError("Model is not built yet.")
+            
+        import copy
+        folded_tracker = self.__class__(ref_shape=self.ref_shape, search_shape=self.search_shape)
+        folded_tracker.config = copy.deepcopy(self.config)
+        folded_tracker.config["normalization_type"] = "folded"
+        
+        folded_model = folded_tracker.create_model()
+        fold_model_weights(self.model, folded_model)
+        
+        if os.path.dirname(folded_output_path):
+            os.makedirs(os.path.dirname(folded_output_path), exist_ok=True)
+        folded_model.save(folded_output_path)
+        print(f"Saved folded model to {folded_output_path}")
+
     def log(self, message, log_file=None):
         import tqdm
         tqdm.tqdm.write(message)
@@ -687,7 +866,17 @@ class TargetTrackerVerPixel:
             else:
                 loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
                 
-            loss_quality = loss_fn_quality(gt_quality, pred_quality)
+            if train_mode in ("quality_only", "joint"):
+                pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
+                gt_coords = get_peak_coords_tf(gt_heatmap, threshold=0.5, filter_size=5)
+                dist = tf.norm(pred_coords - gt_coords, axis=-1, keepdims=True)
+                dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
+                target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
+                target_quality = tf.stop_gradient(target_quality)
+            else:
+                target_quality = gt_quality
+
+            loss_quality = loss_fn_quality(target_quality, pred_quality)
             
             if train_mode == "heatmap_only":
                 loss_value = loss_heatmap
@@ -732,7 +921,17 @@ class TargetTrackerVerPixel:
                 else:
                     loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
                     
-                loss_quality = loss_fn_quality(gt_quality, pred_quality)
+                if train_mode in ("quality_only", "joint"):
+                    pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
+                    gt_coords = get_peak_coords_tf(gt_heatmap, threshold=0.5, filter_size=5)
+                    dist = tf.norm(pred_coords - gt_coords, axis=-1, keepdims=True)
+                    dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
+                    target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
+                    target_quality = tf.stop_gradient(target_quality)
+                else:
+                    target_quality = gt_quality
+                
+                loss_quality = loss_fn_quality(target_quality, pred_quality)
                 
                 if train_mode == "heatmap_only":
                     loss_value = loss_heatmap
@@ -832,6 +1031,9 @@ class TargetTrackerVerPixel:
                 if os.path.dirname(best_train_loss_output):
                     os.makedirs(os.path.dirname(best_train_loss_output), exist_ok=True)
                 self.model.save(best_train_loss_output)
+                if self.config.get("normalization_type", "group_norm") == "batch_norm":
+                    base, ext = os.path.splitext(best_train_loss_output)
+                    self.fold_and_save(f"{base}_fbn{ext}")
             
             val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, train_mode=train_mode, steps=val_steps)
             self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} (HM: {epoch_hm:.6f}, Q: {epoch_q:.6f}) | Val Loss: {val_loss:.6f} (HM: {val_hm:.6f}, Q: {val_q:.6f})", log_file)
@@ -843,6 +1045,12 @@ class TargetTrackerVerPixel:
                     if os.path.dirname(output_path):
                         os.makedirs(os.path.dirname(output_path), exist_ok=True)
                     self.model.save(output_path)
+                    if self.config.get("normalization_type", "group_norm") == "batch_norm":
+                        base, ext = os.path.splitext(output_path)
+                        self.fold_and_save(f"{base}_fbn{ext}")
+                        dir_name = os.path.dirname(output_path)
+                        self.fold_and_save(os.path.join(dir_name, "tracker_pxl_fbn.keras"))
+                        self.fold_and_save(os.path.join(dir_name, "tracker_model_fbn.keras"))
             
             import gc
             gc.collect()
@@ -850,6 +1058,37 @@ class TargetTrackerVerPixel:
 # =====================================================================
 # Dataset Pipeline
 # =====================================================================
+
+def read_hdf5_sliced(dataset_obj, indices, chunk_size=10000):
+    """
+    Slices a large HDF5 dataset. If the dataset fits in less than 50% of available memory,
+    we read the entire dataset contiguously to RAM and slice it in memory, bypassing
+    h5py's extremely slow scattered index selection.
+    """
+    import numpy as np
+    import psutil
+    
+    mem = psutil.virtual_memory()
+    total_dataset_bytes = dataset_obj.shape[0] * np.prod(dataset_obj.shape[1:]) * 4
+    
+    if total_dataset_bytes < mem.available * 0.50:
+        # Contiguous block read (very fast)
+        data = dataset_obj[:]
+        return data[indices]
+        
+    # Fallback to memory-safe sorted index chunks
+    chunks = []
+    for i in range(0, len(indices), chunk_size):
+        batch_idx = indices[i:i + chunk_size]
+        sort_idx = np.argsort(batch_idx)
+        sorted_idx = batch_idx[sort_idx]
+        
+        chunk_data = dataset_obj[sorted_idx]
+        
+        unsort_idx = np.argsort(sort_idx)
+        chunks.append(chunk_data[unsort_idx])
+        
+    return np.concatenate(chunks, axis=0)
 
 def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mode="joint"):
     import h5py
@@ -873,39 +1112,6 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
         selected_indices = indices[:val_size]
     else:
         selected_indices = indices[val_size:]
-        
-    # Now, read the qualities first to do filtering/balancing if needed
-    with h5py.File(h5_path, 'r') as f:
-        # Read all qualities into memory first to avoid unsorted indexing errors in h5py
-        all_qualities = f['ground_truth_quality'][:]
-        qualities = all_qualities[selected_indices]
-        
-    qualities = qualities.squeeze(-1) # shape (M,)
-    
-    if train_mode == "heatmap_only" and not is_val:
-        # Stage 1 positive filtering: keep only positive samples (quality > 0.5)
-        pos_mask = qualities > 0.5
-        selected_indices = selected_indices[pos_mask]
-    elif train_mode == "quality_only" and not is_val:
-        # Stage 2 50-50 balancing
-        pos_mask = qualities > 0.5
-        neg_mask = ~pos_mask
-        
-        pos_indices = selected_indices[pos_mask]
-        neg_indices = selected_indices[neg_mask]
-        
-        n_pos = len(pos_indices)
-        n_neg = len(neg_indices)
-        
-        n_balanced = min(n_pos, n_neg)
-        # Select matching number of negatives
-        neg_indices_balanced = neg_indices[:n_balanced]
-        pos_indices_balanced = pos_indices[:n_balanced]
-        
-        selected_indices = np.concatenate([pos_indices_balanced, neg_indices_balanced])
-        # Shuffle again deterministically
-        np.random.RandomState(42).shuffle(selected_indices)
-        
     # Make divisible by batch_size to avoid partial batch tails
     num_selected = len(selected_indices)
     if num_selected % batch_size != 0:
@@ -916,95 +1122,95 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
         raise ValueError(f"No samples remaining after filtering/balancing for train_mode={train_mode}, is_val={is_val}")
         
     # Check RAM caching capability using psutil
-    # Calculate expected memory usage: total selected samples * ~768KB
-    sample_size_bytes = (1 * 64 * 64 * 16 + 256 * 256 * 1 + 256 * 256 * 1) * 4 + 4
+    sample_size_bytes = (64 * 64 * 16 + 256 * 256 * 1 + 256 * 256 * 1) * 4 + 4
     total_expected_bytes = len(selected_indices) * sample_size_bytes
     
     mem = psutil.virtual_memory()
-    # If the dataset size is less than 75% of available memory, cache the whole thing in RAM
-    if total_expected_bytes < mem.available * 0.75:
+    
+    # Calculate fallback chunk size for dynamic disk streaming
+    target_chunk_bytes = mem.available * 0.15
+    disk_chunk_size = int(target_chunk_bytes // sample_size_bytes)
+    disk_chunk_size = max(2000, min(8000, disk_chunk_size))
+    disk_chunk_size = (disk_chunk_size // batch_size) * batch_size
+    if disk_chunk_size == 0:
+        disk_chunk_size = batch_size
+        
+    # Cache to RAM only if it occupies less than 40% of currently available memory
+    if total_expected_bytes < mem.available * 0.40:
         print(f"Caching dataset to RAM ({len(selected_indices)} samples, {total_expected_bytes / (1024**3):.2f} GB)...")
-
         with h5py.File(h5_path, 'r') as f:
-            # Efficient index sorting for faster HDF5 slicing
-            print("1")
-            sort_idx = np.argsort(selected_indices)
-            print("2")
-            sorted_indices = selected_indices[sort_idx]
-            print("3")
-            # Read in sorted order (much faster for H5 index slicing)
-            ref_data = f['reference_stack'][sorted_indices]
-            print("4")
-            search_data = f['search_frame'][sorted_indices]
-            print("5")
-            heatmap_data = f['ground_truth_heatmap'][sorted_indices]
-            print("6")
-            quality_data = f['ground_truth_quality'][sorted_indices]
-            print("7")
-            # Restore original shuffled order
-            unsort_idx = np.argsort(sort_idx)
-            print("8")
-            ref_data = ref_data[unsort_idx]
-            print("9")
-            search_data = search_data[unsort_idx]
-            print("10")
-            heatmap_data = heatmap_data[unsort_idx]
-            print("11")
-            quality_data = quality_data[unsort_idx]
-            print("12")
-
+            ref_data = read_hdf5_sliced(f['reference_stack'], selected_indices)
+            search_data = read_hdf5_sliced(f['search_frame'], selected_indices)
+            heatmap_data = read_hdf5_sliced(f['ground_truth_heatmap'], selected_indices)
+            quality_data = read_hdf5_sliced(f['ground_truth_quality'], selected_indices)
+            
         print("Dataset successfully cached to RAM.")
         
-        # Create a tf.data.Dataset from generator
-        def ram_generator():
-            # Shuffle at the start of each epoch if training
+        # Generator yielding chunks from preloaded RAM arrays to prevent GPU OOM
+        def chunk_generator():
+            import math
             local_indices = np.arange(len(selected_indices))
             if not is_val:
                 np.random.shuffle(local_indices)
-            for idx in local_indices:
+                
+            ram_chunk_size = 5000
+            num_chunks = int(math.ceil(len(local_indices) / ram_chunk_size))
+            for i in range(num_chunks):
+                chunk_idx = local_indices[i * ram_chunk_size : (i + 1) * ram_chunk_size]
                 yield (
-                    ref_data[idx],
-                    search_data[idx]
+                    ref_data[chunk_idx],
+                    search_data[chunk_idx]
                 ), (
-                    heatmap_data[idx],
-                    quality_data[idx]
+                    heatmap_data[chunk_idx],
+                    quality_data[chunk_idx]
                 )
     else:
-        # Load in chunks or use generator direct from H5 file
-        print(f"Dataset does not fit in RAM (requires {total_expected_bytes / (1024**3):.2f} GB, available {mem.available / (1024**3):.2f} GB). Streaming from HDF5...")
+        # Load dynamically in memory-safe chunks directly from HDF5
+        print(f"Dataset streaming from HDF5 (requires {total_expected_bytes / (1024**3):.2f} GB, available {mem.available / (1024**3):.2f} GB). Chunk size: {disk_chunk_size} samples.")
         
-        # Generator streaming directly from HDF5
-        def ram_generator():
-            # Open and close the file within the generator loop to handle multiprocessing safety
-            with h5py.File(h5_path, 'r') as f:
-                local_indices = selected_indices.copy()
-                if not is_val:
-                    np.random.shuffle(local_indices)
-                for idx in local_indices:
-                    yield (
-                        f['reference_stack'][idx],
-                        f['search_frame'][idx]
-                    ), (
-                        f['ground_truth_heatmap'][idx],
-                        f['ground_truth_quality'][idx]
-                    )
+        def chunk_generator():
+            import math
+            local_indices = selected_indices.copy()
+            if not is_val:
+                np.random.shuffle(local_indices)
+                
+            num_chunks = int(math.ceil(len(local_indices) / disk_chunk_size))
+            for i in range(num_chunks):
+                chunk_idx = local_indices[i * disk_chunk_size : (i + 1) * disk_chunk_size]
+                
+                with h5py.File(h5_path, 'r') as f:
+                    ref_chunk = read_hdf5_sliced(f['reference_stack'], chunk_idx)
+                    search_chunk = read_hdf5_sliced(f['search_frame'], chunk_idx)
+                    heatmap_chunk = read_hdf5_sliced(f['ground_truth_heatmap'], chunk_idx)
+                    quality_chunk = read_hdf5_sliced(f['ground_truth_quality'], chunk_idx)
                     
-    # Define output signature (batch dimension will be added by ds.batch)
+                yield (ref_chunk, search_chunk), (heatmap_chunk, quality_chunk)
+                
+                ref_chunk = None
+                search_chunk = None
+                heatmap_chunk = None
+                quality_chunk = None
+                gc.collect()
+                
+    # Define output signature with dynamic leading dimension
     output_signature = (
         (
-            tf.TensorSpec(shape=(1, 64, 64, 16), dtype=tf.float32, name="reference_stack"),
-            tf.TensorSpec(shape=(256, 256, 1), dtype=tf.float32, name="search_frame")
+            tf.TensorSpec(shape=(None, 64, 64, 16), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32)
         ),
         (
-            tf.TensorSpec(shape=(256, 256, 1), dtype=tf.float32, name="heatmap"),
-            tf.TensorSpec(shape=(1,), dtype=tf.float32, name="quality")
+            tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
         )
     )
     
-    ds = tf.data.Dataset.from_generator(ram_generator, output_signature=output_signature)
-    
+    ds = tf.data.Dataset.from_generator(chunk_generator, output_signature=output_signature)
+    ds = ds.unbatch()
+        
     # Map to format required by Keras models
     def process_element(inputs, targets):
+        if isinstance(inputs, dict):
+            return inputs, targets
         ref, search = inputs
         heatmap, quality = targets
         return {"reference_stack": ref, "search_frame": search}, {"predicted_heatmap": heatmap, "predicted_quality": quality}
@@ -1013,6 +1219,7 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     
+    gc.collect()
     return ds, len(selected_indices)
 
 def main():
@@ -1071,13 +1278,12 @@ def main():
         print(f"Val samples: {val_samples} ({val_steps} steps/epoch)")
         
         tracker = TargetTrackerVerPixel()
+        print("Building TargetTrackerVerPixel model...")
+        tracker.create_model()
         
         if args.init_keras_file and os.path.exists(args.init_keras_file):
-            print(f"Resuming training: loading model from {args.init_keras_file}...")
-            tracker.model = tf.keras.models.load_model(args.init_keras_file, compile=False, safe_mode=False)
-        else:
-            print("Building new TargetTrackerVerPixel model...")
-            tracker.create_model()
+            print(f"Resuming training: loading weights from {args.init_keras_file}...")
+            tracker.model.load_weights(args.init_keras_file, by_name=True, skip_mismatch=True)
             
         tracker.train(
             train_dataset=train_ds,

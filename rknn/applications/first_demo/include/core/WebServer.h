@@ -15,13 +15,16 @@ public:
     {
         CMD_UPDATE_CAMERA_PARAMS = 1,
         CMD_SAVE_PARAMS = 2,
-        CMD_CHOOSE_TARGET = 3
+        CMD_CHOOSE_TARGET = 3,
+        CMD_RESET_TARGET = 4
     };
 
     class CommandCallback
     {
     public:
-        virtual ~CommandCallback() {}
+        virtual ~CommandCallback()
+        {
+        }
         virtual void onCommand(Command key, const char* values, int len) = 0;
     };
 
@@ -40,12 +43,24 @@ private:
     int m_target_y;
     bool m_has_new_frame;
 
+    // Heatmap stream state & buffers
+    bool m_has_new_heatmap;
+    bool m_is_heatmap_streaming;
+    uchar* m_heatmap_rgb_buf;
+    uchar* m_heatmap_jpeg_buf;
+    unsigned long m_heatmap_jpeg_size;
+
     // Pre-allocated JPEG output buffers
     uchar* m_jpeg_buf;
     unsigned long m_jpeg_size;
 
-    // Helper compression function
+    // Stack layer JPEGs cache
+    uchar* m_stack_jpeg_bufs[16];
+    unsigned long m_stack_jpeg_sizes[16];
+
+    // Helper compression functions
     void compress_gray_to_jpeg(const uchar* gray_buf, int w, int h, uchar* dest_buf, unsigned long* dest_size);
+    void compress_rgb_to_jpeg(const uchar* rgb_buf, int w, int h, uchar* dest_buf, unsigned long* dest_size);
 
 public:
     WebServer(int port);
@@ -53,12 +68,19 @@ public:
 
     void set_command_callback(CommandCallback* cb);
     void update(uchar* frame, int w, int h, int target_x, int target_y);
+    void update_heatmap(const float* heatmap, int w, int h);
+    void update_stack(const uchar* stack, int w, int h, int c);
+    void get_stack_layer(int idx, const uchar** jpeg_dest, unsigned long* jpeg_len);
     void trigger_command(Command key, const char* values);
 
     // Stream synchronization API called by CivetWeb handlers
     bool is_streaming() const;
     void set_streaming(bool state);
     void wait_for_frame(uchar* jpeg_dest, unsigned long* jpeg_len);
+
+    bool is_heatmap_streaming() const;
+    void set_heatmap_streaming(bool state);
+    void wait_for_heatmap(uchar* jpeg_dest, unsigned long* jpeg_len);
 };
 
 #endif

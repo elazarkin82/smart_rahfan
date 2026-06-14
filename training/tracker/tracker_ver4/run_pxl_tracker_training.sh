@@ -43,7 +43,7 @@
 #   - joint         : Train both branches jointly (default).
 # =====================================================================
 
-mkdir -p outputs
+mkdir -p outputs_pxl
 
 # Note: Batch size is determined by how the dataset was batched during the 
 # create_batched_dataset.py step.
@@ -53,9 +53,9 @@ mkdir -p outputs
 # --dataset_dir: Can receive multiple space-separated directories (e.g. carla + real data)
 # --loss_heatmap dbsz_relu: (Default) Uses the Relu-based DBSZ loss for flat background suppression.
 python3 tracker_ver4_pxl.py train \
-    --dataset_dir dataset_generator/dataset_carla dataset_generator/compiled \
-    --num_of_epochs 10 \
-    --lr 1e-4 \
+    --dataset_dir dataset_generator/compiled \
+    --num_of_epochs 50 \
+    --lr 1e-3 \
     --loss_heatmap dbsz_relu \
     --loss_quality bce \
     --train_mode joint \
