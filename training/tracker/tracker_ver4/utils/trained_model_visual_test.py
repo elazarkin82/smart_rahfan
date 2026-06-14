@@ -10,7 +10,7 @@ import cv2
 from PIL import Image, ImageDraw, ImageTk
 
 class ModelInferenceVisualizer:
-    def __init__(self, root, dataset_dir, model_path, threshold=0.5, min_blob_size=30):
+    def __init__(self, root, dataset_dir, model_path, threshold=0.5, min_blob_size=30, no_filters=False):
         # Import tracker_model to register custom layers (like SafeGroupNormalization)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         sys.path.append(script_dir)
@@ -21,6 +21,7 @@ class ModelInferenceVisualizer:
         
         self.threshold = threshold
         self.min_blob_size = min_blob_size
+        self.no_filters = no_filters
         self.model_path = model_path
         self.is_tflite = model_path.endswith('.tflite')
         
@@ -164,7 +165,7 @@ class ModelInferenceVisualizer:
                 
                 # Compute target_2d dynamically from the peak of gt_heatmap
                 hm_np = gt_heatmap[:, :, 0]
-                if np.max(hm_np) > 0.1:
+                if np.max(hm_np) > 1e-6:
                     py, px = np.unravel_index(np.argmax(hm_np), hm_np.shape)
                     target_2d = (px, py)
                 else:
@@ -263,38 +264,40 @@ class ModelInferenceVisualizer:
             raw_heatmap = pred_heatmap[:, :, 0].copy()
             heatmap = pred_heatmap[:, :, 0]
             
-            # Apply threshold filter (noise gate)
-            heatmap = np.where(heatmap >= self.threshold, heatmap, 0.0)
-            
-            # Apply connected component (blob size) filter
-            if self.min_blob_size > 0:
-                h, w = heatmap.shape
-                visited = np.zeros((h, w), dtype=bool)
-                for y in range(h):
-                    for x in range(w):
-                        if heatmap[y, x] > 0.0 and not visited[y, x]:
-                            blob_pixels = []
-                            queue = [(y, x)]
-                            visited[y, x] = True
-                            head = 0
-                            while head < len(queue):
-                                cy, cx = queue[head]
-                                head += 1
-                                blob_pixels.append((cy, cx))
+            # Apply threshold filter (noise gate) and connected component filter if enabled
+            if not self.no_filters:
+                # Apply threshold filter (noise gate)
+                heatmap = np.where(heatmap >= self.threshold, heatmap, 0.0)
+                
+                # Apply connected component (blob size) filter
+                if self.min_blob_size > 0:
+                    h, w = heatmap.shape
+                    visited = np.zeros((h, w), dtype=bool)
+                    for y in range(h):
+                        for x in range(w):
+                            if heatmap[y, x] > 0.0 and not visited[y, x]:
+                                blob_pixels = []
+                                queue = [(y, x)]
+                                visited[y, x] = True
+                                head = 0
+                                while head < len(queue):
+                                    cy, cx = queue[head]
+                                    head += 1
+                                    blob_pixels.append((cy, cx))
+                                    
+                                    for dy in [-1, 0, 1]:
+                                        for dx in [-1, 0, 1]:
+                                            if dy == 0 and dx == 0:
+                                                continue
+                                            ny, nx = cy + dy, cx + dx
+                                            if 0 <= ny < h and 0 <= nx < w:
+                                                if heatmap[ny, nx] > 0.0 and not visited[ny, nx]:
+                                                    visited[ny, nx] = True
+                                                    queue.append((ny, nx))
                                 
-                                for dy in [-1, 0, 1]:
-                                    for dx in [-1, 0, 1]:
-                                        if dy == 0 and dx == 0:
-                                            continue
-                                        ny, nx = cy + dy, cx + dx
-                                        if 0 <= ny < h and 0 <= nx < w:
-                                            if heatmap[ny, nx] > 0.0 and not visited[ny, nx]:
-                                                visited[ny, nx] = True
-                                                queue.append((ny, nx))
-                            
-                            if len(blob_pixels) < self.min_blob_size:
-                                for cy, cx in blob_pixels:
-                                    heatmap[cy, cx] = 0.0
+                                if len(blob_pixels) < self.min_blob_size:
+                                    for cy, cx in blob_pixels:
+                                        heatmap[cy, cx] = 0.0
             
             flat_idx = np.argmax(heatmap)
             y_max, x_max = np.unravel_index(flat_idx, heatmap.shape)
@@ -360,15 +363,25 @@ class ModelInferenceVisualizer:
             self.ref_lbl.config(text="Target Features")
             self.search_lbl.config(text=curr_lbl_text, fg=curr_lbl_fg)
             
+            gt_q_base = meta.get("quality")
+            if gt_q_base is None:
+                gt_q_base = meta.get("ground_truth_quality", 1.0)
+
             if target_2d is not None:
                 error = np.sqrt((pred_norm[0] - norm_x)**2 + (pred_norm[1] - norm_y)**2) * 256.0
                 error_str = f"Error: {error:.1f}px"
+                # Calculate dynamic True Quality exactly as done during training:
+                if gt_q_base > 0.5:
+                    true_quality = max(1.0 - (error / 30.0), 0.0)
+                else:
+                    true_quality = 0.0
             else:
                 error_str = "Error: N/A"
+                true_quality = 0.0
             
             self.expected_heatmap_lbl.config(text="GT Heatmap")
             self.raw_predicted_heatmap_lbl.config(text="Raw Predicted HM")
-            self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {pred_quality:.2f}", fg="#33ff33")
+            self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {true_quality:.2f}", fg="#33ff33")
             
             self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
             
@@ -386,6 +399,7 @@ def main():
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--threshold", type=float, default=0.5, help="Heatmap noise threshold")
     parser.add_argument("--min_blob_size", type=int, default=30, help="Minimum connected component size to keep")
+    parser.add_argument("--no_filters", action="store_true", help="Disable heatmap threshold and blob size filters")
     args = parser.parse_args()
     
     root = tk.Tk()
@@ -394,7 +408,8 @@ def main():
         args.dataset_dir, 
         args.model_path, 
         threshold=args.threshold, 
-        min_blob_size=args.min_blob_size
+        min_blob_size=args.min_blob_size,
+        no_filters=args.no_filters
     )
     root.mainloop()
 

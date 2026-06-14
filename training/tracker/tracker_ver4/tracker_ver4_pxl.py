@@ -296,6 +296,25 @@ def centernet_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha
     dice_loss_val = 1.0 - (2.0 * intersection + eps) / (denominator + eps)
     return focal_weight * cn_loss + dice_weight * dice_loss_val
 
+def get_peak_coords_tf(heatmap, threshold=0.5, filter_size=5):
+    # 1. Apply threshold gate using the ReLU trick (NPU-friendly, no branching)
+    thresholded = tf.nn.relu(heatmap - threshold)
+    
+    # 2. Smooth using average pooling (strides=1 keeps dimensions intact)
+    smoothed = tf.nn.avg_pool2d(thresholded, ksize=filter_size, strides=1, padding='SAME')
+    
+    H = tf.shape(smoothed)[1]
+    W = tf.shape(smoothed)[2]
+    # Flatten spatial dimensions to (B, H*W)
+    flat_hm = tf.reshape(smoothed, [-1, H * W])
+    flat_idx = tf.argmax(flat_hm, axis=-1)
+    
+    # Convert flat indices back to y, x coordinates
+    W_64 = tf.cast(W, tf.int64)
+    y = tf.cast(flat_idx // W_64, tf.float32)
+    x = tf.cast(flat_idx % W_64, tf.float32)
+    return tf.stack([y, x], axis=-1)
+
 # =====================================================================
 # Batch Normalization Folding Helper
 # =====================================================================
@@ -847,7 +866,17 @@ class TargetTrackerVerPixel:
             else:
                 loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
                 
-            loss_quality = loss_fn_quality(gt_quality, pred_quality)
+            if train_mode in ("quality_only", "joint"):
+                pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
+                gt_coords = get_peak_coords_tf(gt_heatmap, threshold=0.5, filter_size=5)
+                dist = tf.norm(pred_coords - gt_coords, axis=-1, keepdims=True)
+                dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
+                target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
+                target_quality = tf.stop_gradient(target_quality)
+            else:
+                target_quality = gt_quality
+
+            loss_quality = loss_fn_quality(target_quality, pred_quality)
             
             if train_mode == "heatmap_only":
                 loss_value = loss_heatmap
@@ -892,7 +921,17 @@ class TargetTrackerVerPixel:
                 else:
                     loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
                     
-                loss_quality = loss_fn_quality(gt_quality, pred_quality)
+                if train_mode in ("quality_only", "joint"):
+                    pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
+                    gt_coords = get_peak_coords_tf(gt_heatmap, threshold=0.5, filter_size=5)
+                    dist = tf.norm(pred_coords - gt_coords, axis=-1, keepdims=True)
+                    dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
+                    target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
+                    target_quality = tf.stop_gradient(target_quality)
+                else:
+                    target_quality = gt_quality
+                
+                loss_quality = loss_fn_quality(target_quality, pred_quality)
                 
                 if train_mode == "heatmap_only":
                     loss_value = loss_heatmap

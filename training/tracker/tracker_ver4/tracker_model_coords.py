@@ -218,154 +218,8 @@ type = group_norm
         sys.exit(0)
 
 # =====================================================================
-# Custom Losses for Continuous Heatmap Regression
+# Coordinate-Based Loss Helpers
 # =====================================================================
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-def dbsz_hard_loss(y_true, y_pred, c_bg=1.0):
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    
-    mask_high = tf.cast(y_true >= 0.5, tf.float32)
-    mask_low = tf.cast(y_true <= 0.01, tf.float32)
-    
-    n_high = tf.reduce_sum(mask_high) + 1e-5
-    n_low = tf.reduce_sum(mask_low) + 1e-5
-    
-    loss_high = tf.reduce_sum(mask_high * tf.abs(y_true - y_pred)) / n_high
-    loss_low = tf.reduce_sum(mask_low * tf.square(y_true - y_pred)) / n_low
-    
-    return loss_high + c_bg * loss_low
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-def dbsz_soft_loss(y_true, y_pred, c_bg=1.0):
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    
-    w_high = tf.pow(y_true, 4.0)
-    w_low = tf.pow(1.0 - y_true, 16.0)
-    
-    loss_high = tf.reduce_sum(w_high * tf.abs(y_true - y_pred)) / (tf.reduce_sum(w_high) + 1e-5)
-    loss_low = tf.reduce_sum(w_low * tf.square(y_true - y_pred)) / (tf.reduce_sum(w_low) + 1e-5)
-    
-    return loss_high + c_bg * loss_low
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-def dbsz_relu_loss(y_true, y_pred, border=0.35, c_bg=1.0):
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    
-    w_high = tf.nn.relu(y_true - border)
-    w_low = tf.nn.relu(border - y_true)
-    
-    k1 = 1.0 / (tf.reduce_sum(w_high) + 1e-5)
-    k = 1.0 / (tf.reduce_sum(w_low) + 1e-5)
-    
-    loss_high = k1 * tf.reduce_sum(w_high * tf.square(y_true - y_pred))
-    loss_low = k * tf.reduce_sum(w_low * tf.square(y_true - y_pred))
-    
-    return loss_high + c_bg * loss_low
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-def adaptive_wing_loss(y_true, y_pred, alpha=2.1, omega=14.0, epsilon=1.0, theta=0.5):
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    
-    diff = tf.abs(y_true - y_pred)
-    exponent = alpha - y_true
-    
-    diff_clipped = tf.maximum(diff, 1e-7)
-    ratio = diff_clipped / epsilon
-    ratio_pow = tf.pow(ratio, exponent)
-    
-    loss_small = omega * tf.math.log1p(ratio_pow)
-    
-    theta_ratio = theta / epsilon
-    theta_ratio_pow = tf.pow(theta_ratio, exponent)
-    theta_ratio_pow_minus_1 = tf.pow(theta_ratio, exponent - 1.0)
-    
-    s = (omega / epsilon) * exponent * theta_ratio_pow_minus_1 / (1.0 + theta_ratio_pow)
-    C = s * theta - omega * tf.math.log1p(theta_ratio_pow)
-    
-    loss_large = s * diff - C
-    loss = tf.where(diff < theta, loss_small, loss_large)
-    return tf.reduce_mean(loss)
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-def dice_bce_loss(y_true, y_pred, bce_weight=1.0, dice_weight=1.0):
-    y_true_f = tf.reshape(y_true, [-1])
-    y_pred_f = tf.reshape(y_pred, [-1])
-    
-    bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
-    bce_loss = tf.reduce_mean(bce)
-    
-    intersection = tf.reduce_sum(y_true_f * y_pred_f)
-    union = tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f)
-    eps = 1e-12
-    dice_coef = (2. * intersection + eps) / (union + eps)
-    dice_loss = 1.0 - dice_coef
-    
-    return bce_weight * bce_loss + dice_weight * dice_loss
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
-    eps = 1e-7
-    y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
-    
-    bce_pos = - y_true * tf.math.log(y_pred) * tf.math.pow(1.0 - y_pred, gamma)
-    bce_neg = - (1.0 - y_true) * tf.math.log(1.0 - y_pred) * tf.math.pow(y_pred, gamma)
-    
-    loss = alpha * bce_pos + (1.0 - alpha) * bce_neg
-    return tf.reduce_mean(loss)
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-def focal_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha=0.25, gamma=2.0):
-    eps = 1e-7
-    y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
-    
-    # 1. Continuous Focal Loss
-    bce_pos = - y_true * tf.math.log(y_pred) * tf.math.pow(1.0 - y_pred, gamma)
-    bce_neg = - (1.0 - y_true) * tf.math.log(1.0 - y_pred) * tf.math.pow(y_pred, gamma)
-    focal_loss_val = tf.reduce_mean(alpha * bce_pos + (1.0 - alpha) * bce_neg)
-    
-    # 2. Soft Dice Loss (Square Form) for continuous heatmaps
-    y_true_f = tf.reshape(tf.cast(y_true, tf.float32), [-1])
-    y_pred_f = tf.reshape(tf.cast(y_pred, tf.float32), [-1])
-    
-    intersection = tf.reduce_sum(y_true_f * y_pred_f)
-    denominator = tf.reduce_sum(tf.square(y_true_f)) + tf.reduce_sum(tf.square(y_pred_f))
-    dice_loss_val = 1.0 - (2.0 * intersection + eps) / (denominator + eps)
-    
-    return focal_weight * focal_loss_val + dice_weight * dice_loss_val
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-def centernet_focal_loss(y_true, y_pred, alpha=2.0, beta=4.0):
-    eps = 1e-7
-    y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
-    
-    # Soft continuous formulation of CenterNet Penalty-Reduced Focal Loss:
-    # y_true acts as the anchor, and (1 - y_true)^beta suppresses background penalty near the peak
-    pos_loss = - y_true * tf.math.pow(1.0 - y_pred, alpha) * tf.math.log(y_pred)
-    neg_loss = - tf.math.pow(1.0 - y_true, beta) * tf.math.pow(y_pred, alpha) * tf.math.log(1.0 - y_pred)
-    
-    loss = pos_loss + neg_loss
-    return tf.reduce_mean(loss)
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-def centernet_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha=2.0, beta=4.0):
-    eps = 1e-7
-    # 1. CenterNet Focal Loss
-    cn_loss = centernet_focal_loss(y_true, y_pred, alpha=alpha, beta=beta)
-    
-    # 2. Soft Dice Loss (Square Form)
-    y_true_f = tf.reshape(tf.cast(y_true, tf.float32), [-1])
-    y_pred_f = tf.reshape(tf.cast(y_pred, tf.float32), [-1])
-    
-    intersection = tf.reduce_sum(y_true_f * y_pred_f)
-    denominator = tf.reduce_sum(tf.square(y_true_f)) + tf.reduce_sum(tf.square(y_pred_f))
-    dice_loss_val = 1.0 - (2.0 * intersection + eps) / (denominator + eps)
-    
-    return focal_weight * cn_loss + dice_weight * dice_loss_val
 
 def get_peak_coords_tf(heatmap, threshold=0.5, filter_size=5):
     # 1. Apply threshold gate using the ReLU trick (NPU-friendly, no branching)
@@ -385,6 +239,53 @@ def get_peak_coords_tf(heatmap, threshold=0.5, filter_size=5):
     y = tf.cast(flat_idx // W_64, tf.float32)
     x = tf.cast(flat_idx % W_64, tf.float32)
     return tf.stack([y, x], axis=-1)
+
+def soft_argmax_2d(heatmap, beta=30.0):
+    # heatmap has shape (B, H, W, 1)
+    B = tf.shape(heatmap)[0]
+    H = tf.shape(heatmap)[1]
+    W = tf.shape(heatmap)[2]
+    
+    # Flatten spatial dimensions
+    flat_hm = tf.reshape(heatmap, [B, H * W]) # shape (B, H*W)
+    
+    # Apply softmax with temperature beta
+    probs = tf.nn.softmax(beta * flat_hm, axis=-1) # shape (B, H*W)
+    
+    # Create coordinates grid
+    y_grid, x_grid = tf.meshgrid(tf.range(H, dtype=tf.float32), tf.range(W, dtype=tf.float32), indexing='ij')
+    
+    # Flatten grids
+    flat_y = tf.reshape(y_grid, [-1]) # shape (H*W,)
+    flat_x = tf.reshape(x_grid, [-1]) # shape (H*W,)
+    
+    # Compute expected values
+    pred_y = tf.reduce_sum(probs * flat_y, axis=-1, keepdims=True) # shape (B, 1)
+    pred_x = tf.reduce_sum(probs * flat_x, axis=-1, keepdims=True) # shape (B, 1)
+    
+    return tf.concat([pred_y, pred_x], axis=-1) # shape (B, 2)
+
+def get_gt_peak_coords(gt_heatmap):
+    H = tf.shape(gt_heatmap)[1]
+    W = tf.shape(gt_heatmap)[2]
+    flat_hm = tf.reshape(gt_heatmap, [-1, H * W])
+    flat_idx = tf.argmax(flat_hm, axis=-1)
+    W_64 = tf.cast(W, tf.int64)
+    y = tf.cast(flat_idx // W_64, tf.float32)
+    x = tf.cast(flat_idx % W_64, tf.float32)
+    return tf.stack([y, x], axis=-1)
+
+def coordinate_distance_loss(gt_heatmap, pred_heatmap, gt_quality):
+    pred_coords_soft = soft_argmax_2d(pred_heatmap, beta=30.0)
+    gt_coords_soft = get_gt_peak_coords(gt_heatmap)
+    
+    huber = tf.keras.losses.Huber(delta=1.0, reduction=tf.keras.losses.Reduction.NONE)
+    loss_coords = huber(gt_coords_soft, pred_coords_soft)
+    loss_coords = tf.reshape(loss_coords, [-1, 1])
+    
+    pos_mask = tf.cast(gt_quality > 0.5, tf.float32)
+    masked_loss_coords = loss_coords * pos_mask
+    return tf.reduce_sum(masked_loss_coords) / (tf.reduce_sum(pos_mask) + 1e-7)
 
 # =====================================================================
 # Batch Normalization Folding Helper
@@ -471,7 +372,7 @@ def fold_model_weights(unfolded_model, folded_model):
 # Target Tracker Ver 4 Class
 # =====================================================================
 
-class TargetTrackerVer4:
+class TargetTrackerVer4Coords:
     def __init__(self, ref_shape=(64, 64, 16), search_shape=(256, 256, 1), config_path="model.conf"):
         self.ref_shape = ref_shape
         self.search_shape = search_shape
@@ -974,7 +875,9 @@ class TargetTrackerVer4:
             
         # Final prediction heatmap
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
-        output_heatmap = HeatmapNormalization(name="predicted_heatmap")(output_heatmap_raw)
+        output_heatmap_norm = HeatmapNormalization(name="predicted_heatmap_norm")(output_heatmap_raw)
+        thresholded = tf.nn.relu(output_heatmap_norm - 0.5)
+        output_heatmap = layers.AveragePooling2D(pool_size=5, strides=1, padding='same', name="predicted_heatmap")(thresholded)
         
         # 4. Heatmap-Guided Classification Branch
         hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap)
@@ -997,7 +900,7 @@ class TargetTrackerVer4:
         self.model = models.Model(
             inputs=[ref_input, search_input],
             outputs=[output_heatmap, output_quality],
-            name="TargetTrackerVer4"
+            name="TargetTrackerVer4Coords"
         )
         
         print("\\n" + "="*50)
@@ -1038,7 +941,7 @@ class TargetTrackerVer4:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(message + "\n")
 
-    def evaluate(self, dataset, loss_fn_heatmap, loss_fn_quality, train_mode="joint", steps=None):
+    def evaluate(self, dataset, loss_fn_quality, train_mode="joint", steps=None):
         val_loss_avg = tf.keras.metrics.Mean()
         val_hm_loss_avg = tf.keras.metrics.Mean()
         val_q_loss_avg = tf.keras.metrics.Mean()
@@ -1054,7 +957,7 @@ class TargetTrackerVer4:
             if train_mode == "quality_only":
                 loss_heatmap = tf.constant(0.0, dtype=tf.float32)
             else:
-                loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
+                loss_heatmap = coordinate_distance_loss(gt_heatmap, pred_heatmap, gt_quality)
                 
             if train_mode in ("quality_only", "joint"):
                 pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
@@ -1087,7 +990,7 @@ class TargetTrackerVer4:
             
         return float(val_loss_avg.result()), float(val_hm_loss_avg.result()), float(val_q_loss_avg.result())
 
-    def train_epoch(self, dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_epochs, train_mode="joint", steps=None, shuffle=True):
+    def train_epoch(self, dataset, optimizer, loss_fn_quality, epoch, num_epochs, train_mode="joint", steps=None, shuffle=True):
         if shuffle:
             buffer_size = steps if (steps is not None and steps > 0) else 100
             buffer_size = min(32, buffer_size)
@@ -1109,7 +1012,7 @@ class TargetTrackerVer4:
                 if train_mode == "quality_only":
                     loss_heatmap = tf.constant(0.0, dtype=tf.float32)
                 else:
-                    loss_heatmap = loss_fn_heatmap(gt_heatmap, pred_heatmap)
+                    loss_heatmap = coordinate_distance_loss(gt_heatmap, pred_heatmap, gt_quality)
                     
                 if train_mode in ("quality_only", "joint"):
                     pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
@@ -1145,30 +1048,7 @@ class TargetTrackerVer4:
             
         return float(epoch_loss_avg.result()), float(epoch_hm_loss_avg.result()), float(epoch_q_loss_avg.result())
 
-    def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_heatmap="adaptive_wing", loss_quality="bce", train_mode="joint", c_bg=3.0, dbsz_border=0.35, output_path=None, best_train_loss_output=None, log_file=None):
-        if loss_heatmap == "mse":
-            loss_fn_heatmap = losses.MeanSquaredError()
-        elif loss_heatmap == "dice_bce":
-            loss_fn_heatmap = dice_bce_loss
-        elif loss_heatmap == "focal":
-            loss_fn_heatmap = focal_loss
-        elif loss_heatmap == "focal_dice":
-            loss_fn_heatmap = focal_dice_loss
-        elif loss_heatmap == "centernet":
-            loss_fn_heatmap = centernet_focal_loss
-        elif loss_heatmap == "centernet_dice":
-            loss_fn_heatmap = centernet_dice_loss
-        elif loss_heatmap == "adaptive_wing":
-            loss_fn_heatmap = adaptive_wing_loss
-        elif loss_heatmap == "dbsz_hard":
-            loss_fn_heatmap = lambda y_true, y_pred: dbsz_hard_loss(y_true, y_pred, c_bg=c_bg)
-        elif loss_heatmap == "dbsz_soft":
-            loss_fn_heatmap = lambda y_true, y_pred: dbsz_soft_loss(y_true, y_pred, c_bg=c_bg)
-        elif loss_heatmap == "dbsz_relu":
-            loss_fn_heatmap = lambda y_true, y_pred: dbsz_relu_loss(y_true, y_pred, border=dbsz_border, c_bg=c_bg)
-        else:
-            raise ValueError(f"Unknown heatmap loss: {loss_heatmap}")
-            
+    def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_quality="bce", train_mode="joint", output_path=None, best_train_loss_output=None, log_file=None):
         if loss_quality == "bce":
             loss_fn_quality = losses.BinaryCrossentropy()
         elif loss_quality == "mse":
@@ -1209,12 +1089,12 @@ class TargetTrackerVer4:
         optimizer = optimizers.Adam(learning_rate=lr, jit_compile=False)
         
         self.log(f"Calculating initial validation loss (Mode: {train_mode})...", log_file)
-        best_val_loss, init_val_hm, init_val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, train_mode=train_mode, steps=val_steps)
+        best_val_loss, init_val_hm, init_val_q = self.evaluate(val_dataset, loss_fn_quality, train_mode=train_mode, steps=val_steps)
         best_train_loss = float('inf')
         self.log(f"Initial Validation Loss: {best_val_loss:.6f} (HM: {init_val_hm:.6f}, Q: {init_val_q:.6f})", log_file)
         
         for epoch in range(1, num_of_epochs + 1):
-            epoch_loss, epoch_hm, epoch_q = self.train_epoch(train_dataset, optimizer, loss_fn_heatmap, loss_fn_quality, epoch, num_of_epochs, train_mode=train_mode, steps=train_steps)
+            epoch_loss, epoch_hm, epoch_q = self.train_epoch(train_dataset, optimizer, loss_fn_quality, epoch, num_of_epochs, train_mode=train_mode, steps=train_steps)
             
             if best_train_loss_output and epoch_loss < best_train_loss:
                 self.log(f"   [TRAIN IMPROVEMENT] Train loss improved from {best_train_loss:.6f} to {epoch_loss:.6f}. Saving to {best_train_loss_output}", log_file)
@@ -1223,10 +1103,10 @@ class TargetTrackerVer4:
                     os.makedirs(os.path.dirname(best_train_loss_output), exist_ok=True)
                 self.model.save(best_train_loss_output)
                 if self.config.get("normalization_type", "group_norm") == "batch_norm":
-                    base, ext = os.path.splitext(best_train_loss_output)
-                    self.fold_and_save(f"{base}_fbn{ext}")
+                     base, ext = os.path.splitext(best_train_loss_output)
+                     self.fold_and_save(f"{base}_fbn{ext}")
             
-            val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_heatmap, loss_fn_quality, train_mode=train_mode, steps=val_steps)
+            val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_quality, train_mode=train_mode, steps=val_steps)
             self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} (HM: {epoch_hm:.6f}, Q: {epoch_q:.6f}) | Val Loss: {val_loss:.6f} (HM: {val_hm:.6f}, Q: {val_q:.6f})", log_file)
             
             if val_loss < best_val_loss:
@@ -1415,27 +1295,15 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
 def main():
     import argparse
     
-    # We can pre-load config loss default if model.conf exists
-    default_hm_loss = "dbsz_relu"
-    if os.path.exists("model.conf"):
-        try:
-            cfg = load_model_config("model.conf")
-            default_hm_loss = cfg.get("heatmap_loss_default", "dbsz_relu")
-        except Exception:
-            pass
-
-    parser = argparse.ArgumentParser(description="TargetTrackerVer4 Training CLI")
+    parser = argparse.ArgumentParser(description="TargetTrackerVer4Coords Training CLI")
     parser.add_argument("command", choices=["train"])
     parser.add_argument("--dataset_dir", nargs="+", required=True, help="One or more paths to dataset directories containing dataset.h5")
     parser.add_argument("--batch_size", type=int, default=16, help="Training batch size")
     parser.add_argument("--val_split", type=float, default=0.1, help="Validation split ratio")
-    parser.add_argument("--dbsz_border", type=float, default=0.35, help="Border parameter for dbsz_relu_loss")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_of_epochs", type=int, default=10)
-    parser.add_argument("--loss_heatmap", choices=["mse", "dice_bce", "focal", "focal_dice", "centernet", "centernet_dice", "adaptive_wing", "dbsz_hard", "dbsz_soft", "dbsz_relu"], default=default_hm_loss)
     parser.add_argument("--loss_quality", choices=["bce", "mse", "huber", "logcosh"], default="bce")
     parser.add_argument("--train_mode", choices=["joint", "heatmap_only", "quality_only"], default="joint", help="Training mode: heatmap_only, quality_only, or joint")
-    parser.add_argument("--c_bg", type=float, default=3.0, help="Background suppression weight factor for DBSZ losses")
     parser.add_argument("--output", type=str, default="outputs/tracker.keras")
     parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_best_train.keras")
     parser.add_argument("--init_keras_file", type=str, default=None, help="Path to initial model to resume from")
@@ -1467,8 +1335,8 @@ def main():
         print(f"Train samples: {train_samples} ({train_steps} steps/epoch)")
         print(f"Val samples: {val_samples} ({val_steps} steps/epoch)")
         
-        tracker = TargetTrackerVer4()
-        print("Building TargetTrackerVer4 model...")
+        tracker = TargetTrackerVer4Coords()
+        print("Building TargetTrackerVer4Coords model...")
         tracker.create_model()
         
         if args.init_keras_file and os.path.exists(args.init_keras_file):
@@ -1482,11 +1350,8 @@ def main():
             num_of_epochs=args.num_of_epochs,
             train_steps=train_steps,
             val_steps=val_steps,
-            loss_heatmap=args.loss_heatmap,
             loss_quality=args.loss_quality,
             train_mode=args.train_mode,
-            c_bg=args.c_bg,
-            dbsz_border=args.dbsz_border,
             output_path=args.output,
             best_train_loss_output=args.best_train_loss_output,
             log_file=args.log_file
