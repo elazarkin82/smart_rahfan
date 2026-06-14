@@ -223,7 +223,7 @@ type = group_norm
 
 def get_peak_coords_tf(heatmap, threshold=0.5, filter_size=5):
     # 1. Apply threshold gate using the ReLU trick (NPU-friendly, no branching)
-    thresholded = tf.nn.relu(heatmap - threshold)
+    thresholded = tf.nn.relu(heatmap - threshold) * 2.0
     
     # 2. Smooth using average pooling (strides=1 keeps dimensions intact)
     smoothed = tf.nn.avg_pool2d(thresholded, ksize=filter_size, strides=1, padding='SAME')
@@ -876,7 +876,7 @@ class TargetTrackerVer4Coords:
         # Final prediction heatmap
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
         output_heatmap_norm = HeatmapNormalization(name="predicted_heatmap_norm")(output_heatmap_raw)
-        thresholded = tf.nn.relu(output_heatmap_norm - 0.5)
+        thresholded = tf.nn.relu(output_heatmap_norm - 0.5) * 2.0
         output_heatmap = layers.AveragePooling2D(pool_size=5, strides=1, padding='same', name="predicted_heatmap")(thresholded)
         
         # 4. Heatmap-Guided Classification Branch

@@ -381,7 +381,7 @@ class ModelInferenceVisualizer:
             
             self.expected_heatmap_lbl.config(text="GT Heatmap")
             self.raw_predicted_heatmap_lbl.config(text="Raw Predicted HM")
-            self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {true_quality:.2f}", fg="#33ff33")
+            self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {pred_quality:.2f}", fg="#33ff33")
             
             self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
             

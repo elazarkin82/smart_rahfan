@@ -180,6 +180,12 @@ def main():
         default=1e-5,
         help="Learning rate for QAT training (default: 1e-5)"
     )
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="Max number of samples to train on per epoch (default: all)"
+    )
     
     args = parser.parse_args()
     
@@ -301,8 +307,14 @@ def main():
         epoch_dataset = dataset_loader.get_generator()
         
         steps_per_epoch = num_samples // args.batch_size
+        if args.max_samples is not None:
+            steps_per_epoch = min(steps_per_epoch, (args.max_samples + args.batch_size - 1) // args.batch_size)
+            steps_per_epoch = max(1, steps_per_epoch)
+            
         pbar = tqdm.tqdm(epoch_dataset, total=steps_per_epoch, desc=f"Epoch {epoch+1}")
         for batch in pbar:
+            if steps >= steps_per_epoch:
+                break
             inputs, targets = batch
             ref = inputs["reference_stack"]
             search = inputs["search_frame"]
@@ -336,17 +348,13 @@ def main():
             
         print(f"--> Epoch {epoch+1} Average Loss: {total_loss_accum / steps:.6f}")
         
-    # 7. Strip quantization wrappers and save Keras model
-    print("[*] Stripping quantization wrappers for TFLite compliance...")
-    with tfmot.quantization.keras.quantize_scope(custom_objects):
-        stripped_model = tfmot.quantization.keras.quantize_strip(qat_model)
-    
-    # Save the resulting model
+    # 7. Save Keras model directly (TFLiteConverter handles quantization wrappers during conversion)
     out_dir = os.path.dirname(args.keras_out)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
         
-    stripped_model.save(args.keras_out)
+    qat_model.optimizer = None
+    qat_model.save(args.keras_out)
     print(f"[SUCCESS] QAT-optimized model saved to: {args.keras_out}")
 
 if __name__ == "__main__":

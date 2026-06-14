@@ -99,7 +99,12 @@ def main():
             "DepthToSpace": tracker_model.DepthToSpace,
             "HeatmapNormalization": tracker_model.HeatmapNormalization,
         }
-        loaded_model = tf.keras.models.load_model(args.keras_in, compile=False, safe_mode=False, custom_objects=custom_objects)
+        if args.qat or "qat" in os.path.basename(args.keras_in).lower():
+            import tensorflow_model_optimization as tfmot
+            with tfmot.quantization.keras.quantize_scope(custom_objects):
+                loaded_model = tf.keras.models.load_model(args.keras_in, compile=False, safe_mode=False)
+        else:
+            loaded_model = tf.keras.models.load_model(args.keras_in, compile=False, safe_mode=False, custom_objects=custom_objects)
         
         # Check model type
         is_pixel_model = (loaded_model.name == "TargetTrackerVerPixel")

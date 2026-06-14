@@ -13,11 +13,11 @@ cd "$SCRIPT_DIR"
 # --- QAT (Quantization-Aware Training) Config ---
 
 # Path to input pre-trained float32 Keras model
-KERAS_IN="outputs/tracker_fbn.keras"
+KERAS_IN="outputs/tracker_coords_fbn.keras"
 
 # Path to save QAT-optimized Keras model containing fake quantization parameters
 # (This model is stripped of tfmot training wrappers and is ready for conversion)
-KERAS_QAT_OUT="outputs/tracker_qat.keras"
+KERAS_QAT_OUT="outputs/tracker_coords_qat.keras"
 
 # QAT Training Mode:
 #   - "teacher-student" : Knowledge Distillation (student learns to match the teacher's float32 outputs)
@@ -31,7 +31,7 @@ H5_DATASET="dataset_generator/compiled/dataset.h5"
 QAT_EPOCHS=1
 
 # Batch size for QAT training
-QAT_BATCH_SIZE=16
+QAT_BATCH_SIZE=1
 
 # Learning rate for QAT (should be very small, e.g. 1e-5 or 1e-6, to avoid damaging pre-trained weights)
 QAT_LR=1e-5
@@ -62,7 +62,8 @@ python3 utils/quantization_optimization.py \
   --h5_dataset "$H5_DATASET" \
   --epochs "$QAT_EPOCHS" \
   --batch_size "$QAT_BATCH_SIZE" \
-  --lr "$QAT_LR"
+  --lr "$QAT_LR" \
+  --max_samples 16
 
 echo "[*] Converting QAT-optimized model to static TFLite..."
 python3 utils/convert_to_tflite_static.py \

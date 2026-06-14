@@ -369,7 +369,7 @@ def centernet_dice_loss(y_true, y_pred, focal_weight=1.0, dice_weight=1.0, alpha
 
 def get_peak_coords_tf(heatmap, threshold=0.5, filter_size=5):
     # 1. Apply threshold gate using the ReLU trick (NPU-friendly, no branching)
-    thresholded = tf.nn.relu(heatmap - threshold)
+    thresholded = tf.nn.relu(heatmap - threshold) * 2.0
     
     # 2. Smooth using average pooling (strides=1 keeps dimensions intact)
     smoothed = tf.nn.avg_pool2d(thresholded, ksize=filter_size, strides=1, padding='SAME')
