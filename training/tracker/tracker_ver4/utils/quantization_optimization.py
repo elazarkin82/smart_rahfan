@@ -216,8 +216,28 @@ def main():
         default=None,
         help="Max number of samples to train on per epoch (default: all)"
     )
-    
+    parser.add_argument(
+        "--output_ops",
+        default=None,
+        help="Comma-separated list of output layer names to optimize (e.g. 'predicted_heatmap'). "
+             "Only losses for these outputs are computed and only their upstream variables are updated. "
+             "If not set, all outputs are optimized."
+    )
+
     args = parser.parse_args()
+
+    # Determine which outputs to optimize (Python-level; evaluated once at @tf.function trace time)
+    _ALL_OUTPUTS = {"predicted_heatmap", "predicted_quality"}
+    if args.output_ops:
+        active_outputs = frozenset(o.strip() for o in args.output_ops.split(",") if o.strip())
+        # Validate
+        unknown = active_outputs - _ALL_OUTPUTS
+        if unknown:
+            print(f"[WARNING] Unknown output_ops ignored: {unknown}")
+            active_outputs = active_outputs & _ALL_OUTPUTS
+    else:
+        active_outputs = frozenset(_ALL_OUTPUTS)
+    print(f"[*] Active output ops for QAT loss: {sorted(active_outputs)}")
     
     # 1. Imports and environment checks
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -303,25 +323,43 @@ def main():
     optimizer = tf.keras.optimizers.Adam(learning_rate=args.lr, jit_compile=False)
     loss_fn_heatmap = tf.keras.losses.MeanSquaredError()
     loss_fn_quality = tf.keras.losses.BinaryCrossentropy()
-    
+
+    # Build the list of variable name fragments to exclude based on inactive output branches.
+    # This is a Python-level computation done once before @tf.function tracing.
+    _exclude_var_keys = []
+    if "predicted_quality" not in active_outputs:
+        _exclude_var_keys.extend(["quality", "predicted_quality"])
+    if "predicted_heatmap" not in active_outputs:
+        _exclude_var_keys.extend(["predicted_heatmap", "heatmap"])
+
     @tf.function
     def train_step_distill(ref, search):
-        # Teacher outputs (frozen float32 predictions)
-        # Call model directly to ensure Keras registers moving average updates
-        t_heatmap_val, t_quality_val = teacher_model([ref, search], training=False)
-        t_heatmap = tf.stop_gradient(t_heatmap_val)
-        t_quality = tf.stop_gradient(t_quality_val)
-        
+        # Teacher outputs (frozen float32 predictions) — only request what is needed
+        t_outputs = teacher_model([ref, search], training=False)
+        t_heatmap = tf.stop_gradient(t_outputs[0])
+
         with tf.GradientTape() as tape:
-            # Student outputs (QAT predictions)
-            s_heatmap, s_quality = qat_model([ref, search], training=True)
-            
-            # Loss calculations (distillation)
-            loss_hm = loss_fn_heatmap(t_heatmap, s_heatmap)
-            loss_q = loss_fn_quality(t_quality, s_quality)
-            total_loss = loss_hm + 0.5 * loss_q
-            
-        trainable_vars = [v for v in qat_model.trainable_variables if not any(k in v.name for k in ["quality", "predicted_quality"])]
+            s_outputs = qat_model([ref, search], training=True)
+            s_heatmap = s_outputs[0]
+
+            total_loss = tf.constant(0.0, dtype=tf.float32)
+            loss_hm = tf.constant(0.0, dtype=tf.float32)
+            loss_q = tf.constant(0.0, dtype=tf.float32)
+
+            # Python-level conditionals: evaluated once at trace time
+            if "predicted_heatmap" in active_outputs:
+                loss_hm = loss_fn_heatmap(t_heatmap, s_heatmap)
+                total_loss = total_loss + loss_hm
+
+            if "predicted_quality" in active_outputs:
+                t_quality = tf.stop_gradient(t_outputs[1])
+                loss_q = loss_fn_quality(t_quality, s_outputs[1])
+                total_loss = total_loss + 0.5 * loss_q
+
+        trainable_vars = [
+            v for v in qat_model.trainable_variables
+            if not any(k in v.name for k in _exclude_var_keys)
+        ]
         grads = tape.gradient(total_loss, trainable_vars)
         optimizer.apply_gradients(zip(grads, trainable_vars))
         return total_loss, loss_hm, loss_q
@@ -329,15 +367,25 @@ def main():
     @tf.function
     def train_step_gt(ref, search, gt_hm, gt_q):
         with tf.GradientTape() as tape:
-            # Student outputs (QAT predictions)
-            s_heatmap, s_quality = qat_model([ref, search], training=True)
-            
-            # Loss calculations (direct labels)
-            loss_hm = loss_fn_heatmap(gt_hm, s_heatmap)
-            loss_q = loss_fn_quality(gt_q, s_quality)
-            total_loss = loss_hm + 0.5 * loss_q
-            
-        trainable_vars = [v for v in qat_model.trainable_variables if not any(k in v.name for k in ["quality", "predicted_quality"])]
+            s_outputs = qat_model([ref, search], training=True)
+            s_heatmap = s_outputs[0]
+
+            total_loss = tf.constant(0.0, dtype=tf.float32)
+            loss_hm = tf.constant(0.0, dtype=tf.float32)
+            loss_q = tf.constant(0.0, dtype=tf.float32)
+
+            if "predicted_heatmap" in active_outputs:
+                loss_hm = loss_fn_heatmap(gt_hm, s_heatmap)
+                total_loss = total_loss + loss_hm
+
+            if "predicted_quality" in active_outputs:
+                loss_q = loss_fn_quality(gt_q, s_outputs[1])
+                total_loss = total_loss + 0.5 * loss_q
+
+        trainable_vars = [
+            v for v in qat_model.trainable_variables
+            if not any(k in v.name for k in _exclude_var_keys)
+        ]
         grads = tape.gradient(total_loss, trainable_vars)
         optimizer.apply_gradients(zip(grads, trainable_vars))
         return total_loss, loss_hm, loss_q

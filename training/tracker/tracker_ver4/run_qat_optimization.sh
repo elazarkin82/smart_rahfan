@@ -36,6 +36,14 @@ QAT_BATCH_SIZE=4
 # Learning rate for QAT (should be very small, e.g. 1e-5 or 1e-6, to avoid damaging pre-trained weights)
 QAT_LR=1e-5
 
+# Output ops to optimize during QAT.
+# Only outputs listed here will contribute to the loss; variables of other output branches are frozen.
+# Use a comma-separated list of output layer names.
+# Set to empty string to optimize ALL outputs (e.g. for final production QAT runs):
+#   OUTPUT_OPS=""
+# Optimize only the heatmap output (quality branch may degrade — acceptable for intermediate runs):
+OUTPUT_OPS="predicted_heatmap"
+
 
 # --- TFLite Converter Config ---
 
@@ -63,7 +71,8 @@ python3 utils/quantization_optimization.py \
   --epochs "$QAT_EPOCHS" \
   --batch_size "$QAT_BATCH_SIZE" \
   --lr "$QAT_LR" \
-  --max_samples 4000
+  --max_samples 4000 \
+  ${OUTPUT_OPS:+--output_ops "$OUTPUT_OPS"}
 
 echo "[*] Converting QAT-optimized model to static TFLite..."
 python3 utils/convert_to_tflite_static.py \
