@@ -144,67 +144,12 @@ JNIEXPORT jfloatArray JNICALL
 Java_elazarkin_ksg_tracker4_MainActivity_calculateLocalRefinedArgmaxCentroid(
         JNIEnv* env,
         jclass clazz,
-        jfloatArray heatmap,
-        jfloat threshold,
-        jint minBlobSize) {
+        jfloatArray heatmap) {
         
     jfloat* hm = env->GetFloatArrayElements(heatmap, nullptr);
     if (!hm) return nullptr;
     
-    // 1. Apply threshold filter (noise gate)
-    for (int i = 0; i < 65536; ++i) {
-        if (hm[i] < threshold) {
-            hm[i] = 0.0f;
-        }
-    }
-    
-    // 2. Apply connected component (blob size) filter
-    if (minBlobSize > 0) {
-        std::vector<bool> visited(65536, false);
-        std::vector<int> q(65536);
-        
-        for (int y = 0; y < 256; ++y) {
-            for (int x = 0; x < 256; ++x) {
-                int start_idx = y * 256 + x;
-                if (hm[start_idx] > 0.0f && !visited[start_idx]) {
-                    int head = 0;
-                    int tail = 0;
-                    
-                    q[tail++] = start_idx;
-                    visited[start_idx] = true;
-                    
-                    while (head < tail) {
-                        int curr = q[head++];
-                        int cy = curr / 256;
-                        int cx = curr % 256;
-                        
-                        for (int dy = -1; dy <= 1; ++dy) {
-                            for (int dx = -1; dx <= 1; ++dx) {
-                                if (dy == 0 && dx == 0) continue;
-                                int ny = cy + dy;
-                                int nx = cx + dx;
-                                if (ny >= 0 && ny < 256 && nx >= 0 && nx < 256) {
-                                    int n_idx = ny * 256 + nx;
-                                    if (hm[n_idx] > 0.0f && !visited[n_idx]) {
-                                        visited[n_idx] = true;
-                                        q[tail++] = n_idx;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    if (tail < minBlobSize) {
-                        for (int i = 0; i < tail; ++i) {
-                            hm[q[i]] = 0.0f;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // 3. Find absolute global peak (argmax)
+    // 1. Find absolute global peak (argmax)
     float max_val = -1.0f;
     int max_x = 128;
     int max_y = 128;
@@ -220,7 +165,7 @@ Java_elazarkin_ksg_tracker4_MainActivity_calculateLocalRefinedArgmaxCentroid(
         }
     }
     
-    // 4. Compute Center of Mass strictly within a local 5x5 window
+    // 2. Compute Center of Mass strictly within a local 5x5 window
     double sum_x = 0.0;
     double sum_y = 0.0;
     double total_mass = 0.0;
@@ -245,7 +190,7 @@ Java_elazarkin_ksg_tracker4_MainActivity_calculateLocalRefinedArgmaxCentroid(
     
     env->ReleaseFloatArrayElements(heatmap, hm, 0); // write-back modifications
     
-    // 5. Construct and return result array
+    // 3. Construct and return result array
     jfloatArray result = env->NewFloatArray(2);
     if (!result) return nullptr;
     

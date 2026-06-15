@@ -40,9 +40,7 @@ import java.util.concurrent.locks.Condition;
 public class FrameStreamActivity extends AppCompatActivity implements CameraHelper.FrameProcessor {
 
     private static final int CAMERA_PERMISSION_REQUEST_CODE = 1002;
-    private static final float CONFIDENCE_THRESHOLD = 0.20f;
-    private static final float HEATMAP_THRESHOLD = 0.50f;
-    private static final int MIN_BLOB_SIZE = 30;
+    private static final float CONFIDENCE_THRESHOLD = 0.30f;
 
     private static final int STATE_IDLE = 0;
     private static final int STATE_GATHERING = 1;
@@ -56,6 +54,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private TextView tutorialHud;
     private TextView lblStatus;
     private Button btnBack;
+    private androidx.appcompat.widget.SwitchCompat switchBypassQuality;
 
     private LinearLayout resultsPanel;
     private ImageView heatmapImageView;
@@ -118,6 +117,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         tutorialHud = findViewById(R.id.tutorial_hud);
         lblStatus = findViewById(R.id.lbl_status);
         btnBack = findViewById(R.id.btn_back);
+        switchBypassQuality = findViewById(R.id.switch_bypass_quality);
 
         resultsPanel = findViewById(R.id.results_panel);
         heatmapImageView = findViewById(R.id.heatmapImageView);
@@ -418,7 +418,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         long postStart = SystemClock.elapsedRealtime();
         // Calculate noise-immune sub-pixel centroid
-        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(outputHeatmap, HEATMAP_THRESHOLD, MIN_BLOB_SIZE);
+        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(outputHeatmap);
         long postDuration = SystemClock.elapsedRealtime() - postStart;
         
         float px = localCoords[0]; // relative x in [0.0, 1.0] inside the crop
@@ -495,16 +495,21 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             public void run() {
                 if (currentUiState != STATE_TRACKING) return;
                 
-                // If quality is below threshold, color the target circle in RED. If above, GREEN.
-                int circleColor = (qualityScore >= CONFIDENCE_THRESHOLD) ? Color.GREEN : Color.RED;
+                boolean bypassQuality = switchBypassQuality.isChecked();
+                boolean shouldDisplay = (qualityScore > CONFIDENCE_THRESHOLD) || bypassQuality;
                 
-                if (qualityScore < CONFIDENCE_THRESHOLD) {
-                    lblStatus.setText(String.format("Status: Weak Lock! Quality: %.2f", qualityScore));
+                if (shouldDisplay) {
+                    int circleColor = (qualityScore >= CONFIDENCE_THRESHOLD) ? Color.GREEN : Color.RED;
+                    lblStatus.setText(qualityScore < CONFIDENCE_THRESHOLD 
+                            ? String.format("Status: Weak Lock! Quality: %.2f (Bypassed)", qualityScore)
+                            : "Status: Active tracking");
+                    drawTrackingIndicator(lastTrackedX, lastTrackedY, width, height, circleColor);
                 } else {
-                    lblStatus.setText("Status: Active tracking");
+                    lblStatus.setText(String.format("Status: Weak Lock! Quality: %.2f", qualityScore));
+                    // Clear tracking indicator overlay when lock is weak and bypass is disabled
+                    Bitmap emptyBitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
+                    capturedImageView.setImageBitmap(emptyBitmap);
                 }
-                
-                drawTrackingIndicator(lastTrackedX, lastTrackedY, width, height, circleColor);
                 renderDiagnostics(outputHeatmap, currBuffer, fullFrameBmp, px, py);
 
                 txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
