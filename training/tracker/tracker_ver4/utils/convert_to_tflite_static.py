@@ -31,8 +31,9 @@ def transpose_preserves_memory_layout(shape, perm):
 def optimize_and_trim_model(model, trim_outputs=True):
     import tensorflow as tf
     if trim_outputs:
-        print(f"[Optimizer] Trimming model outputs: keeping only heatmap '{model.outputs[0].name}'")
-        model = tf.keras.models.Model(inputs=model.inputs, outputs=[model.outputs[0]], name=model.name + "_trimmed")
+        raw_heatmap_output = model.get_layer("predicted_heatmap_raw").output
+        print(f"[Optimizer] Trimming model outputs: keeping only raw heatmap '{raw_heatmap_output.name}'")
+        model = tf.keras.models.Model(inputs=model.inputs, outputs=[raw_heatmap_output], name=model.name + "_trimmed")
     return model
 
 def main():
@@ -334,7 +335,7 @@ def main():
     # Optimize conversion model (replace memory-layout-preserving transposes with reshapes)
     print("[*] Performing functional graph surgery on conversion model...")
     try:
-        conversion_model = optimize_and_trim_model(conversion_model, trim_outputs=False)
+        conversion_model = optimize_and_trim_model(conversion_model, trim_outputs=True)
         print("[+] Graph surgery completed successfully.")
     except Exception as surgery_err:
         print(f"[WARNING] Graph surgery failed: {surgery_err}. Proceeding with original model.")

@@ -41,9 +41,9 @@ python3 tracker_model_coords.py train \
     --num_of_epochs 80 \
     --lr 1e-5 \
     --loss_quality bce \
-    --output outputs/tracker_coords_2.keras \
-    --init_keras_file outputs/tracker_coords.keras \
-    --best_train_loss_output outputs/tracker_coords_2_best_train_loss.keras \
+    --output outputs/tracker_coords_3.keras \
+    --init_keras_file outputs/tracker_coords_3.keras \
+    --best_train_loss_output outputs/tracker_coords_3_best_train_loss.keras \
     --log_file outputs/train_coords.log \
     --train_mode heatmap_only \
     --batch_size 32

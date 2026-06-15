@@ -2,7 +2,7 @@
 
 model:
   name: "tracker_ver4_tflite"
-  tflite_model_path: "../../training/tracker/tracker_ver4/outputs/tracker_coords_2.tflite"
+  tflite_model_path: "../../training/tracker/tracker_ver4/outputs/tracker_coords_3.tflite"
   output_rknn_path: "./outputs/tracker_tflite.rknn"
 
 rknn_config:
@@ -24,7 +24,7 @@ quantization:
   dataset_path: "./configs/dataset.txt"
   
   # Quantization algorithm: 'normal' or 'mmse' (MMSE can provide better accuracy for some models)
-  quantized_algorithm: "normal"
+  quantized_algorithm: "mmse"
   
   # Quantized dtype: 'asymmetric_quantized-8' (INT8)
   quantized_dtype: "asymmetric_quantized-8"

@@ -290,32 +290,31 @@ def main():
             do_quant = False
             dataset = None
 
-    import io
     import re
 
-    class DualStream(object):
-        def __init__(self, original_stream):
-            self.original_stream = original_stream
-            self.buffer = io.StringIO()
+    log_file_path = "/tmp/convert_log.txt"
+    if os.path.exists(log_file_path):
+        try:
+            os.remove(log_file_path)
+        except Exception:
+            pass
 
-        def write(self, message):
-            self.original_stream.write(message)
-            self.buffer.write(message)
+    try:
+        log_file = open(log_file_path, "w", encoding="utf-8")
+        log_fd = log_file.fileno()
+    except Exception as e:
+        print(f"[WARNING] Could not open {log_file_path} for writing: {e}")
+        log_file_path = "./convert_log.txt"
+        log_file = open(log_file_path, "w", encoding="utf-8")
+        log_fd = log_file.fileno()
 
-        def flush(self):
-            self.original_stream.flush()
+    # Duplicate original stdout and stderr file descriptors
+    orig_stdout_fd = os.dup(1)
+    orig_stderr_fd = os.dup(2)
 
-        def getvalue(self):
-            return self.buffer.getvalue()
-
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    
-    dual_stdout = DualStream(original_stdout)
-    dual_stderr = DualStream(original_stderr)
-    
-    sys.stdout = dual_stdout
-    sys.stderr = dual_stderr
+    # Redirect FD 1 (stdout) and FD 2 (stderr) to the log file descriptor
+    os.dup2(log_fd, 1)
+    os.dup2(log_fd, 2)
 
     try:
         ret = rknn.build(
@@ -323,33 +322,55 @@ def main():
             dataset=dataset
         )
     finally:
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
+        # Restore original stdout and stderr
+        os.dup2(orig_stdout_fd, 1)
+        os.dup2(orig_stderr_fd, 2)
+        os.close(orig_stdout_fd)
+        os.close(orig_stderr_fd)
+        log_file.close()
 
-    build_log = dual_stdout.getvalue() + dual_stderr.getvalue()
-    
-    # Parse build logs for unsupported operators or CPU fallback warnings
+    # Read back the complete log
+    build_log = ""
+    try:
+        with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
+            build_log = f.read()
+    except Exception as e:
+        print(f"[ERROR] Failed to read log file: {e}")
+
+    # Print the captured compiler logs so the user still sees them in the terminal
+    sys.stdout.write(build_log)
+    sys.stdout.flush()
+
+    # Parse logs for warnings and CPU fallback operations
     log_lines = build_log.splitlines()
     cpu_fallbacks = []
     general_warnings = []
-    
+
     for line in log_lines:
         lower_line = line.lower()
-        if "unsupport" in lower_line or "fallback" in lower_line or "cpu" in lower_line:
-            if any(k in lower_line for k in ["numa", "cuda_executor", "devices.cc", "tensorflow", "estimat", "macs", "protobuf", "nvidia"]):
-                continue
-            cpu_fallbacks.append(line.strip())
-        elif "warning" in lower_line or "warn" in lower_line:
+        
+        # Capture RKNN build warnings
+        if "warning" in lower_line or "warn" in lower_line:
             if any(k in lower_line for k in ["protobuf", "tensorflow", "absl", "consider providing"]):
                 continue
             general_warnings.append(line.strip())
+
+        # Match network layer table entries with target 'CPU' (excluding standard Input/Output operators)
+        # Table row: "D RKNN: [18:52:35.952] 12  Transpose  INT8  CPU  ..."
+        match = re.search(r'(?:D RKNN:.*?\]\s+)?(\d+)\s+(\w+)\s+(\w+)\s+CPU', line)
+        if match:
+            op_id = match.group(1)
+            op_type = match.group(2)
+            data_type = match.group(3)
+            if op_type not in ["InputOperator", "OutputOperator"]:
+                cpu_fallbacks.append(f"Layer {op_id} ({op_type}, {data_type}): {line.strip()}")
 
     print("\n" + "="*60)
     print("         RKNN BUILD DIAGNOSTIC SUMMARY REPORT")
     print("="*60)
     
     if cpu_fallbacks:
-        print(f"\n[!] WARNING: Detected {len(cpu_fallbacks)} CPU fallback / unsupported operation logs:")
+        print(f"\n[!] WARNING: Detected {len(cpu_fallbacks)} NPU-to-CPU fallback operations:")
         for idx, item in enumerate(cpu_fallbacks, 1):
             print(f"  {idx}. {item}")
         print("\nThese operations will execute on the ARM CPU instead of the NPU, causing high latency.")
