@@ -18,7 +18,7 @@ rknn_config:
 
 quantization:
   # Enable INT8 quantization. If false, model compiles in FP16.
-  do_quantization: false
+  do_quantization: true
   
   # Path to the calibration dataset descriptor file
   dataset_path: "./configs/dataset.txt"

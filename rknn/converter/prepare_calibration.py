@@ -77,6 +77,10 @@ def main():
                 ref_expanded = np.expand_dims(ref_data, axis=0)      # Shape: (1, 64, 64, 16)
                 search_expanded = np.expand_dims(search_data, axis=0)  # Shape: (1, 256, 256, 1)
                 
+                # Transpose from NHWC to NCHW to match the ONNX model inputs
+                ref_expanded = np.transpose(ref_expanded, (0, 3, 1, 2))      # Shape: (1, 16, 64, 64)
+                search_expanded = np.transpose(search_expanded, (0, 3, 1, 2))  # Shape: (1, 1, 256, 256)
+                
                 # Define filenames
                 ref_filename = os.path.join(args.output_dir, f"ref_{i}.npy")
                 search_filename = os.path.join(args.output_dir, f"search_{i}.npy")
