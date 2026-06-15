@@ -28,7 +28,7 @@ QAT_TRAIN_MODE="teacher-student"
 H5_DATASET="dataset_generator/compiled/dataset.h5"
 
 # Number of epochs to run QAT fine-tuning (usually 1-3 is enough to adapt weights to quantization noise)
-QAT_EPOCHS=1
+QAT_EPOCHS=5
 
 # Batch size for QAT training
 QAT_BATCH_SIZE=4
@@ -38,7 +38,15 @@ QAT_LR=1e-5
 
 # Output ops to optimize during QAT.
 # Only outputs listed here will contribute to the loss; variables of other output branches are frozen.
-# Use a comma-separated list of output layer names.
+# Names are validated against the model's actual output names at runtime — a typo causes an error.
+#
+# Loss function used per output (auto-selected by output tensor shape):
+#   - Spatial heatmap outputs (H×W > 4) → SoftArgmaxCoordLoss
+#       Differentiable soft-argmax extracts [y, x] coordinates from the predicted heatmap,
+#       then a Huber loss is applied against the GT peak coords. Positive-sample masking
+#       based on whether the teacher heatmap contains a real peak (peak > 0.1).
+#   - Scalar / small outputs               → BinaryCrossentropy (default fallback: MSE)
+#
 # Set to empty string to optimize ALL outputs (e.g. for final production QAT runs):
 #   OUTPUT_OPS=""
 # Optimize only the heatmap output (quality branch may degrade — acceptable for intermediate runs):
