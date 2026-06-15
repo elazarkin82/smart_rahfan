@@ -37,28 +37,7 @@ else:
         import tensorflow_addons as tfa
         GroupNormClass = tfa.layers.GroupNormalization
     except ImportError:
-        class GroupNormClass(layers.Layer):
-            def __init__(self, groups=8, **kwargs):
-                super().__init__(**kwargs)
-                self.groups = groups
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-class SafeGroupNormalization(GroupNormClass):
-    def __init__(self, groups=8, **kwargs):
-        self.requested_groups = groups
-        super().__init__(groups=groups, **kwargs)
-        
-    def build(self, input_shape):
-        channels = input_shape[-1]
-        g = self.requested_groups
-        if channels is not None and g is not None:
-            if channels % g != 0:
-                for candidate in range(self.requested_groups, 0, -1):
-                    if channels % candidate == 0:
-                        g = candidate
-                        break
-        self.groups = g
-        super().build(input_shape)
+        GroupNormClass = None
 
 def get_safe_groups(channels, requested_groups=8):
     if channels is None or requested_groups is None:
@@ -78,7 +57,10 @@ def _GroupNormalization(channels, name=None, **kwargs):
         return layers.Activation("linear", name=name, **kwargs)
     else:
         g = get_safe_groups(channels)
-        return SafeGroupNormalization(groups=g, name=name, **kwargs)
+        if GroupNormClass is not None:
+            return GroupNormClass(groups=g, name=name, **kwargs)
+        else:
+            return layers.Layer(name=name, **kwargs)
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
 class DepthwiseCorrelationFusion(layers.Layer):

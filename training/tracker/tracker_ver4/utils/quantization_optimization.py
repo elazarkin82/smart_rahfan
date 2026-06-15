@@ -13,14 +13,20 @@ import os
 import sys
 import argparse
 
-# Disable XLA auto-clustering JIT compilation to bypass ptxas issues
-os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=-1"
-
 import tensorflow as tf
-tf.config.optimizer.set_jit(False)
-# Run in eager mode (run_functions_eagerly=True) to completely bypass local ptxas compiler errors on new GPUs.
-# Direct .call() invocation on models will be used to prevent eager memory leaks.
-tf.config.run_functions_eagerly(True)
+# Enable GPU memory growth
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        pass
+
+# Run in graph mode (run_functions_eagerly=False) which is required to update MovingAverageQuantizer.
+tf.config.run_functions_eagerly(False)
+
+import tensorflow_model_optimization as tfmot
 
 import numpy as np
 import tqdm
@@ -100,44 +106,68 @@ class MemorySafeDataset:
                 np.random.RandomState(42).shuffle(indices)
                 
                 num_batches = total_samples // batch_size
-                for idx in range(num_batches):
-                    batch_idx = indices[idx * batch_size : (idx + 1) * batch_size]
-                    
-                    # Sort indices for fast HDF5 slicing
-                    sorted_order = np.argsort(batch_idx)
-                    sorted_batch_idx = batch_idx[sorted_order]
-                    
-                    with h5py.File(self.h5_path, 'r') as f:
+                with h5py.File(self.h5_path, 'r') as f:
+                    for idx in range(num_batches):
+                        batch_idx = indices[idx * batch_size : (idx + 1) * batch_size]
+                        
+                        # Sort indices for fast HDF5 slicing
+                        sorted_order = np.argsort(batch_idx)
+                        sorted_batch_idx = batch_idx[sorted_order]
+                        
                         ref = f['reference_stack'][sorted_batch_idx].astype(np.float32)
                         search = f['search_frame'][sorted_batch_idx].astype(np.float32)
                         gt_hm = f['ground_truth_heatmap'][sorted_batch_idx].astype(np.float32)
                         gt_q = f['ground_truth_quality'][sorted_batch_idx].astype(np.float32)
                         
-                    # Restore original shuffled order
-                    rev_order = np.argsort(sorted_order)
-                    ref = ref[rev_order]
-                    search = search[rev_order]
-                    gt_hm = gt_hm[rev_order]
-                    gt_q = gt_q[rev_order]
-                    
-                    ref_tensor = tf.convert_to_tensor(ref, dtype=tf.float32)
-                    search_tensor = tf.convert_to_tensor(search, dtype=tf.float32)
-                    gt_hm_tensor = tf.convert_to_tensor(gt_hm, dtype=tf.float32)
-                    gt_q_tensor = tf.convert_to_tensor(gt_q, dtype=tf.float32)
-                    
-                    inputs = {"reference_stack": ref_tensor, "search_frame": search_tensor}
-                    targets = {"predicted_heatmap": gt_hm_tensor, "predicted_quality": gt_q_tensor}
-                    
-                    yield inputs, targets
-                    
-                    del ref, search, gt_hm, gt_q
-                    del ref_tensor, search_tensor, gt_hm_tensor, gt_q_tensor
-                    del inputs, targets
+                        # Restore original shuffled order
+                        rev_order = np.argsort(sorted_order)
+                        ref = ref[rev_order]
+                        search = search[rev_order]
+                        gt_hm = gt_hm[rev_order]
+                        gt_q = gt_q[rev_order]
+                        
+                        ref_tensor = tf.convert_to_tensor(ref, dtype=tf.float32)
+                        search_tensor = tf.convert_to_tensor(search, dtype=tf.float32)
+                        gt_hm_tensor = tf.convert_to_tensor(gt_hm, dtype=tf.float32)
+                        gt_q_tensor = tf.convert_to_tensor(gt_q, dtype=tf.float32)
+                        
+                        inputs = {"reference_stack": ref_tensor, "search_frame": search_tensor}
+                        targets = {"predicted_heatmap": gt_hm_tensor, "predicted_quality": gt_q_tensor}
+                        
+                        yield inputs, targets
+                        
+                        del ref, search, gt_hm, gt_q
+                        del ref_tensor, search_tensor, gt_hm_tensor, gt_q_tensor
+                        del inputs, targets
             return generator()
 
 def load_memory_safe_dataset(h5_path, batch_size=16):
     dataset_obj = MemorySafeDataset(h5_path, batch_size)
     return dataset_obj, dataset_obj.total_samples
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+class CustomLayerQuantizeConfig(tfmot.quantization.keras.QuantizeConfig):
+    def get_weights_and_quantizers(self, layer):
+        return []
+        
+    def get_activations_and_quantizers(self, layer):
+        return []
+        
+    def set_quantize_weights(self, layer, quantize_weights):
+        pass
+        
+    def set_quantize_activations(self, layer, quantize_activations):
+        pass
+        
+    def get_output_quantizers(self, layer):
+        return [
+            tfmot.quantization.keras.quantizers.MovingAverageQuantizer(
+                num_bits=8, per_axis=False, symmetric=False, narrow_range=False
+            )
+        ]
+        
+    def get_config(self):
+        return {}
 
 def main():
     parser = argparse.ArgumentParser(description="Apply QAT to Tracker Ver 4 Keras model.")
@@ -221,10 +251,10 @@ def main():
     # 2. Load the pre-trained float32 model
     print(f"[*] Loading pre-trained model from: {args.keras_in} ...")
     custom_objects = {
-        "SafeGroupNormalization": tracker_model.SafeGroupNormalization,
         "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
         "DepthToSpace": tracker_model.DepthToSpace,
         "HeatmapNormalization": tracker_model.HeatmapNormalization,
+        "CustomLayerQuantizeConfig": CustomLayerQuantizeConfig,
     }
     
     with tfmot.quantization.keras.quantize_scope(custom_objects):
@@ -234,9 +264,21 @@ def main():
         print("[*] Annotating model layers for QAT...")
         
         def annotate_layer(layer):
-            # Only annotate standard weight/trainable layers to avoid breaking custom layer graphs
+            if any(k in layer.name for k in ["quality", "predicted_quality"]):
+                return layer
             if layer.__class__.__name__ in ("Conv2D", "DepthwiseConv2D", "Dense"):
                 return tfmot.quantization.keras.quantize_annotate_layer(layer)
+            elif layer.__class__.__name__ in (
+                "DepthwiseCorrelationFusion",
+                "DepthToSpace",
+                "HeatmapNormalization",
+                "UpSampling2D",
+                "AveragePooling2D",
+                "MaxPooling2D",
+                "Concatenate",
+                "Add"
+            ):
+                return tfmot.quantization.keras.quantize_annotate_layer(layer, CustomLayerQuantizeConfig())
             # Check if it is a Functional sub-model
             if isinstance(layer, tf.keras.Model):
                 return tf.keras.models.clone_model(layer, clone_function=annotate_layer)
@@ -258,42 +300,46 @@ def main():
     dataset_loader, num_samples = load_memory_safe_dataset(args.h5_dataset, args.batch_size)
     
     # Instantiate the optimizer
-    optimizer = tf.keras.optimizers.Adam(learning_rate=args.lr)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=args.lr, jit_compile=False)
     loss_fn_heatmap = tf.keras.losses.MeanSquaredError()
     loss_fn_quality = tf.keras.losses.BinaryCrossentropy()
     
+    @tf.function
     def train_step_distill(ref, search):
         # Teacher outputs (frozen float32 predictions)
-        # Call model.call directly to bypass Keras functional node tracking memory leaks
-        t_heatmap_val, t_quality_val = teacher_model.call([ref, search], training=False)
+        # Call model directly to ensure Keras registers moving average updates
+        t_heatmap_val, t_quality_val = teacher_model([ref, search], training=False)
         t_heatmap = tf.stop_gradient(t_heatmap_val)
         t_quality = tf.stop_gradient(t_quality_val)
         
         with tf.GradientTape() as tape:
-            # Student outputs (QAT predictions) using .call to prevent node leaks
-            s_heatmap, s_quality = qat_model.call([ref, search], training=True)
+            # Student outputs (QAT predictions)
+            s_heatmap, s_quality = qat_model([ref, search], training=True)
             
             # Loss calculations (distillation)
             loss_hm = loss_fn_heatmap(t_heatmap, s_heatmap)
             loss_q = loss_fn_quality(t_quality, s_quality)
             total_loss = loss_hm + 0.5 * loss_q
             
-        grads = tape.gradient(total_loss, qat_model.trainable_variables)
-        optimizer.apply_gradients(zip(grads, qat_model.trainable_variables))
+        trainable_vars = [v for v in qat_model.trainable_variables if not any(k in v.name for k in ["quality", "predicted_quality"])]
+        grads = tape.gradient(total_loss, trainable_vars)
+        optimizer.apply_gradients(zip(grads, trainable_vars))
         return total_loss, loss_hm, loss_q
 
+    @tf.function
     def train_step_gt(ref, search, gt_hm, gt_q):
         with tf.GradientTape() as tape:
-            # Student outputs (QAT predictions) using .call to prevent node leaks
-            s_heatmap, s_quality = qat_model.call([ref, search], training=True)
+            # Student outputs (QAT predictions)
+            s_heatmap, s_quality = qat_model([ref, search], training=True)
             
             # Loss calculations (direct labels)
             loss_hm = loss_fn_heatmap(gt_hm, s_heatmap)
             loss_q = loss_fn_quality(gt_q, s_quality)
             total_loss = loss_hm + 0.5 * loss_q
             
-        grads = tape.gradient(total_loss, qat_model.trainable_variables)
-        optimizer.apply_gradients(zip(grads, qat_model.trainable_variables))
+        trainable_vars = [v for v in qat_model.trainable_variables if not any(k in v.name for k in ["quality", "predicted_quality"])]
+        grads = tape.gradient(total_loss, trainable_vars)
+        optimizer.apply_gradients(zip(grads, trainable_vars))
         return total_loss, loss_hm, loss_q
 
     # 6. Fine-tuning Loop
@@ -340,11 +386,12 @@ def main():
                 "q_loss": f"{l_q_np:.6f}"
             })
             
-            # Memory optimization: delete local batch variables and collect garbage on every iteration
+            # Memory optimization: delete local batch variables and collect garbage periodically
             del inputs, targets, batch, ref, search, gt_hm, gt_q
             del loss_val, l_hm, l_q
-            import gc
-            gc.collect()
+            if steps % 100 == 0:
+                import gc
+                gc.collect()
             
         print(f"--> Epoch {epoch+1} Average Loss: {total_loss_accum / steps:.6f}")
         

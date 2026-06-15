@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 class ModelInferenceVisualizer:
     def __init__(self, root, dataset_dir, model_path, threshold=0.5, min_blob_size=30, no_filters=False):
-        # Import tracker_model to register custom layers (like SafeGroupNormalization)
+        # Import tracker_model to register custom layers
         script_dir = os.path.dirname(os.path.abspath(__file__))
         sys.path.append(script_dir)
         sys.path.append(os.path.dirname(script_dir))
@@ -64,7 +64,52 @@ class ModelInferenceVisualizer:
             print(f"Mapped outputs: heatmap={self.heatmap_output_idx}, quality={self.quality_output_idx}")
         else:
             print(f"Loading Keras model from {model_path}...")
-            self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+            custom_objects = {
+                "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
+                "DepthToSpace": tracker_model.DepthToSpace,
+                "HeatmapNormalization": tracker_model.HeatmapNormalization,
+            }
+            is_qat = "qat" in os.path.basename(model_path).lower()
+            if is_qat:
+                try:
+                    import tensorflow_model_optimization as tfmot
+
+                    @tf.keras.utils.register_keras_serializable(package="Custom")
+                    class CustomLayerQuantizeConfig(tfmot.quantization.keras.QuantizeConfig):
+                        def get_weights_and_quantizers(self, layer):
+                            return []
+                        def get_activations_and_quantizers(self, layer):
+                            return []
+                        def set_quantize_weights(self, layer, quantize_weights):
+                            pass
+                        def set_quantize_activations(self, layer, quantize_activations):
+                            pass
+                        def get_output_quantizers(self, layer):
+                            return [
+                                tfmot.quantization.keras.quantizers.MovingAverageQuantizer(
+                                    num_bits=8, per_axis=False, symmetric=False, narrow_range=False
+                                )
+                            ]
+                        def get_config(self):
+                            return {}
+
+                    custom_objects["CustomLayerQuantizeConfig"] = CustomLayerQuantizeConfig
+
+                    # Monkeypatch QuantizeWrapperV2.build to build the inner layer first
+                    orig_build = tfmot.quantization.keras.QuantizeWrapperV2.build
+                    def custom_build(self, input_shape):
+                        if not self.layer.built:
+                            self.layer.build(input_shape)
+                        orig_build(self, input_shape)
+                    tfmot.quantization.keras.QuantizeWrapperV2.build = custom_build
+
+                    with tfmot.quantization.keras.quantize_scope(custom_objects):
+                        self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                except ImportError:
+                    print("Warning: tensorflow_model_optimization not installed. Trying normal load.")
+                    self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False, custom_objects=custom_objects)
+            else:
+                self.model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False, custom_objects=custom_objects)
             self.model.summary()
         
         self.dataset_dir = dataset_dir

@@ -94,13 +94,44 @@ def main():
         # Load the trained model to inspect its architecture
         print(f"[*] Inspecting trained model structure from: {args.keras_in} ...")
         custom_objects = {
-            "SafeGroupNormalization": tracker_model.SafeGroupNormalization,
             "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
             "DepthToSpace": tracker_model.DepthToSpace,
             "HeatmapNormalization": tracker_model.HeatmapNormalization,
         }
         if args.qat or "qat" in os.path.basename(args.keras_in).lower():
             import tensorflow_model_optimization as tfmot
+            
+            @tf.keras.utils.register_keras_serializable(package="Custom")
+            class CustomLayerQuantizeConfig(tfmot.quantization.keras.QuantizeConfig):
+                def get_weights_and_quantizers(self, layer):
+                    return []
+                def get_activations_and_quantizers(self, layer):
+                    return []
+                def set_quantize_weights(self, layer, quantize_weights):
+                    pass
+                def set_quantize_activations(self, layer, quantize_activations):
+                    pass
+                def get_output_quantizers(self, layer):
+                    return [
+                        tfmot.quantization.keras.quantizers.MovingAverageQuantizer(
+                            num_bits=8, per_axis=False, symmetric=False, narrow_range=False
+                        )
+                    ]
+                def get_config(self):
+                    return {}
+            
+            custom_objects["CustomLayerQuantizeConfig"] = CustomLayerQuantizeConfig
+            
+            # Monkeypatch QuantizeWrapperV2.build to build the inner layer first.
+            # This works around a tfmot initialization order bug when deserializing a QAT functional model
+            # where self.layer.trainable_weights is empty during build() because the inner layer wasn't built yet.
+            orig_build = tfmot.quantization.keras.QuantizeWrapperV2.build
+            def custom_build(self, input_shape):
+                if not self.layer.built:
+                    self.layer.build(input_shape)
+                orig_build(self, input_shape)
+            tfmot.quantization.keras.QuantizeWrapperV2.build = custom_build
+            
             with tfmot.quantization.keras.quantize_scope(custom_objects):
                 loaded_model = tf.keras.models.load_model(args.keras_in, compile=False, safe_mode=False)
         else:
@@ -112,7 +143,7 @@ def main():
 
         # Detect parameters
         detected_config = {}
-        has_layer = lambda name: any(l.name == name for l in loaded_model.layers)
+        has_layer = lambda name: any(name in l.name for l in loaded_model.layers)
         
         # A. Attention
         if has_layer("depthwise_correlation_fusion"):
@@ -148,10 +179,10 @@ def main():
                 detected_config[backbone_key] = "alex_net"
                 sb_final_filters = search_extractor.get_layer("sb_alex_conv5").filters
                 detected_config["width_multiplier"] = sb_final_filters / 128.0
-            elif "sb_dw1" in sb_layer_names:
+            elif any("sb_dw1" in name for name in sb_layer_names):
                 detected_config[backbone_key] = "mnv1"
                 detected_config["width_multiplier"] = 1.0
-            elif "sb_ir1_conv" in sb_layer_names:
+            elif any("sb_ir1_conv" in name for name in sb_layer_names):
                 detected_config[backbone_key] = "yolo5"
                 detected_config["width_multiplier"] = 1.0
             elif any("sb_ir1" in name for name in sb_layer_names):
@@ -184,11 +215,11 @@ def main():
                 
                 if any("ref_alex_conv" in name for name in ref_layer_names):
                     detected_config["reference_backbone"] = "alex_net"
-                elif "ref_dw1" in ref_layer_names:
+                elif any("ref_dw1" in name for name in ref_layer_names):
                     detected_config["reference_backbone"] = "mnv1"
                 elif any("ref_ir1" in name for name in ref_layer_names):
                     # Distinguish custom_legacy: check if ref_init_conv has larger filters
-                    ref_init_layer = [l for l in ref_encoder.layers if l.name == "ref_init_conv"]
+                    ref_init_layer = [l for l in ref_encoder.layers if "ref_init_conv" in l.name]
                     if ref_init_layer and (ref_init_layer[0].filters / detected_config["width_multiplier"] > 24.0):
                         detected_config["reference_backbone"] = "custom_legacy"
                     elif any("ref_ir2" in name for name in ref_layer_names):
@@ -215,7 +246,7 @@ def main():
         collect_layers(loaded_model)
         
         has_bn = any("BatchNormalization" in t for t in all_layer_types)
-        has_gn = any("GroupNormalization" in t or "SafeGroupNormalization" in t for t in all_layer_types)
+        has_gn = any("GroupNormalization" in t for t in all_layer_types)
         
         if not has_bn and not has_gn:
             # Check for folded activation layers like sb_init_gn, quality_gn1
@@ -303,7 +334,10 @@ def main():
                 import h5py
                 h5_path = args.h5_dataset
                 if not os.path.isabs(h5_path):
-                    h5_path = os.path.join(script_dir, h5_path)
+                    if os.path.exists(h5_path):
+                        h5_path = os.path.abspath(h5_path)
+                    else:
+                        h5_path = os.path.join(os.path.dirname(script_dir), h5_path)
                 
                 if not os.path.exists(h5_path):
                     raise FileNotFoundError(f"HDF5 dataset for calibration not found at: {h5_path}")
@@ -352,7 +386,7 @@ def main():
         
     # 7. Optionally copy to Android assets
     if args.copy_to_android:
-        android_assets_dir = os.path.join(script_dir, "android", "app", "src", "main", "assets")
+        android_assets_dir = os.path.join(os.path.dirname(script_dir), "android", "app", "src", "main", "assets")
         if os.path.exists(android_assets_dir):
             android_tflite_path = os.path.join(android_assets_dir, "tracker.tflite")
             try:

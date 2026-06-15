@@ -38,12 +38,12 @@ mkdir -p outputs
 # --batch_size 32: Sets batch size for training.
 python3 tracker_model_coords.py train \
     --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 50 \
-    --lr 1e-4 \
+    --num_of_epochs 80 \
+    --lr 1e-5 \
     --loss_quality bce \
-    --output outputs/tracker_coords.keras \
-    --init_keras_file outputs/tracker_coords_best_train_loss.keras \
-    --best_train_loss_output outputs/tracker_coords_best_train_loss.keras \
+    --output outputs/tracker_coords_2.keras \
+    --init_keras_file outputs/tracker_coords.keras \
+    --best_train_loss_output outputs/tracker_coords_2_best_train_loss.keras \
     --log_file outputs/train_coords.log \
-    --train_mode joint \
+    --train_mode heatmap_only \
     --batch_size 32
