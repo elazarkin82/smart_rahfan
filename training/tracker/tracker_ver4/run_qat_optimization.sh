@@ -37,20 +37,17 @@ QAT_BATCH_SIZE=4
 QAT_LR=1e-5
 
 # Output ops to optimize during QAT.
-# Only outputs listed here will contribute to the loss; variables of other output branches are frozen.
-# Names are validated against the model's actual output names at runtime — a typo causes an error.
-#
-# Loss function used per output (auto-selected by output tensor shape):
-#   - Spatial heatmap outputs (H×W > 4) → SoftArgmaxCoordLoss
-#       Differentiable soft-argmax extracts [y, x] coordinates from the predicted heatmap,
-#       then a Huber loss is applied against the GT peak coords. Positive-sample masking
-#       based on whether the teacher heatmap contains a real peak (peak > 0.1).
-#   - Scalar / small outputs               → BinaryCrossentropy (default fallback: MSE)
-#
-# Set to empty string to optimize ALL outputs (e.g. for final production QAT runs):
+# Format: comma-separated 'output_name:loss_name' pairs.
+# Both the output name and the loss name are validated at runtime — a typo causes an immediate error.
+# Set to empty string to optimize ALL outputs with MSE (the default fallback):
 #   OUTPUT_OPS=""
-# Optimize only the heatmap output (quality branch may degrade — acceptable for intermediate runs):
-OUTPUT_OPS="predicted_heatmap"
+# Available loss names (case-insensitive):
+#   SoftArgmaxCoordLoss  — soft-argmax [y,x] coords + Huber loss + positive-sample mask
+#   mse                  — pixel-wise mean squared error
+#   mae                  — pixel-wise mean absolute error
+#   bce                  — binary cross-entropy
+#   huber                — Huber loss (delta=1.0)
+OUTPUT_OPS="predicted_heatmap:SoftArgmaxCoordLoss"
 
 
 # --- TFLite Converter Config ---
@@ -63,7 +60,7 @@ TFLITE_OUT="outputs/tracker_coord_2_qat.tflite"
 #   - "fp16"    : Float16 quantization (best for GPU delegate acceleration)
 #   - "int8"    : Full INT8 integer model (float32 inputs/outputs, simplifies integration)
 #   - "int8_io" : Pure INT8 integer model (int8 inputs/outputs, required by Edge TPU / Coral)
-TFLITE_QUANT="int8"
+TFLITE_QUANT="fp16"
 
 # Optional: Add "--copy_to_android" to copy the output TFLite model directly to the Android assets directory
 COPY_TO_ANDROID="" # set to "--copy_to_android" to enable

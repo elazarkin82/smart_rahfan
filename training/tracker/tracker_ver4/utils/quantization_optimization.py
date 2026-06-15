@@ -254,6 +254,42 @@ class CustomLayerQuantizeConfig(tfmot.quantization.keras.QuantizeConfig):
 
 
 # =====================================================================
+# Loss registry — maps lowercase alias → callable that returns a Loss instance.
+# Extend this dict to support additional loss functions.
+# =====================================================================
+
+_LOSS_REGISTRY = {
+    # Aliases for SoftArgmaxCoordLoss
+    "softargmaxcoordloss":       lambda: SoftArgmaxCoordLoss(beta=30.0, huber_delta=1.0, peak_threshold=0.1),
+    "soft_argmax_coord_loss":    lambda: SoftArgmaxCoordLoss(beta=30.0, huber_delta=1.0, peak_threshold=0.1),
+    "soft_argmax_coord":         lambda: SoftArgmaxCoordLoss(beta=30.0, huber_delta=1.0, peak_threshold=0.1),
+    # Standard Keras losses
+    "mse":                       lambda: tf.keras.losses.MeanSquaredError(),
+    "meansquarederror":          lambda: tf.keras.losses.MeanSquaredError(),
+    "mae":                       lambda: tf.keras.losses.MeanAbsoluteError(),
+    "meanabsoluteerror":         lambda: tf.keras.losses.MeanAbsoluteError(),
+    "bce":                       lambda: tf.keras.losses.BinaryCrossentropy(),
+    "binarycrossentropy":        lambda: tf.keras.losses.BinaryCrossentropy(),
+    "huber":                     lambda: tf.keras.losses.Huber(delta=1.0),
+    "cce":                       lambda: tf.keras.losses.CategoricalCrossentropy(),
+    "categoricalcrossentropy":   lambda: tf.keras.losses.CategoricalCrossentropy(),
+}
+
+
+def _resolve_loss(loss_alias: str) -> tf.keras.losses.Loss:
+    """Look up a loss by alias (case-insensitive). Raises SystemExit on unknown alias."""
+    key = loss_alias.strip().lower().replace("-", "_").replace(" ", "_")
+    if key not in _LOSS_REGISTRY:
+        print(
+            f"[ERROR] Unknown loss name '{loss_alias}'.\n"
+            f"        Available losses: {sorted(_LOSS_REGISTRY.keys())}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return _LOSS_REGISTRY[key]()
+
+
+# =====================================================================
 # Main
 # =====================================================================
 
@@ -280,12 +316,27 @@ def main():
     parser.add_argument(
         "--output_ops",
         default=None,
-        help="Comma-separated list of model output layer names to optimize "
-             "(e.g. 'predicted_heatmap'). Only those outputs contribute to the "
-             "loss; variables of other output branches are frozen. "
-             "Names are validated against the model's actual output_names at "
-             "runtime — an unknown name causes an error. "
-             "If not set, all model outputs are optimized.",
+        help=(
+            "Comma-separated list of 'output_name:loss_name' pairs specifying "
+            "which model outputs to optimize and with which loss function. "
+            "Only listed outputs contribute to the loss; variables of other output "
+            "branches are frozen. Both the output name and the loss name are "
+            "validated at runtime — an unknown value causes an immediate error.\n"
+            "If not set, all model outputs are optimized using MSE.\n\n"
+            "Format:  output_name:loss_name[,output_name:loss_name,...]\n"
+            "Example: predicted_heatmap:SoftArgmaxCoordLoss\n"
+            "Example: predicted_heatmap:SoftArgmaxCoordLoss,predicted_quality:bce\n\n"
+            "Available loss names (case-insensitive):\n"
+            "  SoftArgmaxCoordLoss / soft_argmax_coord_loss / soft_argmax_coord\n"
+            "      Differentiable soft-argmax (beta=30) extracts [y,x] coords\n"
+            "      from the predicted heatmap; Huber loss (delta=1.0) vs GT peak.\n"
+            "      Positive-sample mask applied (target peak threshold=0.1).\n"
+            "  mse / MeanSquaredError      — pixel-wise mean squared error\n"
+            "  mae / MeanAbsoluteError     — pixel-wise mean absolute error\n"
+            "  bce / BinaryCrossentropy    — binary cross-entropy (sigmoid)\n"
+            "  huber                       — Huber loss (delta=1.0)\n"
+            "  cce / CategoricalCrossentropy\n"
+        ),
     )
 
     args = parser.parse_args()
@@ -378,46 +429,63 @@ def main():
     ]
     print(f"[*] Model output names: {model_output_names}")
 
+    # ------------------------------------------------------------------
+    # 5. Parse output_ops and build per-output loss function list
+    #
+    #    Format: "output_name:loss_name[,output_name:loss_name,...]"
+    #    Both output name and loss name are validated; any unknown value
+    #    causes sys.exit(1) with a clear message.
+    #    If --output_ops is not set, all outputs use MSE.
+    # ------------------------------------------------------------------
+
+    # Each element is (output_name, loss_instance) for active outputs.
+    active_output_pairs: list  # list of (str, tf.keras.losses.Loss)
+
     if args.output_ops:
-        requested = [o.strip() for o in args.output_ops.split(",") if o.strip()]
-        unknown   = [n for n in requested if n not in model_output_names]
-        if unknown:
-            print(
-                f"[ERROR] --output_ops contains names not found in the model:\n"
-                f"        Unknown : {unknown}\n"
-                f"        Available: {model_output_names}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        active_output_names = list(requested)
+        entries = [e.strip() for e in args.output_ops.split(",") if e.strip()]
+        active_output_pairs = []
+        for entry in entries:
+            if ":" not in entry:
+                print(
+                    f"[ERROR] Missing loss specification for '{entry}'.\n"
+                    f"        Use format 'output_name:loss_name'\n"
+                    f"        Example: predicted_heatmap:SoftArgmaxCoordLoss",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            output_name, loss_alias = entry.split(":", 1)
+            output_name = output_name.strip()
+            loss_alias  = loss_alias.strip()
+            if output_name not in model_output_names:
+                print(
+                    f"[ERROR] Output name '{output_name}' not found in model.\n"
+                    f"        Available: {model_output_names}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            loss_fn = _resolve_loss(loss_alias)
+            active_output_pairs.append((output_name, loss_fn))
     else:
-        active_output_names = list(model_output_names)
+        # Default: optimize all outputs with MSE (explicit, no guessing)
+        active_output_pairs = [
+            (name, _resolve_loss("mse")) for name in model_output_names
+        ]
 
-    # Map names to indices (Python-level; used to unroll loops at @tf.function trace time)
-    active_output_indices   = [model_output_names.index(n) for n in active_output_names]
-    inactive_output_names   = [n for n in model_output_names if n not in active_output_names]
-    print(f"[*] Active output ops : {active_output_names}")
+    active_output_names   = [name for name, _ in active_output_pairs]
+    active_output_indices = [model_output_names.index(n) for n in active_output_names]
+    inactive_output_names = [n for n in model_output_names if n not in active_output_names]
+
+    # Build loss fn list aligned with model_output_names by index
+    # (inactive positions hold a placeholder — never called during training)
+    output_loss_fns = [None] * len(model_output_names)
+    for name, loss_fn in active_output_pairs:
+        output_loss_fns[model_output_names.index(name)] = loss_fn
+
+    print(f"[*] Active output ops:")
+    for name, loss_fn in active_output_pairs:
+        print(f"      '{name}' → {loss_fn.name}")
     if inactive_output_names:
-        print(f"[*] Frozen output ops : {inactive_output_names} (variables excluded from gradients)")
-
-    # ------------------------------------------------------------------
-    # 5. Build per-output loss functions (indexed by position)
-    #    SoftArgmaxCoordLoss is used for heatmap-shaped outputs;
-    #    BinaryCrossentropy for scalar outputs; MSE as default fallback.
-    # ------------------------------------------------------------------
-    def _default_loss_fn(output_index):
-        """Choose a loss based on output tensor shape."""
-        output_shape = qat_model.outputs[output_index].shape
-        # Scalar-ish outputs → binary cross-entropy; spatial maps → coord loss
-        spatial_dims = [d for d in output_shape[1:] if d is not None and d > 4]
-        if spatial_dims:
-            return SoftArgmaxCoordLoss(beta=30.0, huber_delta=1.0, peak_threshold=0.1)
-        return tf.keras.losses.BinaryCrossentropy()
-
-    # Build loss fn list aligned with model_output_names (index = output position)
-    output_loss_fns = [_default_loss_fn(i) for i in range(len(model_output_names))]
-    for idx, name in enumerate(model_output_names):
-        print(f"[*]   output[{idx}] '{name}' → loss: {output_loss_fns[idx].name}")
+        print(f"[*] Frozen output ops: {inactive_output_names} (excluded from gradients)")
 
     # ------------------------------------------------------------------
     # 6. Variable exclusion: fragments derived from inactive output names

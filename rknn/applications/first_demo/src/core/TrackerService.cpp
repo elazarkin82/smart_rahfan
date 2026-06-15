@@ -102,43 +102,17 @@ TrackerService::TrackerService(const char* model_path)
     out_attrs[0].index = 0;
     rknn_query(m_ctx, RKNN_QUERY_OUTPUT_ATTR, &out_attrs[0], sizeof(rknn_tensor_attr));
 
-    // Dynamic mapping of dimensions based on raw queried NPU attributes format (NHWC or NCHW)
-    if (in_attrs[0].fmt == RKNN_TENSOR_NHWC)
-    {
-        m_in_width_ref = in_attrs[0].dims[2];
-        m_in_height_ref = in_attrs[0].dims[1];
-        m_in_channels_ref = in_attrs[0].dims[3];
-    }
-    else // RKNN_TENSOR_NCHW
-    {
-        m_in_width_ref = in_attrs[0].dims[3];
-        m_in_height_ref = in_attrs[0].dims[2];
-        m_in_channels_ref = in_attrs[0].dims[1];
-    }
+    // Directly parse input/output dimensions assuming HWC layout
+    m_in_height_ref = in_attrs[0].dims[1];
+    m_in_width_ref = in_attrs[0].dims[2];
+    m_in_channels_ref = in_attrs[0].dims[3];
 
-    if (in_attrs[1].fmt == RKNN_TENSOR_NHWC)
-    {
-        m_in_width_search = in_attrs[1].dims[2];
-        m_in_height_search = in_attrs[1].dims[1];
-        m_in_channels_search = in_attrs[1].dims[3];
-    }
-    else // RKNN_TENSOR_NCHW
-    {
-        m_in_width_search = in_attrs[1].dims[3];
-        m_in_height_search = in_attrs[1].dims[2];
-        m_in_channels_search = in_attrs[1].dims[1];
-    }
+    m_in_height_search = in_attrs[1].dims[1];
+    m_in_width_search = in_attrs[1].dims[2];
+    m_in_channels_search = in_attrs[1].dims[3];
 
-    if (out_attrs[0].fmt == RKNN_TENSOR_NHWC)
-    {
-        m_out_width_hm = out_attrs[0].dims[2];
-        m_out_height_hm = out_attrs[0].dims[1];
-    }
-    else // RKNN_TENSOR_NCHW
-    {
-        m_out_width_hm = out_attrs[0].dims[3];
-        m_out_height_hm = out_attrs[0].dims[2];
-    }
+    m_out_height_hm = out_attrs[0].dims[1];
+    m_out_width_hm = out_attrs[0].dims[2];
 
     fprintf(stdout, "[DEBUG] Input 0 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
             in_attrs[0].name, in_attrs[0].n_dims, in_attrs[0].dims[0], in_attrs[0].dims[1], in_attrs[0].dims[2], in_attrs[0].dims[3],
@@ -165,9 +139,7 @@ TrackerService::TrackerService(const char* model_path)
     m_search_buf = (uchar*)malloc(m_in_width_search * m_in_height_search * m_in_channels_search);
     m_heatmap_buf = (float*)malloc(m_out_width_hm * m_out_height_hm * sizeof(float));
 
-    m_bfs_visited = (bool*)malloc(m_out_width_hm * m_out_height_hm);
-    m_bfs_queue_x = (int*)malloc(m_out_width_hm * m_out_height_hm * sizeof(int));
-    m_bfs_queue_y = (int*)malloc(m_out_width_hm * m_out_height_hm * sizeof(int));
+
 }
 
 TrackerService::~TrackerService()
@@ -178,9 +150,7 @@ TrackerService::~TrackerService()
         free(m_ref_stack_buf);
         free(m_search_buf);
         free(m_heatmap_buf);
-        free(m_bfs_visited);
-        free(m_bfs_queue_x);
-        free(m_bfs_queue_y);
+
     }
 }
 
@@ -461,167 +431,17 @@ void TrackerService::resize_nearest_gray(const uchar* src, int src_w, int src_h,
 
 void TrackerService::decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y)
 {
-    int y, x, i;
-    int dy, dx, ny, nx;
-    int q_head, q_tail;
-    int q_x, q_y;
-    int cy, cx;
-    int blob_size;
-    int max_flat_idx;
-    float max_val;
-    int y_max, x_max;
-    int half_w;
-    int y_start, y_end, x_start, x_end;
-    float total_mass;
-    float x_sum, y_sum;
-
-    // 1. Copy and apply Threshold gate (0.5 threshold noise gate)
-    for (i = 0; i < m_out_width_hm * m_out_height_hm; ++i)
+    int max_flat_idx = 0;
+    float max_val = raw_heatmap[0];
+    for (int i = 1; i < m_out_width_hm * m_out_height_hm; ++i)
     {
-        if (raw_heatmap[i] >= 0.5f)
+        if (raw_heatmap[i] > max_val)
         {
-            m_heatmap_buf[i] = raw_heatmap[i];
-        }
-        else
-        {
-            m_heatmap_buf[i] = 0.0f;
-        }
-    }
-
-    // 2. Connected Component (Blob Size) Filter using BFS
-    memset(m_bfs_visited, 0, m_out_width_hm * m_out_height_hm);
-    for (y = 0; y < m_out_height_hm; ++y)
-    {
-        for (x = 0; x < m_out_width_hm; ++x)
-        {
-            if (m_heatmap_buf[y * m_out_width_hm + x] > 0.0f && !m_bfs_visited[y * m_out_width_hm + x])
-            {
-                // Queue start
-                q_head = 0;
-                q_tail = 0;
-
-                m_bfs_queue_x[q_tail] = x;
-                m_bfs_queue_y[q_tail] = y;
-                m_bfs_visited[y * m_out_width_hm + x] = true;
-                q_tail++;
-
-                while (q_head < q_tail)
-                {
-                    q_x = m_bfs_queue_x[q_head];
-                    q_y = m_bfs_queue_y[q_head];
-                    q_head++;
-
-                    // Check 8 neighbors
-                    for (dy = -1; dy <= 1; ++dy)
-                    {
-                        for (dx = -1; dx <= 1; ++dx)
-                        {
-                            if (dy == 0 && dx == 0)
-                            {
-                                continue;
-                            }
-                            ny = q_y + dy;
-                            nx = q_x + dx;
-
-                            if (ny >= 0 && ny < m_out_height_hm && nx >= 0 && nx < m_out_width_hm)
-                            {
-                                if (m_heatmap_buf[ny * m_out_width_hm + nx] > 0.0f && !m_bfs_visited[ny * m_out_width_hm + nx])
-                                {
-                                    m_bfs_visited[ny * m_out_width_hm + nx] = true;
-                                    m_bfs_queue_x[q_tail] = nx;
-                                    m_bfs_queue_y[q_tail] = ny;
-                                    q_tail++;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // If component blob contains fewer than 30 pixels, zero them out
-                blob_size = q_tail;
-                if (blob_size < 30)
-                {
-                    for (i = 0; i < blob_size; ++i)
-                    {
-                        cx = m_bfs_queue_x[i];
-                        cy = m_bfs_queue_y[i];
-                        m_heatmap_buf[cy * m_out_width_hm + cx] = 0.0f;
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Find global maximum peak in filtered heatmap
-    max_flat_idx = 0;
-    max_val = m_heatmap_buf[0];
-    for (i = 1; i < m_out_width_hm * m_out_height_hm; ++i)
-    {
-        if (m_heatmap_buf[i] > max_val)
-        {
-            max_val = m_heatmap_buf[i];
+            max_val = raw_heatmap[i];
             max_flat_idx = i;
         }
     }
 
-    // If no signal survives, return tracker lost (-1, -1)
-    if (max_val <= 0.0001f)
-    {
-        *out_x = -1;
-        *out_y = -1;
-        return;
-    }
-
-    y_max = max_flat_idx / m_out_width_hm;
-    x_max = max_flat_idx % m_out_width_hm;
-
-    // 4. Local 5x5 sub-pixel centroid calculation
-    half_w = 2;
-    y_start = y_max - half_w;
-    if (y_start < 0)
-    {
-        y_start = 0;
-    }
-    y_end = y_max + half_w + 1;
-    if (y_end > m_out_height_hm)
-    {
-        y_end = m_out_height_hm;
-    }
-
-    x_start = x_max - half_w;
-    if (x_start < 0)
-    {
-        x_start = 0;
-    }
-    x_end = x_max + half_w + 1;
-    if (x_end > m_out_width_hm)
-    {
-        x_end = m_out_width_hm;
-    }
-
-    total_mass = 0.0f;
-    x_sum = 0.0f;
-    y_sum = 0.0f;
-
-    for (cy = y_start; cy < y_end; ++cy)
-    {
-        for (cx = x_start; cx < x_end; ++cx)
-        {
-            float w = m_heatmap_buf[cy * m_out_width_hm + cx];
-            total_mass += w;
-            x_sum += cx * w;
-            y_sum += cy * w;
-        }
-    }
-
-    if (total_mass > 0.000001f)
-    {
-        *out_x = (int)(x_sum / total_mass);
-        *out_y = (int)(y_sum / total_mass);
-    }
-    else
-    {
-        *out_x = x_max;
-        *out_y = y_max;
-    }
+    *out_y = max_flat_idx / m_out_width_hm;
+    *out_x = max_flat_idx % m_out_width_hm;
 }

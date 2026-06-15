@@ -44,9 +44,6 @@ private:
     uchar* m_ref_stack_buf;
     uchar* m_search_buf;
     float* m_heatmap_buf;
-    bool* m_bfs_visited;
-    int* m_bfs_queue_x;
-    int* m_bfs_queue_y;
 
     // Resizing helpers
     void resize_bilinear_gray(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);

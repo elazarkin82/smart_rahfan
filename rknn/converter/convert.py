@@ -203,7 +203,7 @@ def main():
     expanded_std_values = []
     for i, inp in enumerate(config["inputs"]):
         name = inp["name"]
-        chan_size = onnx_input_channels.get(name, 1)
+        chan_size = onnx_input_channels.get(name, config_input_channels.get(name, 1))
         m_list = mean_vals[i] if i < len(mean_vals) else mean_vals[0]
         s_list = std_vals[i] if i < len(std_vals) else std_vals[0]
         
