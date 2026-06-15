@@ -2,7 +2,7 @@
 
 model:
   name: "tracker_ver4_tflite"
-  tflite_model_path: "../../training/tracker/tracker_ver4/outputs/tracker_coord_2_qat.tflite"
+  tflite_model_path: "../../training/tracker/tracker_ver4/outputs/tracker_coords_2_qat.tflite"
   output_rknn_path: "./outputs/tracker_tflite.rknn"
 
 rknn_config:
