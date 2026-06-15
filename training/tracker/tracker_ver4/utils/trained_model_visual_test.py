@@ -299,11 +299,18 @@ class ModelInferenceVisualizer:
                 self.interpreter.invoke()
                 
                 pred_heatmap = self.interpreter.get_tensor(self.heatmap_output_idx)[0]
-                pred_quality = self.interpreter.get_tensor(self.quality_output_idx)[0][0]
+                if self.quality_output_idx is not None:
+                    pred_quality = self.interpreter.get_tensor(self.quality_output_idx)[0][0]
+                else:
+                    pred_quality = 1.0
             else:
                 pred = self.model([ref_tensor, search_tensor], training=False)
-                pred_heatmap = pred[0].numpy()[0]  # (256, 256, 1)
-                pred_quality = pred[1].numpy()[0][0]  # scalar float
+                if isinstance(pred, list) or isinstance(pred, tuple):
+                    pred_heatmap = pred[0].numpy()[0]  # (256, 256, 1)
+                    pred_quality = pred[1].numpy()[0][0]  # scalar float
+                else:
+                    pred_heatmap = pred.numpy()[0]
+                    pred_quality = 1.0
             
             # Local Refined Argmax Centroid Method for sub-pixel prediction
             raw_heatmap = pred_heatmap[:, :, 0].copy()

@@ -37,7 +37,7 @@ def main():
             sys.exit(1)
         
         # We will perform the conversion to a temporary ONNX file
-        temp_onnx_path = "/tmp/temp_keras_model.onnx"
+        temp_onnx_path = "./temp_keras_model.onnx"
         print(f"--> [Pre-process] Converting Keras model '{keras_path}' to temporary ONNX model: {temp_onnx_path}...")
         try:
             import tensorflow as tf
@@ -103,7 +103,7 @@ def main():
     if tflite_path and is_arm64:
         print("[*] ARM64 platform detected. TFLite model loading is not natively supported by RKNN-Toolkit2 on ARM64.")
         print("--> Automatically converting TFLite model to ONNX first...")
-        temp_onnx_path = "/tmp/temp_tflite_model.onnx"
+        temp_onnx_path = "./temp_tflite_model.onnx"
         try:
             import subprocess
             input_names = [inp["name"] for inp in config["inputs"]]
@@ -290,10 +290,80 @@ def main():
             do_quant = False
             dataset = None
 
-    ret = rknn.build(
-        do_quantization=do_quant,
-        dataset=dataset
-    )
+    import io
+    import re
+
+    class DualStream(object):
+        def __init__(self, original_stream):
+            self.original_stream = original_stream
+            self.buffer = io.StringIO()
+
+        def write(self, message):
+            self.original_stream.write(message)
+            self.buffer.write(message)
+
+        def flush(self):
+            self.original_stream.flush()
+
+        def getvalue(self):
+            return self.buffer.getvalue()
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    
+    dual_stdout = DualStream(original_stdout)
+    dual_stderr = DualStream(original_stderr)
+    
+    sys.stdout = dual_stdout
+    sys.stderr = dual_stderr
+
+    try:
+        ret = rknn.build(
+            do_quantization=do_quant,
+            dataset=dataset
+        )
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+
+    build_log = dual_stdout.getvalue() + dual_stderr.getvalue()
+    
+    # Parse build logs for unsupported operators or CPU fallback warnings
+    log_lines = build_log.splitlines()
+    cpu_fallbacks = []
+    general_warnings = []
+    
+    for line in log_lines:
+        lower_line = line.lower()
+        if "unsupport" in lower_line or "fallback" in lower_line or "cpu" in lower_line:
+            if any(k in lower_line for k in ["numa", "cuda_executor", "devices.cc", "tensorflow", "estimat", "macs", "protobuf", "nvidia"]):
+                continue
+            cpu_fallbacks.append(line.strip())
+        elif "warning" in lower_line or "warn" in lower_line:
+            if any(k in lower_line for k in ["protobuf", "tensorflow", "absl", "consider providing"]):
+                continue
+            general_warnings.append(line.strip())
+
+    print("\n" + "="*60)
+    print("         RKNN BUILD DIAGNOSTIC SUMMARY REPORT")
+    print("="*60)
+    
+    if cpu_fallbacks:
+        print(f"\n[!] WARNING: Detected {len(cpu_fallbacks)} CPU fallback / unsupported operation logs:")
+        for idx, item in enumerate(cpu_fallbacks, 1):
+            print(f"  {idx}. {item}")
+        print("\nThese operations will execute on the ARM CPU instead of the NPU, causing high latency.")
+    else:
+        print("\n[+] SUCCESS: No CPU-fallback or unsupported operations detected in build logs!")
+        print("    All compiled model layers will execute on the NPU.")
+        
+    if general_warnings:
+        print(f"\n[*] General Compilation Warnings ({len(general_warnings)}):")
+        for idx, item in enumerate(general_warnings, 1):
+            print(f"  {idx}. {item}")
+            
+    print("="*60 + "\n")
+
     if ret != 0:
         print(f"[ERROR] Failed to build RKNN model. Error code: {ret}")
         sys.exit(1)

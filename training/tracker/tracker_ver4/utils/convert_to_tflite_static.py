@@ -21,6 +21,20 @@ import argparse
 import shutil
 import numpy as np
 
+def transpose_preserves_memory_layout(shape, perm):
+    if perm is None:
+        perm = list(range(len(shape)))[::-1]
+    non_singleton_indices = [i for i, dim in enumerate(shape) if dim is None or dim > 1]
+    permuted_non_singleton = [idx for idx in perm if idx in non_singleton_indices]
+    return permuted_non_singleton == non_singleton_indices
+
+def optimize_and_trim_model(model, trim_outputs=True):
+    import tensorflow as tf
+    if trim_outputs:
+        print(f"[Optimizer] Trimming model outputs: keeping only heatmap '{model.outputs[0].name}'")
+        model = tf.keras.models.Model(inputs=model.inputs, outputs=[model.outputs[0]], name=model.name + "_trimmed")
+    return model
+
 def main():
     parser = argparse.ArgumentParser(description="Statically convert Tracker Ver 4 Keras model to TFLite.")
     parser.add_argument(
@@ -68,6 +82,23 @@ def main():
     except ImportError:
         print("Error: TensorFlow is not installed in this Python environment.", file=sys.stderr)
         sys.exit(1)
+        
+    # Monkeypatch tf.transpose to replace layout-preserving transposes with reshapes during concrete function tracing
+    orig_transpose = tf.transpose
+    def custom_transpose(a, perm=None, conjugate=False, name=None):
+        if perm is not None:
+            try:
+                perm_list = [int(p) for p in perm]
+                shape = a.shape.as_list() if hasattr(a.shape, 'as_list') else list(a.shape)
+                if transpose_preserves_memory_layout(shape, perm_list):
+                    target_shape = [shape[i] for i in perm_list]
+                    cleaned_target_shape = [(-1 if dim is None else int(dim)) for dim in target_shape]
+                    print(f"[Optimizer] Intercepted tf.transpose. Replacing shape {shape} (perm {perm_list}) with tf.reshape to {cleaned_target_shape}")
+                    return tf.reshape(a, cleaned_target_shape, name=name)
+            except Exception as e:
+                print(f"[Optimizer] Warning in custom_transpose intercept: {e}")
+        return orig_transpose(a, perm=perm, conjugate=conjugate, name=name)
+    tf.transpose = custom_transpose
         
     # Append current dir and parent dir to sys.path to load tracker_model
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -299,6 +330,14 @@ def main():
             print(f"Error: Failed to load weights. Ensure the Keras file contains compatible weights.\nDetails: {e}", file=sys.stderr)
             sys.exit(1)
         conversion_model = model
+        
+    # Optimize conversion model (replace memory-layout-preserving transposes with reshapes)
+    print("[*] Performing functional graph surgery on conversion model...")
+    try:
+        conversion_model = optimize_and_trim_model(conversion_model, trim_outputs=False)
+        print("[+] Graph surgery completed successfully.")
+    except Exception as surgery_err:
+        print(f"[WARNING] Graph surgery failed: {surgery_err}. Proceeding with original model.")
         
     # 4. Generate Concrete Function with Static Batch Shape (batch_size = 1)
     print("[*] Defining concrete function with static input shapes (forcing batch_size=1)...")
