@@ -180,6 +180,7 @@ def load_model_config(config_path="model.conf"):
     attn_mech = config.get("Attention", "mechanism", fallback="depthwise_corr")
     
     dec_type = config.get("Decoder", "type", fallback="fpn_add")
+    heatmap_pxl_size = config.getint("Decoder", "heatmap_pxl_size", fallback=64)
     
     hm_loss_default = config.get("Loss", "heatmap_loss_default", fallback="dbsz_relu")
     
@@ -191,6 +192,7 @@ def load_model_config(config_path="model.conf"):
         "width_multiplier": width_mult,
         "attention_mechanism": attn_mech,
         "decoder_type": dec_type,
+        "heatmap_pxl_size": heatmap_pxl_size,
         "heatmap_loss_default": hm_loss_default,
         "normalization_type": norm_type
     }
@@ -240,6 +242,9 @@ mechanism = depthwise_corr
 #   - pixel_shuffle   : Uses sub-pixel convolutions (depth-to-space). Fast on NPUs.
 #   - light_naive     : Transposed convolutions without skip connections. Fastest, lower precision.
 type = fpn_add
+
+# Target resolution of the output heatmap (e.g. 16, 32, 64, 128, 256)
+heatmap_pxl_size = 64
 
 [Loss]
 # Default loss function for heatmap regression
@@ -443,6 +448,7 @@ class TargetTrackerVer4:
                 "width_multiplier": 0.5,
                 "attention_mechanism": "depthwise_corr",
                 "decoder_type": "fpn_add",
+                "heatmap_pxl_size": 64,
                 "heatmap_loss_default": "dbsz_relu"
             }
 
@@ -852,27 +858,14 @@ class TargetTrackerVer4:
             
         # 3. Decoder for Output 1: Heatmap
         dec_type = self.config["decoder_type"]
+        heatmap_pxl_size = self.config.get("heatmap_pxl_size", 64)
         
-        if dec_type == "fpn_add":
-            x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up1")(fused_features)
-            skip1_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip1_proj")(sb_ir2)
-            x = layers.Add(name="decoder_skip1")([x, skip1_proj])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(64) if bb_type != "custom_legacy" else 64, strides=1, name_prefix="decoder_ir1")
-            
-            x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up2")(x)
-            skip2_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip2_proj")(sb_ir1)
-            x = layers.Add(name="decoder_skip2")([x, skip2_proj])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(32) if bb_type != "custom_legacy" else 32, strides=1, name_prefix="decoder_ir2")
-            
-            x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up3")(x)
-            skip3_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip3_proj")(sb_init)
-            x = layers.Add(name="decoder_skip3")([x, skip3_proj])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(16) if bb_type != "custom_legacy" else 16, strides=1, name_prefix="decoder_ir3")
-            
-            x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up4")(x)
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(8) if bb_type != "custom_legacy" else 8, strides=1, name_prefix="decoder_ir4")
-            
-        elif dec_type == "pixel_shuffle":
+        curr_size = 16
+        x = fused_features
+        skips = [sb_ir2, sb_ir1, sb_init]
+        stage = 1
+        
+        if dec_type == "pixel_shuffle":
             def pixel_shuffle_block(inputs, out_filters, name_prefix):
                 ps_c = out_filters * 4
                 x_ps = layers.Conv2D(ps_c, (3, 3), padding="same", use_bias=False, name=f"{name_prefix}_ps_conv")(inputs)
@@ -880,57 +873,40 @@ class TargetTrackerVer4:
                 x_ps = layers.ReLU(6.0, name=f"{name_prefix}_ps_relu")(x_ps)
                 x_ps = DepthToSpace(block_size=2, name=f"{name_prefix}_ps_shuffle")(x_ps)
                 return x_ps
+        
+        while curr_size < heatmap_pxl_size:
+            curr_size *= 2
+            
+            if dec_type == "fpn_add":
+                x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name=f"decoder_up{stage}")(x)
+                if stage <= len(skips):
+                    skip = skips[stage - 1]
+                    skip_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name=f"decoder_skip{stage}_proj")(skip)
+                    x = layers.Add(name=f"decoder_skip{stage}")([x, skip_proj])
+                x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(64 // (2**(stage-1))) if bb_type != "custom_legacy" else (64 // (2**(stage-1))), strides=1, name_prefix=f"decoder_ir{stage}")
                 
-            x = pixel_shuffle_block(fused_features, scale_filters(64) if bb_type != "custom_legacy" else 64, "decoder1")
-            skip1_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip1_proj")(sb_ir2)
-            x = layers.Add(name="decoder_skip1")([x, skip1_proj])
-            
-            x = pixel_shuffle_block(x, scale_filters(32) if bb_type != "custom_legacy" else 32, "decoder2")
-            skip2_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip2_proj")(sb_ir1)
-            x = layers.Add(name="decoder_skip2")([x, skip2_proj])
-            
-            x = pixel_shuffle_block(x, scale_filters(16) if bb_type != "custom_legacy" else 16, "decoder3")
-            skip3_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name="decoder_skip3_proj")(sb_init)
-            x = layers.Add(name="decoder_skip3")([x, skip3_proj])
-            
-            x = pixel_shuffle_block(x, scale_filters(8) if bb_type != "custom_legacy" else 8, "decoder4")
-            
-        elif dec_type == "light_naive":
-            c_up1 = scale_filters(64) if bb_type != "custom_legacy" else 64
-            x = layers.Conv2DTranspose(c_up1, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up1")(fused_features)
-            x = _GroupNormalization(c_up1, name="decoder_up1_gn")(x)
-            x = layers.ReLU(6.0, name="decoder_up1_relu")(x)
-            
-            c_up2 = scale_filters(32) if bb_type != "custom_legacy" else 32
-            x = layers.Conv2DTranspose(c_up2, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up2")(x)
-            x = _GroupNormalization(c_up2, name="decoder_up2_gn")(x)
-            x = layers.ReLU(6.0, name="decoder_up2_relu")(x)
-            
-            c_up3 = scale_filters(16) if bb_type != "custom_legacy" else 16
-            x = layers.Conv2DTranspose(c_up3, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up3")(x)
-            x = _GroupNormalization(c_up3, name="decoder_up3_gn")(x)
-            x = layers.ReLU(6.0, name="decoder_up3_relu")(x)
-            
-            c_up4 = scale_filters(8) if bb_type != "custom_legacy" else 8
-            x = layers.Conv2DTranspose(c_up4, (3, 3), strides=2, padding="same", use_bias=False, name="decoder_up4")(x)
-            x = _GroupNormalization(c_up4, name="decoder_up4_gn")(x)
-            x = layers.ReLU(6.0, name="decoder_up4_relu")(x)
-            
-        else: # unet
-            x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up1")(fused_features)
-            x = layers.Concatenate(axis=-1, name="decoder_skip1")([x, sb_ir2])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(64) if bb_type != "custom_legacy" else 64, strides=1, name_prefix="decoder_ir1")
-            
-            x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up2")(x)
-            x = layers.Concatenate(axis=-1, name="decoder_skip2")([x, sb_ir1])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(32) if bb_type != "custom_legacy" else 32, strides=1, name_prefix="decoder_ir2")
-            
-            x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up3")(x)
-            x = layers.Concatenate(axis=-1, name="decoder_skip3")([x, sb_init])
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(16) if bb_type != "custom_legacy" else 16, strides=1, name_prefix="decoder_ir3")
-            
-            x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name="decoder_up4")(x)
-            x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(8) if bb_type != "custom_legacy" else 8, strides=1, name_prefix="decoder_ir4")
+            elif dec_type == "pixel_shuffle":
+                filters = scale_filters(64 // (2**(stage-1))) if bb_type != "custom_legacy" else (64 // (2**(stage-1)))
+                x = pixel_shuffle_block(x, filters, f"decoder{stage}")
+                if stage <= len(skips):
+                    skip = skips[stage - 1]
+                    skip_proj = layers.Conv2D(x.shape[-1], (1, 1), padding="same", use_bias=False, name=f"decoder_skip{stage}_proj")(skip)
+                    x = layers.Add(name=f"decoder_skip{stage}")([x, skip_proj])
+                    
+            elif dec_type == "light_naive":
+                filters = scale_filters(64 // (2**(stage-1))) if bb_type != "custom_legacy" else (64 // (2**(stage-1)))
+                x = layers.Conv2DTranspose(filters, (3, 3), strides=2, padding="same", use_bias=False, name=f"decoder_up{stage}")(x)
+                x = _GroupNormalization(filters, name=f"decoder_up{stage}_gn")(x)
+                x = layers.ReLU(6.0, name=f"decoder_up{stage}_relu")(x)
+                
+            else: # unet
+                x = layers.UpSampling2D(size=(2, 2), interpolation="bilinear", name=f"decoder_up{stage}")(x)
+                if stage <= len(skips):
+                    skip = skips[stage - 1]
+                    x = layers.Concatenate(axis=-1, name=f"decoder_skip{stage}")([x, skip])
+                x = self._inverted_residual_block(x, expansion=2, filters=scale_filters(64 // (2**(stage-1))) if bb_type != "custom_legacy" else (64 // (2**(stage-1))), strides=1, name_prefix=f"decoder_ir{stage}")
+                
+            stage += 1
             
         # Final prediction heatmap
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
@@ -948,9 +924,18 @@ class TargetTrackerVer4:
         )(thresholded)
         
         # 4. Heatmap-Guided Classification Branch
-        hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap)
-        hm_pool = layers.AveragePooling2D(pool_size=8, name="quality_hm_pool")(hm_feat)
-        
+        ds_factor = heatmap_pxl_size // 16
+        if ds_factor >= 2:
+            hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap)
+            pool_size = ds_factor // 2
+            if pool_size > 1:
+                hm_pool = layers.AveragePooling2D(pool_size=pool_size, name="quality_hm_pool")(hm_feat)
+            else:
+                hm_pool = hm_feat
+        else:
+            hm_feat = layers.Conv2D(8, (3, 3), strides=1, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap)
+            hm_pool = hm_feat
+            
         q_fused = layers.Concatenate(axis=-1, name="quality_fusion")([fused_features, hm_pool])
         
         q = layers.Conv2D(64, (3, 3), strides=2, padding="same", use_bias=False, name="quality_conv1")(q_fused)

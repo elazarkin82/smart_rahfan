@@ -457,6 +457,13 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     out_x = -1;
     out_y = -1;
     decode_heatmap(m_heatmap_buf, &out_x, &out_y);
+    
+    // Scale coordinates dynamically back to the standard 256x256 grid expected by the UI/WebServer
+    if (out_x >= 0 && out_y >= 0)
+    {
+        out_x = (out_x * 256) / m_out_width_hm;
+        out_y = (out_y * 256) / m_out_height_hm;
+    }
     t_decode_end = std::chrono::steady_clock::now();
 
     t_end = std::chrono::steady_clock::now();
