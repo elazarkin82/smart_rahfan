@@ -13,6 +13,7 @@ _OVERRIDE_USE_BIAS = False
 
 _orig_conv2d = layers.Conv2D
 _orig_dw_conv2d = layers.DepthwiseConv2D
+_orig_conv2d_transpose = layers.Conv2DTranspose
 
 def _smart_conv2d(*args, **kwargs):
     global _NORMALIZATION_TYPE, _OVERRIDE_USE_BIAS
@@ -26,8 +27,15 @@ def _smart_dw_conv2d(*args, **kwargs):
         kwargs["use_bias"] = True
     return _orig_dw_conv2d(*args, **kwargs)
 
+def _smart_conv2d_transpose(*args, **kwargs):
+    global _NORMALIZATION_TYPE, _OVERRIDE_USE_BIAS
+    if _OVERRIDE_USE_BIAS and _NORMALIZATION_TYPE in ["batch_norm", "folded"]:
+        kwargs["use_bias"] = True
+    return _orig_conv2d_transpose(*args, **kwargs)
+
 layers.Conv2D = _smart_conv2d
 layers.DepthwiseConv2D = _smart_dw_conv2d
+layers.Conv2DTranspose = _smart_conv2d_transpose
 
 # Save the original GroupNormalization
 if hasattr(layers, 'GroupNormalization'):
@@ -411,7 +419,10 @@ def fold_model_weights(unfolded_model, folded_model):
                     kernel, bias = conv_weights
                 elif len(conv_weights) == 1:
                     kernel = conv_weights[0]
-                    bias = np.zeros((kernel.shape[-1],), dtype=np.float32)
+                    if parent_layer.__class__.__name__ == 'Conv2DTranspose':
+                        bias = np.zeros((kernel.shape[-2],), dtype=np.float32)
+                    else:
+                        bias = np.zeros((kernel.shape[-1],), dtype=np.float32)
                 else:
                     continue
                 
