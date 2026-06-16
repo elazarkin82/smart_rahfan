@@ -22,7 +22,8 @@ public:
 
 
 private:
-    rknn_context m_ctx;
+    rknn_context m_ctx_template;
+    rknn_context m_ctx_frame;
     bool m_is_model_loaded;
     bool m_is_target_defined;
     TrackerCallback* m_callback;
@@ -40,10 +41,18 @@ private:
     int m_out_width_hm;
     int m_out_height_hm;
 
+    // Crop boundaries in absolute pixels
+    float m_min_crop;
+    float m_max_crop;
+
     // Pre-allocated buffers to prevent runtime heap allocation
     uchar* m_ref_stack_buf;
     uchar* m_search_buf;
     float* m_heatmap_buf;
+    void* m_template_features_buf;
+    int m_template_features_size;
+    rknn_tensor_type m_template_features_type;
+    rknn_tensor_format m_template_features_fmt;
 
     // Resizing helpers
     void resize_bilinear_gray(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
@@ -53,7 +62,7 @@ private:
     void decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y);
 
 public:
-    TrackerService(const char* model_path);
+    TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop);
     ~TrackerService();
 
     bool is_model_loaded() const;

@@ -20,7 +20,10 @@ public:
         char cam_dev[256];
         int width;
         int height;
-        char rknn_model_path[256];
+        char rknn_template_model_path[256];
+        char rknn_frame_model_path[256];
+        float min_crop;
+        float max_crop;
     };
 
 private:

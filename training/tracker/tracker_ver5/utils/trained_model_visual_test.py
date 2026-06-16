@@ -305,24 +305,8 @@ class ModelInferenceVisualizer:
             heatmap = pred_heatmap[:, :, 0]
             flat_idx = np.argmax(heatmap)
             y_max, x_max = np.unravel_index(flat_idx, heatmap.shape)
-            
-            # Extract center of mass strictly in a local 5x5 neighborhood around the peak
-            half_w = 2
-            y_start = max(0, y_max - half_w)
-            y_end = min(heatmap.shape[0], y_max + half_w + 1)
-            x_start = max(0, x_max - half_w)
-            x_end = min(heatmap.shape[1], x_max + half_w + 1)
-            
-            local_patch = heatmap[y_start:y_end, x_start:x_end]
-            total_mass = np.sum(local_patch)
-            
-            if total_mass > 1e-6:
-                y_grid, x_grid = np.mgrid[y_start:y_end, x_start:x_end]
-                x_c = np.sum(x_grid * local_patch) / total_mass
-                y_c = np.sum(y_grid * local_patch) / total_mass
-                pred_norm = [x_c / 256.0, y_c / 256.0]
-            else:
-                pred_norm = [x_max / 256.0, y_max / 256.0]
+            pred_norm = [x_max / 256.0, y_max / 256.0]
+
  
             search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
             search_vis = (search_rgb.copy()*255).astype(np.uint8)
