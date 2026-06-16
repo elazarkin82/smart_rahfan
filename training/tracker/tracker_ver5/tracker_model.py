@@ -307,16 +307,37 @@ def soft_argmax_2d(heatmap, beta=30.0):
     
     return tf.concat([pred_y, pred_x], axis=-1) # shape (B, 2)
 
-def coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality):
+def coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality, c_bg=3.0):
+    # 1. Differentiable Soft-Argmax to extract coordinates from predicted heatmap
     pred_coords_soft = soft_argmax_2d(pred_heatmap, beta=30.0)
     
+    # 2. Huber loss on positive samples (predicted coordinates vs ground truth coordinates)
     huber = tf.keras.losses.Huber(delta=1.0, reduction=tf.keras.losses.Reduction.NONE)
     loss_coords = huber(gt_coords, pred_coords_soft)
     loss_coords = tf.reshape(loss_coords, [-1, 1])
     
+    # 3. DBSZ ReLU / MSE loss on negative samples (predicted heatmap vs zero map)
+    # When gt_true is all zeros, dbsz_relu simplifies exactly to: c_bg * Mean(y_pred^2)
+    loss_neg_heatmap = c_bg * tf.reduce_mean(tf.square(pred_heatmap), axis=[1, 2, 3])
+    loss_neg_heatmap = tf.reshape(loss_neg_heatmap, [-1, 1])
+    
+    # 4. Create masks based on target quality threshold (0.5)
     pos_mask = tf.cast(gt_quality > 0.5, tf.float32)
-    masked_loss_coords = loss_coords * pos_mask
-    return tf.reduce_sum(masked_loss_coords) / (tf.reduce_sum(pos_mask) + 1e-7)
+    neg_mask = 1.0 - pos_mask
+    
+    # Normalize losses by the count of positive and negative samples in the batch respectively
+    pos_count = tf.reduce_sum(pos_mask)
+    neg_count = tf.reduce_sum(neg_mask)
+    
+    # Calculate normalized positive and negative losses
+    loss_pos_normalized = tf.reduce_sum(loss_coords * pos_mask) / (pos_count + 1e-7)
+    loss_neg_normalized = tf.reduce_sum(loss_neg_heatmap * neg_mask) / (neg_count + 1e-7)
+    
+    # Apply conditional mask to avoid adding values if there are no samples of a class in the batch
+    loss_pos_final = tf.where(pos_count > 0.5, loss_pos_normalized, 0.0)
+    loss_neg_final = tf.where(neg_count > 0.5, loss_neg_normalized, 0.0)
+    
+    return loss_pos_final + loss_neg_final
 
 # =====================================================================
 # Batch Normalization Folding Helper

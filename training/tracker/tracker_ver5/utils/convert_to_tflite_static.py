@@ -28,6 +28,190 @@ def transpose_preserves_memory_layout(shape, perm):
     permuted_non_singleton = [idx for idx in perm if idx in non_singleton_indices]
     return permuted_non_singleton == non_singleton_indices
 
+def find_tensor_by_name(model, name):
+    base_name = name.split(":")[0]
+    parts = base_name.split("/")
+    
+    def search_layers(m, layer_name):
+        for l in m.layers:
+            if l.name == layer_name:
+                return l
+            if hasattr(l, "layers"):
+                res = search_layers(l, layer_name)
+                if res is not None:
+                    return res
+        return None
+
+    target_layer_name = parts[-1]
+    target_layer = search_layers(model, target_layer_name)
+    
+    if target_layer is not None:
+        try:
+            if hasattr(target_layer, "_inbound_nodes") and len(target_layer._inbound_nodes) > 0:
+                node_outputs = target_layer._inbound_nodes[0].output_tensors
+                if isinstance(node_outputs, list):
+                    if len(parts) > 1:
+                        for out in node_outputs:
+                            if name in out.name or out.name.endswith(name):
+                                return out
+                    return node_outputs[0]
+                return node_outputs
+        except Exception:
+            pass
+        try:
+            if isinstance(target_layer.output, list):
+                if len(parts) > 1:
+                    for out in target_layer.output:
+                        if name in out.name or out.name.endswith(name):
+                            return out
+                return target_layer.output[0]
+            return target_layer.output
+        except Exception:
+            pass
+            
+    def search_outputs(m):
+        for l in m.layers:
+            try:
+                if isinstance(l.output, list):
+                    for out in l.output:
+                        if out.name == name or out.name.startswith(name) or name in out.name:
+                            return out
+                else:
+                    if l.output.name == name or l.output.name.startswith(name) or name in l.output.name:
+                        return l.output
+            except Exception:
+                pass
+            if hasattr(l, "layers"):
+                res = search_outputs(l)
+                if res is not None:
+                    return res
+        return None
+        
+    res_tensor = search_outputs(model)
+    if res_tensor is not None:
+        return res_tensor
+        
+    raise ValueError(f"Could not find tensor or layer with name '{name}' in model.")
+
+def build_subgraph(model, input_names, output_names):
+    import tensorflow as tf
+    from tensorflow.keras import layers
+    
+    def map_tensors_in_args_kwargs(args, kwargs, tensor_map):
+        def map_val(val):
+            if isinstance(val, list):
+                return [map_val(v) for v in val]
+            if isinstance(val, tuple):
+                return tuple(map_val(v) for v in val)
+            if isinstance(val, dict):
+                return {k: map_val(v) for k, v in val.items()}
+            if id(val) in tensor_map:
+                return tensor_map[id(val)]
+            return val
+
+        new_args = map_val(args)
+        new_kwargs = map_val(kwargs)
+        return new_args, new_kwargs
+        
+    target_inputs = []
+    for name in input_names:
+        tensor = find_tensor_by_name(model, name)
+        target_inputs.append(tensor)
+        
+    target_outputs = []
+    for name in output_names:
+        tensor = find_tensor_by_name(model, name)
+        target_outputs.append(tensor)
+        
+    tensor_map = {}
+    new_inputs = []
+    
+    for tensor in target_inputs:
+        is_input = False
+        try:
+            if hasattr(tensor, "_keras_history"):
+                layer, _, _ = tensor._keras_history
+                if isinstance(layer, tf.keras.layers.InputLayer):
+                    is_input = True
+        except Exception:
+            pass
+            
+        if is_input:
+            new_inputs.append(tensor)
+            tensor_map[id(tensor)] = tensor
+        else:
+            shape = tensor.shape.as_list()
+            input_name = tensor.name.replace(":", "_").replace("/", "_")
+            new_in = layers.Input(batch_shape=shape, dtype=tensor.dtype, name=f"input_{input_name}")
+            new_inputs.append(new_in)
+            tensor_map[id(tensor)] = new_in
+            print(f"[Subgraph] Created new input placeholder '{new_in.name}' for tensor '{tensor.name}' with shape {shape}")
+
+    all_layers = model.layers
+    
+    for layer in all_layers:
+        if isinstance(layer, tf.keras.layers.InputLayer):
+            continue
+            
+        try:
+            nodes = layer._inbound_nodes
+            for node_idx, node in enumerate(nodes):
+                node_inputs = node.input_tensors
+                if not isinstance(node_inputs, (list, tuple)):
+                    node_inputs = [node_inputs]
+                    
+                if all(id(inp) in tensor_map for inp in node_inputs):
+                    mapped_inps = [tensor_map[id(inp)] for inp in node_inputs]
+                    if len(mapped_inps) == 1:
+                        mapped_inps = mapped_inps[0]
+                    if hasattr(node, "call_args") and node.call_args is not None:
+                        new_args, new_kwargs = map_tensors_in_args_kwargs(node.call_args, node.call_kwargs, tensor_map)
+                        new_out = layer(*new_args, **new_kwargs)
+                    else:
+                        new_out = layer(mapped_inps)
+                    node_outputs = node.output_tensors
+                    
+                    # Handle list vs single tensor matching safely
+                    if isinstance(node_outputs, (list, tuple)):
+                        if not isinstance(new_out, (list, tuple)):
+                            new_out = [new_out]
+                        for orig_o, new_o in zip(node_outputs, new_out):
+                            tensor_map[id(orig_o)] = new_o
+                    else:
+                        tensor_map[id(node_outputs)] = new_out
+                    break
+        except Exception:
+            try:
+                if isinstance(layer.input, list):
+                    layer_inputs = layer.input
+                else:
+                    layer_inputs = [layer.input]
+                if all(id(inp) in tensor_map for inp in layer_inputs):
+                    mapped_inps = [tensor_map[id(inp)] for inp in layer_inputs]
+                    if len(mapped_inps) == 1:
+                        mapped_inps = mapped_inps[0]
+                    new_out = layer(mapped_inps)
+                    if isinstance(layer.output, list):
+                        if not isinstance(new_out, (list, tuple)):
+                            new_out = [new_out]
+                        for orig_o, new_o in zip(layer.output, new_out):
+                            tensor_map[id(orig_o)] = new_o
+                    else:
+                        tensor_map[id(layer.output)] = new_out
+            except Exception:
+                pass
+        
+    missing_outputs = [out for out in target_outputs if id(out) not in tensor_map]
+    if missing_outputs:
+        raise ValueError(f"Could not map output tensors: {[t.name for t in missing_outputs]}")
+        
+    subgraph_model = tf.keras.models.Model(
+        inputs=new_inputs, 
+        outputs=[tensor_map[id(out)] for out in target_outputs],
+        name=model.name + "_subgraph"
+    )
+    return subgraph_model, target_inputs
+
 def optimize_and_trim_model(model, trim_outputs=True):
     import tensorflow as tf
     if trim_outputs:
@@ -68,6 +252,17 @@ def main():
         "--qat",
         action="store_true",
         help="Enable QAT preservation mode: converts the loaded QAT model directly to retain activation scale factors instead of reconstructing"
+    )
+    
+    parser.add_argument(
+        "--input_tensors",
+        default=None,
+        help="Comma-separated list of input tensor names for subgraph extraction"
+    )
+    parser.add_argument(
+        "--output_tensors",
+        default=None,
+        help="Comma-separated list of output tensor names for subgraph extraction"
     )
     
     args = parser.parse_args()
@@ -113,13 +308,6 @@ def main():
         print("Error: Could not import TargetTrackerVer4 from tracker_model.py. Ensure this script is run from the tracker_ver4 folder.", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        from tracker_ver4_pxl import TargetTrackerVerPixel
-        import tracker_ver4_pxl
-    except ImportError:
-        TargetTrackerVerPixel = None
-        tracker_ver4_pxl = None
-        
     # 2. Reconstruct Model Architecture
     print("[*] Reconstructing model architecture...")
     try:
@@ -170,8 +358,8 @@ def main():
             loaded_model = tf.keras.models.load_model(args.keras_in, compile=False, safe_mode=False, custom_objects=custom_objects)
         
         # Check model type
-        is_pixel_model = (loaded_model.name == "TargetTrackerVerPixel")
-        print(f"[+] Loaded model type: {'TargetTrackerVerPixel' if is_pixel_model else 'TargetTrackerVer4'}")
+        is_pixel_model = False
+        print("[+] Loaded model type: TargetTrackerVer4")
 
         # Detect parameters
         detected_config = {}
@@ -188,12 +376,12 @@ def main():
             detected_config["attention_mechanism"] = "linear_cross"
 
         # B. Decoder
-        if has_layer("decoder_skip1_proj") or has_layer("decoder_skip2_proj"):
+        if any("ps_shuffle" in l.name or "pixel_shuffle" in l.name for l in loaded_model.layers):
+            detected_config["decoder_type"] = "pixel_shuffle"
+        elif has_layer("decoder_skip1_proj") or has_layer("decoder_skip2_proj"):
             detected_config["decoder_type"] = "fpn_add"
         elif has_layer("decoder_skip1") or any("concat" in l.name for l in loaded_model.layers if "decoder" in l.name):
             detected_config["decoder_type"] = "unet"
-        elif any("pixel_shuffle" in l.name for l in loaded_model.layers):
-            detected_config["decoder_type"] = "pixel_shuffle"
         else:
             detected_config["decoder_type"] = "light_naive"
 
@@ -332,25 +520,49 @@ def main():
             sys.exit(1)
         conversion_model = model
         
-    # Optimize conversion model (replace memory-layout-preserving transposes with reshapes)
-    print("[*] Performing functional graph surgery on conversion model...")
-    try:
-        conversion_model = optimize_and_trim_model(conversion_model, trim_outputs=True)
-        print("[+] Graph surgery completed successfully.")
-    except Exception as surgery_err:
-        print(f"[WARNING] Graph surgery failed: {surgery_err}. Proceeding with original model.")
+    # Save original inputs and outputs for potential calibration/mapping
+    original_inputs_for_calib = conversion_model.inputs
+    original_outputs_for_calib = conversion_model.outputs
+    target_inputs_for_calib = None
+
+    # Extract subgraph if requested
+    if args.input_tensors and args.output_tensors:
+        input_names = [name.strip() for name in args.input_tensors.split(",") if name.strip()]
+        output_names = [name.strip() for name in args.output_tensors.split(",") if name.strip()]
+        print(f"[*] Extracting subgraph for inputs={input_names} and outputs={output_names}...")
+        try:
+            conversion_model = optimize_and_trim_model(conversion_model, trim_outputs=False)
+            conversion_model, target_inputs_for_calib = build_subgraph(conversion_model, input_names, output_names)
+            print("[+] Subgraph extraction completed successfully.")
+        except Exception as e:
+            print(f"Error: Subgraph extraction failed. Details: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Optimize conversion model (replace memory-layout-preserving transposes with reshapes)
+        print("[*] Performing functional graph surgery on conversion model...")
+        try:
+            conversion_model = optimize_and_trim_model(conversion_model, trim_outputs=True)
+            print("[+] Graph surgery completed successfully.")
+        except Exception as surgery_err:
+            print(f"[WARNING] Graph surgery failed: {surgery_err}. Proceeding with original model.")
         
     # 4. Generate Concrete Function with Static Batch Shape (batch_size = 1)
     print("[*] Defining concrete function with static input shapes (forcing batch_size=1)...")
     try:
+        input_specs = []
+        for inp in conversion_model.inputs:
+            shape = inp.shape.as_list()
+            if len(shape) > 0 and (shape[0] is None or shape[0] == -1):
+                shape[0] = 1
+            spec = tf.TensorSpec(shape, dtype=inp.dtype, name=inp.name.split(":")[0])
+            input_specs.append(spec)
+            print(f"[Concrete Function] Input spec: {spec}")
+
         @tf.function
-        def run_model(ref, search):
-            return conversion_model([ref, search])
+        def run_model(*inputs):
+            return conversion_model(inputs)
             
-        concrete_func = run_model.get_concrete_function(
-            tf.TensorSpec([1, 64, 64, 16], tf.float32, name="reference_stack"),
-            tf.TensorSpec([1, 256, 256, 1], tf.float32, name="search_frame")
-        )
+        concrete_func = run_model.get_concrete_function(*input_specs)
         print("[+] Static concrete function generated.")
     except Exception as e:
         print(f"Error: Failed to generate concrete function. Details: {e}", file=sys.stderr)
@@ -381,6 +593,15 @@ def main():
                 
                 if not os.path.exists(h5_path):
                     raise FileNotFoundError(f"HDF5 dataset for calibration not found at: {h5_path}")
+                
+                if target_inputs_for_calib is not None:
+                    # Construct a mapping model to compute intermediate tensors for calibration
+                    calib_mapper = tf.keras.models.Model(
+                        inputs=original_inputs_for_calib,
+                        outputs=target_inputs_for_calib
+                    )
+                else:
+                    calib_mapper = None
                     
                 with h5py.File(h5_path, 'r') as f:
                     ref_ds = f['reference_stack']
@@ -394,7 +615,14 @@ def main():
                     for idx in indices:
                         ref_val = np.expand_dims(ref_ds[idx], axis=0).astype(np.float32)
                         search_val = np.expand_dims(search_ds[idx], axis=0).astype(np.float32)
-                        yield [ref_val, search_val]
+                        
+                        if calib_mapper is not None:
+                            mapped_vals = calib_mapper([ref_val, search_val])
+                            if not isinstance(mapped_vals, list):
+                                mapped_vals = [mapped_vals]
+                            yield [val.numpy() if hasattr(val, "numpy") else val for val in mapped_vals]
+                        else:
+                            yield [ref_val, search_val]
             
             converter.optimizations = [tf.lite.Optimize.DEFAULT]
             converter.representative_dataset = representative_dataset_gen
