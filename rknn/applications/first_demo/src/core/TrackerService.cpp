@@ -6,7 +6,7 @@
 #include <chrono>
 #include <math.h>
 
-TrackerService::TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop)
+TrackerService::TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop, bool quality_enabled)
 {
     FILE* fp;
     long model_size;
@@ -18,15 +18,16 @@ TrackerService::TrackerService(const char* template_path, const char* frame_path
     rknn_tensor_attr template_out_attrs[1];
     rknn_tensor_attr frame_in_attrs[2];
     rknn_tensor_attr frame_out_attrs[2];
-
+ 
     m_ctx_template = 0;
     m_ctx_frame = 0;
     m_is_model_loaded = false;
     m_is_target_defined = false;
     m_callback = NULL;
-
+ 
     m_min_crop = min_crop;
     m_max_crop = max_crop;
+    m_quality_enabled = quality_enabled;
 
     m_in_width_ref = 64;
     m_in_height_ref = 64;
@@ -169,8 +170,11 @@ TrackerService::TrackerService(const char* template_path, const char* frame_path
     memset(frame_out_attrs, 0, sizeof(frame_out_attrs));
     frame_out_attrs[0].index = 0;
     rknn_query(m_ctx_frame, RKNN_QUERY_OUTPUT_ATTR, &frame_out_attrs[0], sizeof(rknn_tensor_attr));
-    frame_out_attrs[1].index = 1;
-    rknn_query(m_ctx_frame, RKNN_QUERY_OUTPUT_ATTR, &frame_out_attrs[1], sizeof(rknn_tensor_attr));
+    if (m_quality_enabled)
+    {
+        frame_out_attrs[1].index = 1;
+        rknn_query(m_ctx_frame, RKNN_QUERY_OUTPUT_ATTR, &frame_out_attrs[1], sizeof(rknn_tensor_attr));
+    }
 
     // Keep shapes
     m_in_height_ref = template_in_attrs[0].dims[1];
@@ -420,11 +424,17 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     // Output 0: predicted_heatmap
     outputs[0].index = 0;
     outputs[0].want_float = 1; // get floating point values for heatmap post-processing
-    // Output 1: predicted_quality
-    outputs[1].index = 1;
-    outputs[1].want_float = 1;
+    
+    int num_outputs = 1;
+    if (m_quality_enabled)
+    {
+        // Output 1: predicted_quality
+        outputs[1].index = 1;
+        outputs[1].want_float = 1;
+        num_outputs = 2;
+    }
 
-    ret = rknn_outputs_get(m_ctx_frame, 2, outputs, NULL);
+    ret = rknn_outputs_get(m_ctx_frame, num_outputs, outputs, NULL);
     if (ret < 0)
     {
         fprintf(stderr, "[TrackerService] rknn_outputs_get failed: %d\n", ret);
@@ -433,10 +443,14 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     // Copy raw output heatmap buffer
     memcpy(m_heatmap_buf, outputs[0].buf, m_out_width_hm * m_out_height_hm * sizeof(float));
-    float pred_quality = *((float*)(outputs[1].buf));
+    float pred_quality = 0.0f;
+    if (m_quality_enabled)
+    {
+        pred_quality = *((float*)(outputs[1].buf));
+    }
 
     // Release outputs immediately
-    rknn_outputs_release(m_ctx_frame, 2, outputs);
+    rknn_outputs_release(m_ctx_frame, num_outputs, outputs);
 
     // 5. Decode heatmap using standard argmax
     t_decode_start = std::chrono::steady_clock::now();
@@ -467,8 +481,15 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     StatusObject::instance()->update("tracker_time_total", time_buf);
 
     // Update StatusObject with quality telemetry
-    snprintf(time_buf, sizeof(time_buf), "%.2f", pred_quality);
-    StatusObject::instance()->update("tracker_quality", time_buf);
+    if (m_quality_enabled)
+    {
+        snprintf(time_buf, sizeof(time_buf), "%.2f", pred_quality);
+        StatusObject::instance()->update("tracker_quality", time_buf);
+    }
+    else
+    {
+        StatusObject::instance()->update("tracker_quality", "Disabled");
+    }
 
     // 6. Trigger TrackerCallback
     {

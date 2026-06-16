@@ -32,6 +32,8 @@ MainService::MainService(const char* params_path)
         m_params.height = 480;
         snprintf(m_params.rknn_template_model_path, sizeof(m_params.rknn_template_model_path), "tracker_template.rknn");
         snprintf(m_params.rknn_frame_model_path, sizeof(m_params.rknn_frame_model_path), "tracker_frame.rknn");
+        snprintf(m_params.rknn_frame_no_quality_model_path, sizeof(m_params.rknn_frame_no_quality_model_path), "tracker_frame_no_quality.rknn");
+        snprintf(m_params.quality_mode, sizeof(m_params.quality_mode), "disabled");
         m_params.min_crop = 64.0f;
         m_params.max_crop = 256.0f;
         save_params_file(m_params_path, m_params);
@@ -69,11 +71,14 @@ void MainService::start()
 
     // 1. Create sub-services
     m_camera = new CameraCapture(m_params.cam_dev, m_params.width, m_params.height);
+    bool quality_enabled = (strcmp(m_params.quality_mode, "disabled") != 0);
+    const char* frame_model = quality_enabled ? m_params.rknn_frame_model_path : m_params.rknn_frame_no_quality_model_path;
     m_tracker = new TrackerService(
         m_params.rknn_template_model_path,
-        m_params.rknn_frame_model_path,
+        frame_model,
         m_params.min_crop,
-        m_params.max_crop
+        m_params.max_crop,
+        quality_enabled
     );
     m_web_server = new WebServer(8080);
 
@@ -269,6 +274,14 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
             {
                 snprintf(out.rknn_frame_model_path, sizeof(out.rknn_frame_model_path), "%s", val);
             }
+            else if (strcmp(key, "rknn_frame_no_quality_model_path") == 0)
+            {
+                snprintf(out.rknn_frame_no_quality_model_path, sizeof(out.rknn_frame_no_quality_model_path), "%s", val);
+            }
+            else if (strcmp(key, "quality_mode") == 0)
+            {
+                snprintf(out.quality_mode, sizeof(out.quality_mode), "%s", val);
+            }
             else if (strcmp(key, "min_crop") == 0)
             {
                 out.min_crop = (float)atof(val);
@@ -296,6 +309,8 @@ void MainService::save_params_file(const char* params_path, const Params& in)
         fprintf(fp, "capture_height=%d\n", in.height);
         fprintf(fp, "rknn_template_model_path=%s\n", in.rknn_template_model_path);
         fprintf(fp, "rknn_frame_model_path=%s\n", in.rknn_frame_model_path);
+        fprintf(fp, "rknn_frame_no_quality_model_path=%s\n", in.rknn_frame_no_quality_model_path);
+        fprintf(fp, "quality_mode=%s\n", in.quality_mode);
         fprintf(fp, "min_crop=%.1f\n", in.min_crop);
         fprintf(fp, "max_crop=%.1f\n", in.max_crop);
         fclose(fp);

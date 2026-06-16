@@ -44,6 +44,7 @@ private:
     // Crop boundaries in absolute pixels
     float m_min_crop;
     float m_max_crop;
+    bool m_quality_enabled;
 
     // Pre-allocated buffers to prevent runtime heap allocation
     uchar* m_ref_stack_buf;
@@ -62,7 +63,7 @@ private:
     void decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y);
 
 public:
-    TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop);
+    TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop, bool quality_enabled);
     ~TrackerService();
 
     bool is_model_loaded() const;

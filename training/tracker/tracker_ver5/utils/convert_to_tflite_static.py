@@ -214,11 +214,84 @@ def build_subgraph(model, input_names, output_names):
 
 def optimize_and_trim_model(model, trim_outputs=True):
     import tensorflow as tf
+    from tensorflow.keras import layers, models
+
+    # 1. Replace AveragePooling2D (stride=1) layers with DepthwiseConv2D
+    # to avoid NPU-to-CPU fallback.
+    has_avg_pool = any(isinstance(l, layers.AveragePooling2D) and l.strides == (1, 1) for l in model.layers)
+    if has_avg_pool:
+        print("[Optimizer] Found AveragePooling2D with stride=1. Reconstructing model graph to replace with DepthwiseConv2D...")
+        try:
+            tensor_map = {}
+            new_inputs = []
+            for inp in model.inputs:
+                new_inp = layers.Input(shape=inp.shape[1:], dtype=inp.dtype, name=inp.name.split(":")[0])
+                new_inputs.append(new_inp)
+                tensor_map[id(inp)] = new_inp
+                
+            for layer in model.layers:
+                if isinstance(layer, layers.InputLayer):
+                    continue
+                
+                # Retrieve inbound node connections
+                inbound_nodes = layer.inbound_nodes if hasattr(layer, "inbound_nodes") else layer._inbound_nodes
+                if not inbound_nodes:
+                    continue
+                input_tensors = inbound_nodes[0].input_tensors
+                if isinstance(input_tensors, list):
+                    layer_inputs = [tensor_map[id(t)] for t in input_tensors]
+                else:
+                    layer_inputs = tensor_map[id(input_tensors)]
+                    
+                if isinstance(layer, layers.AveragePooling2D) and layer.strides == (1, 1):
+                    pool_size = layer.pool_size
+                    padding = layer.padding
+                    name = layer.name
+                    
+                    # Find channel size
+                    in_shape = layer.input_spec.shape if (hasattr(layer, "input_spec") and layer.input_spec) else layer.input.shape
+                    channels = in_shape[-1] if in_shape is not None else 1
+                    
+                    # Compute constant weight scale
+                    kh, kw = pool_size
+                    scale = 1.0 / (kh * kw)
+                    
+                    print(f"  [Replacement] Replacing AveragePooling2D '{name}' (pool={pool_size}) with DepthwiseConv2D...")
+                    new_layer = layers.DepthwiseConv2D(
+                        kernel_size=pool_size,
+                        strides=(1, 1),
+                        padding=padding,
+                        depth_multiplier=1,
+                        use_bias=False,
+                        depthwise_initializer=tf.keras.initializers.Constant(scale),
+                        trainable=False,
+                        name=name
+                    )
+                    x = new_layer(layer_inputs)
+                else:
+                    # Apply original layer to new inputs
+                    x = layer(layer_inputs)
+                    
+                outputs = layer.output
+                if isinstance(outputs, list):
+                    for orig_out, new_out in zip(outputs, x):
+                        tensor_map[id(orig_out)] = new_out
+                else:
+                    tensor_map[id(outputs)] = x
+                    
+            new_outputs = [tensor_map[id(out)] for out in model.outputs]
+            model = models.Model(inputs=new_inputs, outputs=new_outputs, name=model.name + "_optimized")
+            print("[+] Model graph reconstruction completed successfully.")
+        except Exception as reconstruct_err:
+            print(f"[WARNING] Failed to reconstruct graph: {reconstruct_err}. Proceeding with original layers.")
+
+    # 2. Trim outputs if requested
     if trim_outputs:
         raw_heatmap_output = model.get_layer("predicted_heatmap_raw").output
         print(f"[Optimizer] Trimming model outputs: keeping only raw heatmap '{raw_heatmap_output.name}'")
         model = tf.keras.models.Model(inputs=model.inputs, outputs=[raw_heatmap_output], name=model.name + "_trimmed")
     return model
+
 
 def main():
     parser = argparse.ArgumentParser(description="Statically convert Tracker Ver 4 Keras model to TFLite.")
@@ -513,6 +586,9 @@ def main():
                 if len(layer.weights) == 0:
                     continue
                 loaded_layer = loaded_model.get_layer(layer.name)
+                if len(loaded_layer.weights) != len(layer.weights):
+                    print(f"[WARNING] Weight count mismatch for layer '{layer.name}': target has {len(layer.weights)} weights, source has {len(loaded_layer.weights)}. Retaining initialized weights.")
+                    continue
                 layer.set_weights(loaded_layer.get_weights())
             print("[+] Weights loaded successfully via layer-by-layer copy.")
         except Exception as e:

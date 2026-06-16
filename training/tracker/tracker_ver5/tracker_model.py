@@ -936,7 +936,16 @@ class TargetTrackerVer4:
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
         output_heatmap_norm = HeatmapNormalization(name="predicted_heatmap_norm")(output_heatmap_raw)
         thresholded = tf.nn.relu(output_heatmap_norm - 0.5) * 2.0
-        output_heatmap = layers.AveragePooling2D(pool_size=5, strides=1, padding='same', name="predicted_heatmap")(thresholded)
+        output_heatmap = layers.DepthwiseConv2D(
+            kernel_size=(5, 5),
+            strides=(1, 1),
+            padding="same",
+            depth_multiplier=1,
+            use_bias=False,
+            depthwise_initializer=tf.keras.initializers.Constant(1.0 / 25.0),
+            trainable=False,
+            name="predicted_heatmap"
+        )(thresholded)
         
         # 4. Heatmap-Guided Classification Branch
         hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap)
