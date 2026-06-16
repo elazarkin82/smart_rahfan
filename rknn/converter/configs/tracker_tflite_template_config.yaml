@@ -21,7 +21,7 @@ quantization:
   do_quantization: false
   
   # Path to the calibration dataset descriptor file
-  dataset_path: "./configs/dataset.txt"
+  dataset_path: "./configs/dataset_template.txt"
   
   # Quantization algorithm: 'normal' or 'mmse' (MMSE can provide better accuracy for some models)
   quantized_algorithm: "mmse"

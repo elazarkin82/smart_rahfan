@@ -21,13 +21,13 @@ quantization:
   do_quantization: false
   
   # Path to the calibration dataset descriptor file
-  dataset_path: "./configs/dataset.txt"
+  dataset_path: "./configs/dataset_frame.txt"
   
-  # Quantization algorithm: 'normal' or 'mmse' (MMSE can provide better accuracy for some models)
-  quantized_algorithm: "mmse"
+  # Quantization algorithm: 'normal' or 'mmse' of 'kl_divergence' (MMSE can provide better accuracy for some models)
+  quantized_algorithm: "normal"
   
-  # Quantized dtype: 'asymmetric_quantized-8' (INT8)
-  quantized_dtype: "asymmetric_quantized-8"
+  # Quantized dtype: 'asymmetric_quantized-8' (INT8) w8a8
+  quantized_dtype: "w8a8"
 
 # Input tensor details
 inputs:
