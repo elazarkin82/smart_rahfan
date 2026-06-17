@@ -238,9 +238,9 @@ class ModelInferenceVisualizer:
             # Scale target_2d to normalized coordinates
             h_raw, w_raw = search_raw.shape[:2]
             if gt_quality > 0.5:
-                # gt_coords is [y, x] in 256x256 space
-                norm_x = gt_coords[1] / 256.0
-                norm_y = gt_coords[0] / 256.0
+                # gt_coords is [y, x] in normalized [0, 1] space
+                norm_x = gt_coords[1]
+                norm_y = gt_coords[0]
                 norm_coords = [norm_x, norm_y]
                 curr_lbl_text = f"GT: [{norm_x:.2f}, {norm_y:.2f}]"
                 curr_lbl_fg = "#00e6ff"
@@ -305,7 +305,7 @@ class ModelInferenceVisualizer:
             heatmap = pred_heatmap[:, :, 0]
             flat_idx = np.argmax(heatmap)
             y_max, x_max = np.unravel_index(flat_idx, heatmap.shape)
-            pred_norm = [x_max / 256.0, y_max / 256.0]
+            pred_norm = [x_max / heatmap.shape[1], y_max / heatmap.shape[0]]
 
  
             search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)

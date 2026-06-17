@@ -49,7 +49,7 @@ if ref_idx is None or search_idx is None:
 heatmap_idx = None
 quality_idx = None
 for detail in output_details:
-    if 256 in detail['shape']:
+    if len(detail['shape']) == 4:
         heatmap_idx = detail['index']
     else:
         quality_idx = detail['index']
@@ -62,7 +62,7 @@ print(f"\nLoading some samples from {h5_path}...")
 with h5py.File(h5_path, 'r') as f:
     ref_stack = f['reference_stack'][:5].astype(np.float32)
     search_frame = f['search_frame'][:5].astype(np.float32)
-    gt_heatmap = f['ground_truth_heatmap'][:5].astype(np.float32)
+    gt_coords = f['ground_truth_coords'][:5].astype(np.float32)
 
 print("Running inference on 5 samples...")
 for i in range(5):
@@ -74,7 +74,7 @@ for i in range(5):
     pred_q = interpreter.get_tensor(quality_idx)
     
     print(f"\nSample {i}:")
-    print(f"  GT Heatmap max: {np.max(gt_heatmap[i]):.4f}")
+    print(f"  GT Coords: {gt_coords[i]}")
     print(f"  Pred Heatmap max: {np.max(pred_hm):.4f}")
     print(f"  Pred Heatmap min: {np.min(pred_hm):.4f}")
     print(f"  Pred Heatmap mean: {np.mean(pred_hm):.4f}")

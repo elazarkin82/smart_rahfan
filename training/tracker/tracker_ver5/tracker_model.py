@@ -299,8 +299,12 @@ def soft_argmax_2d(heatmap, beta=30.0):
     # Apply softmax with temperature beta
     probs = tf.nn.softmax(beta * flat_hm, axis=-1) # shape (B, H*W)
     
-    # Create coordinates grid
-    y_grid, x_grid = tf.meshgrid(tf.range(H, dtype=tf.float32), tf.range(W, dtype=tf.float32), indexing='ij')
+    # Create coordinates grid normalized to [0.0, 1.0] range
+    y_grid, x_grid = tf.meshgrid(
+        tf.range(H, dtype=tf.float32) / tf.cast(H, tf.float32),
+        tf.range(W, dtype=tf.float32) / tf.cast(W, tf.float32),
+        indexing='ij'
+    )
     
     # Flatten grids
     flat_y = tf.reshape(y_grid, [-1]) # shape (H*W,)
@@ -316,9 +320,9 @@ def coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality, c_bg=3.0):
     # 1. Differentiable Soft-Argmax to extract coordinates from predicted heatmap
     pred_coords_soft = soft_argmax_2d(pred_heatmap, beta=30.0)
     
-    # 2. Huber loss on positive samples (predicted coordinates vs ground truth coordinates)
+    # 2. Scale both predicted and ground-truth coordinates to 256.0 space to compute Huber loss in pixel units
     huber = tf.keras.losses.Huber(delta=1.0, reduction=tf.keras.losses.Reduction.NONE)
-    loss_coords = huber(gt_coords, pred_coords_soft)
+    loss_coords = huber(gt_coords * 256.0, pred_coords_soft * 256.0)
     loss_coords = tf.reshape(loss_coords, [-1, 1])
     
     # 3. DBSZ ReLU / MSE loss on negative samples (predicted heatmap vs zero map)
@@ -1014,7 +1018,11 @@ class TargetTrackerVer4:
                 
             if train_mode in ("quality_only", "joint"):
                 pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
-                dist = tf.norm(pred_coords - gt_coords, axis=-1, keepdims=True)
+                # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
+                H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
+                pred_coords_scaled = pred_coords * (256.0 / H)
+                # Compare against gt_coords scaled to 256.0 space
+                dist = tf.norm(pred_coords_scaled - gt_coords * 256.0, axis=-1, keepdims=True)
                 dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                 target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                 target_quality = tf.stop_gradient(target_quality)
@@ -1068,7 +1076,11 @@ class TargetTrackerVer4:
                     
                 if train_mode in ("quality_only", "joint"):
                     pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
-                    dist = tf.norm(pred_coords - gt_coords, axis=-1, keepdims=True)
+                    # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
+                    H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
+                    pred_coords_scaled = pred_coords * (256.0 / H)
+                    # Compare against gt_coords scaled to 256.0 space
+                    dist = tf.norm(pred_coords_scaled - gt_coords * 256.0, axis=-1, keepdims=True)
                     dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                     target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                     target_quality = tf.stop_gradient(target_quality)

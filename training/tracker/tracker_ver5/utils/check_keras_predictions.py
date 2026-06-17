@@ -28,13 +28,13 @@ print(f"\nLoading some samples from {h5_path}...")
 with h5py.File(h5_path, 'r') as f:
     ref_stack = f['reference_stack'][:5].astype(np.float32)
     search_frame = f['search_frame'][:5].astype(np.float32)
-    gt_heatmap = f['ground_truth_heatmap'][:5].astype(np.float32)
+    gt_coords = f['ground_truth_coords'][:5].astype(np.float32)
 
 print("\nRunning QAT Keras inference on 5 samples...")
 for i in range(5):
     hm, q = model([ref_stack[i:i+1], search_frame[i:i+1]], training=False)
     print(f"\nSample {i}:")
-    print(f"  GT Heatmap max: {np.max(gt_heatmap[i]):.4f}")
+    print(f"  GT Coords: {gt_coords[i]}")
     print(f"  QAT Keras Heatmap max: {np.max(hm):.4f}")
     print(f"  QAT Keras Heatmap min: {np.min(hm):.4f}")
     print(f"  QAT Keras Quality: {q[0][0]:.4f}")

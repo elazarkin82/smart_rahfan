@@ -201,8 +201,8 @@ def main():
             scale_factor = 256.0 / s_crop
             local_target_2d_scaled = (local_target_2d[0] * scale_factor, local_target_2d[1] * scale_factor)
             
-            # Save coordinates in [y, x] format
-            coords_float = np.array([local_target_2d_scaled[1], local_target_2d_scaled[0]], dtype=np.float32)
+            # Save coordinates in [y, x] format normalized to [0, 1] space
+            coords_float = np.array([local_target_2d_scaled[1] / 256.0, local_target_2d_scaled[0] / 256.0], dtype=np.float32)
             
             quality_score = 1.0
             

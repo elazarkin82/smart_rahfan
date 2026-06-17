@@ -40,7 +40,7 @@ import tqdm
 def _soft_argmax_2d(heatmap, beta=30.0):
     """Differentiable soft-argmax over a (B, H, W, 1) heatmap.
 
-    Returns a (B, 2) tensor of [y, x] coordinates in pixel units,
+    Returns a (B, 2) tensor of [y, x] coordinates in normalized [0, 1] units,
     computed as the softmax-weighted expectation over the spatial grid.
     """
     B = tf.shape(heatmap)[0]
@@ -51,8 +51,8 @@ def _soft_argmax_2d(heatmap, beta=30.0):
     probs = tf.nn.softmax(beta * flat_hm, axis=-1)  # (B, H*W)
 
     y_grid, x_grid = tf.meshgrid(
-        tf.cast(tf.range(H), tf.float32),
-        tf.cast(tf.range(W), tf.float32),
+        tf.cast(tf.range(H), tf.float32) / tf.cast(H, tf.float32),
+        tf.cast(tf.range(W), tf.float32) / tf.cast(W, tf.float32),
         indexing='ij',
     )
     flat_y = tf.reshape(y_grid, [-1])  # (H*W,)
@@ -66,15 +66,15 @@ def _soft_argmax_2d(heatmap, beta=30.0):
 def _gt_peak_coords(gt_heatmap):
     """Hard-argmax peak coordinates from a (B, H, W, 1) GT heatmap.
 
-    Returns a (B, 2) tensor of [y, x] in pixel units.
+    Returns a (B, 2) tensor of [y, x] in normalized [0, 1] units.
     """
     H = tf.shape(gt_heatmap)[1]
     W = tf.shape(gt_heatmap)[2]
     flat_hm = tf.reshape(gt_heatmap, [-1, H * W])
     flat_idx = tf.argmax(flat_hm, axis=-1)
     W_64 = tf.cast(W, tf.int64)
-    y = tf.cast(flat_idx // W_64, tf.float32)
-    x = tf.cast(flat_idx % W_64, tf.float32)
+    y = tf.cast(flat_idx // W_64, tf.float32) / tf.cast(H, tf.float32)
+    x = tf.cast(flat_idx % W_64, tf.float32) / tf.cast(W, tf.float32)
     return tf.stack([y, x], axis=-1)  # (B, 2)
 
 
@@ -83,18 +83,15 @@ class SoftArgmaxCoordLoss(tf.keras.losses.Loss):
 
     Given a predicted heatmap, extracts coordinates via a differentiable
     soft-argmax (temperature beta), then computes a per-sample Huber loss
-    against the hard-argmax peak of the target heatmap.
+    against the target coordinates (which are in [0, 1] relative range).
 
     In teacher-student (distillation) mode the target heatmap is the
-    teacher's output.  A positive-sample mask is applied: samples where
-    the target peak confidence is below `peak_threshold` are ignored
-    (treated as negative / background).  This mirrors the masking logic
-    in tracker_model_coords.py coordinate_distance_loss().
+    teacher's output.  A positive-sample mask is applied.
 
     Args:
         beta:            Soft-argmax temperature (higher → sharper, closer
                          to hard-argmax; default 30.0).
-        huber_delta:     Delta for the Huber loss (default 1.0 pixel).
+        huber_delta:     Delta for the Huber loss (default 1.0 pixel in 256px space).
         peak_threshold:  Minimum target heatmap peak value to consider a
                          sample positive (default 0.1).
         name:            Loss name shown in training logs.
@@ -115,24 +112,33 @@ class SoftArgmaxCoordLoss(tf.keras.losses.Loss):
         """Compute masked coordinate Huber loss.
 
         Args:
-            y_true: (B, H, W, 1) target heatmap (teacher or GT).
+            y_true: target coordinates (B, 2) OR target heatmap (B, H, W, 1).
             y_pred: (B, H, W, 1) predicted heatmap from the student model.
 
         Returns:
             Scalar loss (mean over positive samples; 0 if no positives).
         """
-        pred_coords = _soft_argmax_2d(y_pred, beta=self.beta)   # (B, 2)
-        gt_coords   = _gt_peak_coords(y_true)                    # (B, 2)
+        pred_coords_norm = _soft_argmax_2d(y_pred, beta=self.beta)   # (B, 2) in [0, 1]
 
-        coord_loss = self._huber(gt_coords, pred_coords)         # (B,)
-        coord_loss = tf.reshape(coord_loss, [-1, 1])             # (B, 1)
+        # Determine target format and mask dynamically
+        if len(y_true.shape) == 2 or y_true.shape[-1] == 2:
+            # y_true is ground_truth_coords (B, 2)
+            gt_coords_norm = y_true
+            # Positive sample: L2 norm of coordinates is non-zero (negatives are [0, 0])
+            pos_mask = tf.cast(tf.reduce_sum(tf.square(y_true), axis=-1) > 1e-6, tf.float32)
+        else:
+            # y_true is teacher heatmap output (B, H, W, 1)
+            gt_coords_norm = _gt_peak_coords(y_true)
+            peak_val = tf.reduce_max(
+                tf.reshape(y_true, [tf.shape(y_true)[0], -1]), axis=-1
+            )  # (B,)
+            pos_mask = tf.cast(peak_val > self.peak_threshold, tf.float32)
 
-        # Positive mask: samples where the target contains a real peak.
-        peak_val = tf.reduce_max(
-            tf.reshape(y_true, [tf.shape(y_true)[0], -1]), axis=-1
-        )  # (B,)
-        pos_mask = tf.cast(peak_val > self.peak_threshold, tf.float32)
         pos_mask = tf.reshape(pos_mask, [-1, 1])                 # (B, 1)
+
+        # Scale both coordinates to 256.0 space to compute Huber loss in pixel units
+        coord_loss = self._huber(gt_coords_norm * 256.0, pred_coords_norm * 256.0) # (B,)
+        coord_loss = tf.reshape(coord_loss, [-1, 1])             # (B, 1)
 
         masked_loss = coord_loss * pos_mask
         return tf.reduce_sum(masked_loss) / (tf.reduce_sum(pos_mask) + 1e-7)
@@ -165,7 +171,7 @@ class MemorySafeDataset:
         with h5py.File(h5_path, 'r') as f:
             self.total_samples = f['reference_stack'].shape[0]
 
-        sample_size_bytes = (64 * 64 * 16 + 256 * 256 * 1 + 256 * 256 * 1) * 4 + 4
+        sample_size_bytes = (64 * 64 * 16 + 256 * 256 * 1) * 4 + 12
         total_expected_bytes = self.total_samples * sample_size_bytes
 
         mem = psutil.virtual_memory()
@@ -176,27 +182,27 @@ class MemorySafeDataset:
             with h5py.File(h5_path, 'r') as f:
                 self.ref_all    = f['reference_stack'][:]
                 self.search_all = f['search_frame'][:]
-                self.gt_hm_all  = f['ground_truth_heatmap'][:]
+                self.gt_coords_all  = f['ground_truth_coords'][:]
                 self.gt_q_all   = f['ground_truth_quality'][:]
             self.preload_mode = True
         else:
             print(f"[*] Dataset size ({total_expected_bytes / (1024**3):.2f} GB) "
                   "exceeds safe RAM limits. Streaming from HDF5...")
             self.preload_mode = False
-
+ 
     def get_generator(self):
         import h5py
-
+ 
         total_samples = self.total_samples
         batch_size    = self.batch_size
-
-        def _make_batch(ref, search, gt_hm, gt_q):
+ 
+        def _make_batch(ref, search, gt_coords, gt_q):
             inputs  = {"reference_stack": tf.convert_to_tensor(ref,    dtype=tf.float32),
                        "search_frame":    tf.convert_to_tensor(search, dtype=tf.float32)}
-            targets = {"ground_truth_heatmap": tf.convert_to_tensor(gt_hm, dtype=tf.float32),
+            targets = {"ground_truth_coords": tf.convert_to_tensor(gt_coords, dtype=tf.float32),
                        "ground_truth_quality": tf.convert_to_tensor(gt_q,  dtype=tf.float32)}
             return inputs, targets
-
+ 
         if self.preload_mode:
             def generator():
                 indices = np.arange(total_samples)
@@ -207,7 +213,7 @@ class MemorySafeDataset:
                     yield _make_batch(
                         self.ref_all[bi].astype(np.float32),
                         self.search_all[bi].astype(np.float32),
-                        self.gt_hm_all[bi].astype(np.float32),
+                        self.gt_coords_all[bi].astype(np.float32),
                         self.gt_q_all[bi].astype(np.float32),
                     )
         else:
@@ -224,7 +230,7 @@ class MemorySafeDataset:
                         yield _make_batch(
                             f['reference_stack'][sorted_bi][rev_ord].astype(np.float32),
                             f['search_frame'][sorted_bi][rev_ord].astype(np.float32),
-                            f['ground_truth_heatmap'][sorted_bi][rev_ord].astype(np.float32),
+                            f['ground_truth_coords'][sorted_bi][rev_ord].astype(np.float32),
                             f['ground_truth_quality'][sorted_bi][rev_ord].astype(np.float32),
                         )
 
