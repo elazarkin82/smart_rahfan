@@ -215,6 +215,7 @@ def check_and_create_default_config(config_path="model.conf"):
 #   - mnv1            : Standard MobileNetV1 backbone.
 #   - mnv2            : Full MobileNetV2 backbone.
 #   - yolo5           : CSPDarknet-style backbone.
+#   - unet            : UNet-style encoder, 2 Conv blocks per scale, 3 downsampling stages (stride x8).
 #   - custom_legacy   : The original hardcoded tracker_ver4 reference backbone.
 reference_backbone = mini_mnv2
 
@@ -224,6 +225,7 @@ reference_backbone = mini_mnv2
 #   - mnv1            : Standard MobileNetV1 backbone.
 #   - mnv2            : Full MobileNetV2 backbone.
 #   - yolo5           : CSPDarknet-style backbone.
+#   - unet            : UNet-style encoder, 2 Conv blocks per scale, 4 downsampling stages (stride x16).
 #   - custom_legacy   : The original hardcoded tracker_ver4 search backbone.
 search_backbone = mnv2_nano
 
@@ -633,6 +635,40 @@ class TargetTrackerVer4:
             x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
             x = layers.ReLU(6.0, name="sb_final_relu")(x)
             
+        elif bb_type == "unet":
+            # UNet-style encoder: 2 conv blocks per resolution, strided-conv for downsampling (NPU-friendly, no MaxPool)
+            # Stage 1: stride 2 -> (128, 128, C16)
+            x1 = layers.Conv2D(scale_filters(16), (11, 11), strides=2, padding="same", use_bias=False, name="sb_ue1_conv1")(inputs)
+            x1 = _GroupNormalization(scale_filters(16), name="sb_ue1_gn1")(x1)
+            x1 = layers.ReLU(6.0, name="sb_ue1_relu1")(x1)
+            x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=1, padding="same", use_bias=False, name="sb_ue1_conv2")(x1)
+            x1 = _GroupNormalization(scale_filters(16), name="sb_ue1_gn2")(x1)
+            x1 = layers.ReLU(6.0, name="sb_ue1_relu2")(x1)
+            
+            # Stage 2: stride 4 -> (64, 64, C24)
+            x2 = layers.Conv2D(scale_filters(24), (7, 7), strides=2, padding="same", use_bias=False, name="sb_ue2_conv1")(x1)
+            x2 = _GroupNormalization(scale_filters(24), name="sb_ue2_gn1")(x2)
+            x2 = layers.ReLU(6.0, name="sb_ue2_relu1")(x2)
+            x2 = layers.Conv2D(scale_filters(24), (3, 3), strides=1, padding="same", use_bias=False, name="sb_ue2_conv2")(x2)
+            x2 = _GroupNormalization(scale_filters(24), name="sb_ue2_gn2")(x2)
+            x2 = layers.ReLU(6.0, name="sb_ue2_relu2")(x2)
+            
+            # Stage 3: stride 8 -> (32, 32, C32)
+            x3 = layers.Conv2D(scale_filters(32), (5, 5), strides=2, padding="same", use_bias=False, name="sb_ue3_conv1")(x2)
+            x3 = _GroupNormalization(scale_filters(32), name="sb_ue3_gn1")(x3)
+            x3 = layers.ReLU(6.0, name="sb_ue3_relu1")(x3)
+            x3 = layers.Conv2D(scale_filters(32), (3, 3), strides=1, padding="same", use_bias=False, name="sb_ue3_conv2")(x3)
+            x3 = _GroupNormalization(scale_filters(32), name="sb_ue3_gn2")(x3)
+            x3 = layers.ReLU(6.0, name="sb_ue3_relu2")(x3)
+            
+            # Bottleneck: stride 16 -> (16, 16, C128)
+            x = layers.Conv2D(scale_filters(64), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ue4_conv1")(x3)
+            x = _GroupNormalization(scale_filters(64), name="sb_ue4_gn1")(x)
+            x = layers.ReLU(6.0, name="sb_ue4_relu1")(x)
+            x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_ue4_conv2")(x)
+            x = _GroupNormalization(scale_filters(128), name="sb_ue4_gn2")(x)
+            x = layers.ReLU(6.0, name="sb_ue4_relu2")(x)
+            
         else: # custom_legacy
             # Init conv (strides=2) -> (128, 128, 16)
             x1 = layers.Conv2D(16, (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
@@ -782,6 +818,32 @@ class TargetTrackerVer4:
             x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
             x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
             x = layers.ReLU(6.0, name="ref_final_relu")(x)
+            
+        elif bb_type == "unet":
+            # UNet-style encoder: 2 conv blocks per resolution, strided-conv for downsampling (NPU-friendly, no MaxPool)
+            # Stage 1: stride 2 -> (32, 32, C16)
+            x = layers.Conv2D(scale_filters(16), (11, 11), strides=2, padding="same", use_bias=False, name="ref_ue1_conv1")(x)
+            x = _GroupNormalization(scale_filters(16), name="ref_ue1_gn1")(x)
+            x = layers.ReLU(6.0, name="ref_ue1_relu1")(x)
+            x = layers.Conv2D(scale_filters(16), (3, 3), strides=1, padding="same", use_bias=False, name="ref_ue1_conv2")(x)
+            x = _GroupNormalization(scale_filters(16), name="ref_ue1_gn2")(x)
+            x = layers.ReLU(6.0, name="ref_ue1_relu2")(x)
+            
+            # Stage 2: stride 4 -> (16, 16, C32)
+            x = layers.Conv2D(scale_filters(32), (7, 7), strides=2, padding="same", use_bias=False, name="ref_ue2_conv1")(x)
+            x = _GroupNormalization(scale_filters(32), name="ref_ue2_gn1")(x)
+            x = layers.ReLU(6.0, name="ref_ue2_relu1")(x)
+            x = layers.Conv2D(scale_filters(32), (3, 3), strides=1, padding="same", use_bias=False, name="ref_ue2_conv2")(x)
+            x = _GroupNormalization(scale_filters(32), name="ref_ue2_gn2")(x)
+            x = layers.ReLU(6.0, name="ref_ue2_relu2")(x)
+            
+            # Bottleneck: stride 8 -> (8, 8, C128)
+            x = layers.Conv2D(scale_filters(64), (5, 5), strides=2, padding="same", use_bias=False, name="ref_ue3_conv1")(x)
+            x = _GroupNormalization(scale_filters(64), name="ref_ue3_gn1")(x)
+            x = layers.ReLU(6.0, name="ref_ue3_relu1")(x)
+            x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="ref_ue3_conv2")(x)
+            x = _GroupNormalization(scale_filters(128), name="ref_ue3_gn2")(x)
+            x = layers.ReLU(6.0, name="ref_ue3_relu2")(x)
             
         else: # custom_legacy
             # Strides: 2 * 2 * 2 = 8
