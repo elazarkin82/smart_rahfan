@@ -49,7 +49,7 @@ endif()
 find_package(Threads REQUIRED)
 
 # Options for Resize Mode selection (RGA, OMP, CPU)
-set(RESIZE_MODE "OMP" CACHE STRING "Resize mode: RGA, OMP, CPU")
+set(RESIZE_MODE "RGA" CACHE STRING "Resize mode: RGA, OMP, CPU")
 set_property(CACHE RESIZE_MODE PROPERTY STRINGS "RGA" "OMP" "CPU")
 
 set(EXTRA_LIBS "")

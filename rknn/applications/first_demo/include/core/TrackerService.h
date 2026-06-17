@@ -3,6 +3,10 @@
 
 #include <mutex>
 #include "rknn_api.h"
+#if defined(USE_RGA)
+#include <RgaApi.h>
+#include <im2d.h>
+#endif
 
 typedef unsigned char uchar;
 
@@ -60,6 +64,20 @@ private:
     void resize_nearest_gray(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
 #if defined(USE_RGA)
     void resize_rga(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
+    bool init_rga_buffers(int src_w, int src_h);
+    void release_rga_buffers();
+    // DMA heap buffer state for RGA hardware acceleration
+    bool                m_rga_initialized;
+    int                 m_rga_src_w;
+    int                 m_rga_src_h;
+    int                 m_rga_src_fd;
+    int                 m_rga_dst_fd;
+    uchar*              m_rga_src_va;
+    uchar*              m_rga_dst_va;
+    rga_buffer_handle_t m_rga_src_handle;
+    rga_buffer_handle_t m_rga_dst_handle;
+    rga_buffer_t        m_rga_src_buf;
+    rga_buffer_t        m_rga_dst_buf;
 #elif defined(USE_OMP)
     void resize_bilinear_omp(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
 #endif
