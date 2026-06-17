@@ -6,6 +6,11 @@
 #include <chrono>
 #include <math.h>
 
+#if defined(USE_RGA)
+#include <RgaApi.h>
+#include <im2d.h>
+#endif
+
 TrackerService::TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop, bool quality_enabled)
 {
     FILE* fp;
@@ -381,9 +386,15 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     t_start = std::chrono::steady_clock::now();
 
-    // 1. Resize incoming frame to search window size (using Bilinear Interpolation)
+    // 1. Resize incoming frame to search window size (conditional compile-time flags)
     t_resize_start = std::chrono::steady_clock::now();
+#if defined(USE_RGA)
+    resize_rga(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
+#elif defined(USE_OMP)
+    resize_bilinear_omp(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
+#else
     resize_bilinear_gray(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
+#endif
     t_resize_end = std::chrono::steady_clock::now();
 
     // 2. Setup inputs
@@ -572,6 +583,63 @@ void TrackerService::resize_nearest_gray(const uchar* src, int src_w, int src_h,
         }
     }
 }
+
+#if defined(USE_RGA)
+void TrackerService::resize_rga(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h)
+{
+    rga_buffer_t src_buf = wrapbuffer_virtualaddr((void*)src, src_w, src_h, RK_FORMAT_Y8);
+    rga_buffer_t dst_buf = wrapbuffer_virtualaddr((void*)dst, dst_w, dst_h, RK_FORMAT_Y8);
+    
+    IM_STATUS status = imresize(src_buf, dst_buf);
+    if (status != IM_STATUS_SUCCESS)
+    {
+        fprintf(stderr, "[TrackerService] RGA hardware resize failed: %d. Falling back to CPU.\n", status);
+        resize_bilinear_gray(src, src_w, src_h, dst, dst_w, dst_h);
+    }
+}
+#elif defined(USE_OMP)
+void TrackerService::resize_bilinear_omp(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h)
+{
+    float x_ratio = ((float)(src_w - 1)) / dst_w;
+    float y_ratio = ((float)(src_h - 1)) / dst_h;
+
+    #pragma omp parallel for schedule(dynamic)
+    for (int y = 0; y < dst_h; ++y)
+    {
+        for (int x = 0; x < dst_w; ++x)
+        {
+            int x_l = (int)(x_ratio * x);
+            int y_l = (int)(y_ratio * y);
+            int x_h = x_l + 1;
+            int y_h = y_l + 1;
+
+            if (x_h >= src_w)
+            {
+                x_h = src_w - 1;
+            }
+            if (y_h >= src_h)
+            {
+                y_h = src_h - 1;
+            }
+
+            float x_weight = (x_ratio * x) - x_l;
+            float y_weight = (y_ratio * y) - y_l;
+
+            uchar a = src[y_l * src_w + x_l];
+            uchar b = src[y_l * src_w + x_h];
+            uchar c = src[y_h * src_w + x_l];
+            uchar d = src[y_h * src_w + x_h];
+
+            dst[y * dst_w + x] = (uchar)(
+                a * (1.0f - x_weight) * (1.0f - y_weight) +
+                b * x_weight * (1.0f - y_weight) +
+                c * (1.0f - x_weight) * y_weight +
+                d * x_weight * y_weight
+            );
+        }
+    }
+}
+#endif
 
 void TrackerService::decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y)
 {
