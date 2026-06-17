@@ -27,6 +27,8 @@ echo "============================================================"
 # Create outputs directory
 mkdir -p outputs
 
+KERAS_IN=outputs/tracker_coords_qat.keras
+
 # 1. Export Part 1: Template Encoder Graph
 # Input: reference_stack (1, 64, 64, 16)
 # Output: reference_target_encoder (1, 8, 8, 64)
@@ -43,7 +45,7 @@ python3 utils/convert_to_tflite_static.py \
 # Outputs: predicted_heatmap, predicted_quality
 echo "[*] Exporting Part 2: Frame NPU Tracking Subgraph..."
 python3 utils/convert_to_tflite_static.py \
-    --keras_in outputs/tracker_model_fbn.keras \
+    --keras_in ${KERAS_IN} \
     --tflite_out outputs/tracker_frame.tflite \
     --input_tensors search_frame,reference_target_encoder \
     --output_tensors predicted_heatmap,predicted_quality \
@@ -54,7 +56,7 @@ python3 utils/convert_to_tflite_static.py \
 # Outputs: predicted_heatmap
 echo "[*] Exporting Part 2a: Frame NPU Tracking Subgraph (No Quality)..."
 python3 utils/convert_to_tflite_static.py \
-    --keras_in outputs/tracker_model_fbn.keras \
+    --keras_in ${KERAS_IN} \
     --tflite_out outputs/tracker_frame_no_quality.tflite \
     --input_tensors search_frame,reference_target_encoder \
     --output_tensors predicted_heatmap \

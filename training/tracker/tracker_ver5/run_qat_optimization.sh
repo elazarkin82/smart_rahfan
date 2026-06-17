@@ -13,11 +13,11 @@ cd "$SCRIPT_DIR"
 # --- QAT (Quantization-Aware Training) Config ---
 
 # Path to input pre-trained float32 Keras model
-KERAS_IN="outputs/tracker_coords_3_fbn.keras"
+KERAS_IN="outputs/tracker_coords_fbn.keras"
 
 # Path to save QAT-optimized Keras model containing fake quantization parameters
 # (This model is stripped of tfmot training wrappers and is ready for conversion)
-KERAS_QAT_OUT="outputs/tracker_coords_3_qat.keras"
+KERAS_QAT_OUT="outputs/tracker_coords_qat.keras"
 
 # QAT Training Mode:
 #   - "teacher-student" : Knowledge Distillation (student learns to match the teacher's float32 outputs)
@@ -60,7 +60,7 @@ TFLITE_OUT="outputs/tracker_coords_3_qat.tflite"
 #   - "fp16"    : Float16 quantization (best for GPU delegate acceleration)
 #   - "int8"    : Full INT8 integer model (float32 inputs/outputs, simplifies integration)
 #   - "int8_io" : Pure INT8 integer model (int8 inputs/outputs, required by Edge TPU / Coral)
-TFLITE_QUANT="int8"
+TFLITE_QUANT="fp16"
 
 # Optional: Add "--copy_to_android" to copy the output TFLite model directly to the Android assets directory
 COPY_TO_ANDROID="" # set to "--copy_to_android" to enable
