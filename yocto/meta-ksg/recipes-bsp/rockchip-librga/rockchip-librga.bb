@@ -1,0 +1,19 @@
+SUMMARY = "Rockchip RGA 2D graphics acceleration library"
+DESCRIPTION = "Userspace library for Rockchip RGA hardware accelerator"
+SECTION = "libs"
+
+LICENSE = "Apache-2.0"
+LIC_FILES_CHKSUM = "file://COPYING;md5=89aea4e17d99a7cacdbeed46a0096b10"
+
+DEPENDS = "libdrm"
+
+SRC_URI = "git://github.com/JeffyCN/mirrors.git;protocol=https;branch=linux-rga-multi"
+SRCREV = "c6105b06ade0e5dc7f16924c7f0f5e9dcdb198bc"
+
+S = "${WORKDIR}/git"
+
+PACKAGE_ARCH = "${MACHINE_ARCH}"
+
+inherit meson pkgconfig
+
+EXTRA_OEMESON = "-Dlibdrm=true"

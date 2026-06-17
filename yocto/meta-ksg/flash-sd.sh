@@ -9,7 +9,7 @@ import subprocess
 # ==============================================================================
 # Define the target USB Port/ID to flash to (e.g. "1-1.3", "2-3").
 # Locked to "2-3" as confirmed by the user.
-TARGET_USB_PORT = "2-3" 
+TARGET_USB_PORT = "1-3" 
 
 # Path to the build deploy images directory
 DEPLOY_IMAGES_DIR = "build/tmp/deploy/images/radxa-zero-3e"

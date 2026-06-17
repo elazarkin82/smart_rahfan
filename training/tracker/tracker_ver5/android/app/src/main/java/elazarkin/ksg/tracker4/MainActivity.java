@@ -40,7 +40,7 @@ public class MainActivity extends AppCompatActivity {
 
     /**
      * Native JNI pre-processing function that extracts a square crop from the Y-plane,
-     * applies bilinear interpolation and replication padding, and downsamples it to a 256x256 Float32 array.
+     * applies bilinear interpolation and replication padding, and downsamples it to a target Float32 array.
      */
     public static native void downsampleSearchCrop(
             byte[] yPlane,
@@ -50,6 +50,8 @@ public class MainActivity extends AppCompatActivity {
             float cx,
             float cy,
             float cropSize,
+            int outW,
+            int outH,
             float[] outBuffer
     );
 
@@ -70,7 +72,9 @@ public class MainActivity extends AppCompatActivity {
      * Native JNI post-processing function that calculates the noise-immune Local Refined Argmax Centroid on the predicted heatmap.
      */
     public static native float[] calculateLocalRefinedArgmaxCentroid(
-            float[] heatmap
+            float[] heatmap,
+            int hmW,
+            int hmH
     );
 
     /**

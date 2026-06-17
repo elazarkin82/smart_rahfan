@@ -81,11 +81,19 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private float targetX = 0.0f;
     private float targetY = 0.0f;
     
-    // Ver4 Inputs: 1 channel grayscale (direct ByteBuffers to maintain tensor dimensions)
-    private java.nio.ByteBuffer refStackInputBuffer = java.nio.ByteBuffer.allocateDirect(1 * 1 * 64 * 64 * 16 * 4).order(java.nio.ByteOrder.nativeOrder());
-    private java.nio.ByteBuffer searchBuffer = java.nio.ByteBuffer.allocateDirect(256 * 256 * 4).order(java.nio.ByteOrder.nativeOrder());
-    private java.nio.ByteBuffer outputHeatmapBuffer = java.nio.ByteBuffer.allocateDirect(256 * 256 * 4).order(java.nio.ByteOrder.nativeOrder());
-    private java.nio.ByteBuffer outputQualityBuffer = java.nio.ByteBuffer.allocateDirect(4).order(java.nio.ByteOrder.nativeOrder());
+    // Model Dimensions (Dynamic)
+    private int searchW = 256;
+    private int searchH = 256;
+    private int heatmapW = 256;
+    private int heatmapH = 256;
+    private int refW = 64;
+    private int refH = 64;
+    private int refLayers = 16;
+
+    private java.nio.ByteBuffer refStackInputBuffer = null;
+    private java.nio.ByteBuffer searchBuffer = null;
+    private java.nio.ByteBuffer outputHeatmapBuffer = null;
+    private java.nio.ByteBuffer outputQualityBuffer = null;
 
     private Interpreter tflite;
 
@@ -147,7 +155,28 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             Interpreter.Options options = new Interpreter.Options();
             options.setNumThreads(4);
             tflite = new Interpreter(loadModelFile(), options);
-            lblStatus.setText("Status: Engine loaded successfully");
+            
+            // Dynamically infer dimensions from model tensors
+            int[] refShape = tflite.getInputTensor(0).shape(); // [1, 64, 64, 16] or similar
+            refH = refShape[1];
+            refW = refShape[2];
+            refLayers = refShape[3];
+            
+            int[] searchShape = tflite.getInputTensor(1).shape(); // [1, 256, 256, 1] or similar
+            searchH = searchShape[1];
+            searchW = searchShape[2];
+            
+            int[] heatmapShape = tflite.getOutputTensor(0).shape(); // [1, 256, 256, 1] or similar
+            heatmapH = heatmapShape[1];
+            heatmapW = heatmapShape[2];
+            
+            // Allocate buffers with dynamic sizes
+            refStackInputBuffer = java.nio.ByteBuffer.allocateDirect(1 * refH * refW * refLayers * 4).order(java.nio.ByteOrder.nativeOrder());
+            searchBuffer = java.nio.ByteBuffer.allocateDirect(searchH * searchW * 4).order(java.nio.ByteOrder.nativeOrder());
+            outputHeatmapBuffer = java.nio.ByteBuffer.allocateDirect(heatmapH * heatmapW * 4).order(java.nio.ByteOrder.nativeOrder());
+            outputQualityBuffer = java.nio.ByteBuffer.allocateDirect(4).order(java.nio.ByteOrder.nativeOrder());
+
+            lblStatus.setText(String.format("Status: Engine loaded [%dx%d -> %dx%d]", searchW, searchH, heatmapW, heatmapH));
         } catch (Exception e) {
             e.printStackTrace();
             lblStatus.setText("Status: Failed to load TFLite model!");
@@ -278,21 +307,21 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         
         refStackInputBuffer.rewind();
         java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
-        for (int layer = 0; layer < 16; layer++) {
-            float size = maxCropSize - layer * ((maxCropSize - minCropSize) / 15.0f);
+        for (int layer = 0; layer < refLayers; layer++) {
+            float size = maxCropSize - layer * ((maxCropSize - minCropSize) / (float)(refLayers - 1));
             float half = size / 2.0f;
             
-            for (int y = 0; y < 64; y++) {
-                for (int x = 0; x < 64; x++) {
-                    float srcX = cx - half + (x / 63.0f) * size;
-                    float srcY = cy - half + (y / 63.0f) * size;
+            for (int y = 0; y < refH; y++) {
+                for (int x = 0; x < refW; x++) {
+                    float srcX = cx - half + (x / (float)(refW - 1)) * size;
+                    float srcY = cy - half + (y / (float)(refH - 1)) * size;
                     
                     int ix = (int) Math.max(0, Math.min(width - 1, srcX));
                     int iy = (int) Math.max(0, Math.min(height - 1, srcY));
                     
                     int pixel = yPlane[iy * stride + ix] & 0xFF;
                     // Store in Row-Major NHWC layout: batch=0, dim=0, y, x, layer
-                    refFloatBuffer.put(y * 64 * 16 + x * 16 + layer, pixel / 255.0f);
+                    refFloatBuffer.put(y * refW * refLayers + x * refLayers + layer, pixel / 255.0f);
                 }
             }
         }
@@ -383,7 +412,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         // Calculate search crop size: min(width, height)
         float cropSize = (float) Math.min(width, height);
         
-        float[] currBuffer = new float[256 * 256];
+        float[] currBuffer = new float[searchW * searchH];
         long preStart = SystemClock.elapsedRealtime();
         
         // Center the search crop dynamically around the last tracked target position
@@ -391,7 +420,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         float cy = lastTrackedY;
         
         // JNI extracts square crop around static frame center (cx, cy)
-        MainActivity.downsampleSearchCrop(yPlane, width, height, stride, cx, cy, cropSize, currBuffer);
+        MainActivity.downsampleSearchCrop(yPlane, width, height, stride, cx, cy, cropSize, searchW, searchH, currBuffer);
         
         long preDuration = SystemClock.elapsedRealtime() - preStart;
 
@@ -399,26 +428,40 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         searchBuffer.asFloatBuffer().put(currBuffer);
         
         outputHeatmapBuffer.rewind();
-        outputQualityBuffer.rewind();
-
+        
         Object[] inputs = new Object[]{ refStackInputBuffer, searchBuffer };
         Map<Integer, Object> outputs = new HashMap<>();
         outputs.put(0, outputHeatmapBuffer);
-        outputs.put(1, outputQualityBuffer);
+        
+        // Check if model has a second output for quality
+        boolean hasQualityOutput = (tflite != null && tflite.getOutputTensorCount() > 1);
+        if (hasQualityOutput) {
+            outputQualityBuffer.rewind();
+            outputs.put(1, outputQualityBuffer);
+        }
 
         long infStart = SystemClock.elapsedRealtime();
         tflite.runForMultipleInputsOutputs(inputs, outputs);
         long infDuration = SystemClock.elapsedRealtime() - infStart;
 
-        float[] outputHeatmap = new float[256 * 256];
+        float[] outputHeatmap = new float[heatmapW * heatmapH];
         outputHeatmapBuffer.rewind();
         outputHeatmapBuffer.asFloatBuffer().get(outputHeatmap);
 
-        float qualityScore = outputQualityBuffer.getFloat(0);
+        float qScore = 1.0f;
+        if (hasQualityOutput) {
+            qScore = outputQualityBuffer.getFloat(0);
+        } else {
+            // If quality output is missing, we could estimate it from heatmap peak
+            float maxVal = 0;
+            for (float v : outputHeatmap) if (v > maxVal) maxVal = v;
+            qScore = maxVal;
+        }
+        final float finalQualityScore = qScore;
 
         long postStart = SystemClock.elapsedRealtime();
         // Calculate noise-immune sub-pixel centroid
-        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(outputHeatmap);
+        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(outputHeatmap, heatmapW, heatmapH);
         long postDuration = SystemClock.elapsedRealtime() - postStart;
         
         float px = localCoords[0]; // relative x in [0.0, 1.0] inside the crop
@@ -496,16 +539,16 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                 if (currentUiState != STATE_TRACKING) return;
                 
                 boolean bypassQuality = switchBypassQuality.isChecked();
-                boolean shouldDisplay = (qualityScore > CONFIDENCE_THRESHOLD) || bypassQuality;
+                boolean shouldDisplay = (finalQualityScore > CONFIDENCE_THRESHOLD) || bypassQuality;
                 
                 if (shouldDisplay) {
-                    int circleColor = (qualityScore >= CONFIDENCE_THRESHOLD) ? Color.GREEN : Color.RED;
-                    lblStatus.setText(qualityScore < CONFIDENCE_THRESHOLD 
-                            ? String.format("Status: Weak Lock! Quality: %.2f (Bypassed)", qualityScore)
+                    int circleColor = (finalQualityScore >= CONFIDENCE_THRESHOLD) ? Color.GREEN : Color.RED;
+                    lblStatus.setText(finalQualityScore < CONFIDENCE_THRESHOLD 
+                            ? String.format("Status: Weak Lock! Quality: %.2f (Bypassed)", finalQualityScore)
                             : "Status: Active tracking");
                     drawTrackingIndicator(lastTrackedX, lastTrackedY, width, height, circleColor);
                 } else {
-                    lblStatus.setText(String.format("Status: Weak Lock! Quality: %.2f", qualityScore));
+                    lblStatus.setText(String.format("Status: Weak Lock! Quality: %.2f", finalQualityScore));
                     // Clear tracking indicator overlay when lock is weak and bypass is disabled
                     Bitmap emptyBitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
                     capturedImageView.setImageBitmap(emptyBitmap);
@@ -514,7 +557,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
                 txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
                         preDuration, infDuration, postDuration, totalDuration));
-                txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Quality: %.2f]", screenX_norm, screenY_norm, qualityScore));
+                txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Quality: %.2f]", screenX_norm, screenY_norm, finalQualityScore));
                 txtBufferStatus.setText("Tracking Engine: Active");
             }
         });
@@ -564,26 +607,26 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
     private void renderDiagnostics(float[] heatmap, float[] curr, Bitmap fullFrameBmp, float px, float py) {
         // 1. Render outputHeatmap (Jet color mapping)
-        Bitmap hmBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
-        int[] hmColors = new int[256 * 256];
-        for (int i = 0; i < 256 * 256; i++) {
+        Bitmap hmBitmap = Bitmap.createBitmap(heatmapW, heatmapH, Bitmap.Config.ARGB_8888);
+        int[] hmColors = new int[heatmapW * heatmapH];
+        for (int i = 0; i < heatmapW * heatmapH; i++) {
             float val = Math.max(0.0f, Math.min(heatmap[i], 1.0f));
             int r = (int)(val * 255.0f);
             int b = (int)((1.0f - val) * 255.0f);
             int g = (int)(val * 100.0f);
             hmColors[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
         }
-        hmBitmap.setPixels(hmColors, 0, 256, 0, 0, 256, 256);
+        hmBitmap.setPixels(hmColors, 0, heatmapW, 0, 0, heatmapW, heatmapH);
         heatmapImageView.setImageBitmap(hmBitmap);
 
         // 2. Render cropCurrView (the current active search crop)
-        Bitmap currBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
-        int[] currColors = new int[256 * 256];
-        for (int i = 0; i < 256 * 256; i++) {
+        Bitmap currBitmap = Bitmap.createBitmap(searchW, searchH, Bitmap.Config.ARGB_8888);
+        int[] currColors = new int[searchW * searchH];
+        for (int i = 0; i < searchW * searchH; i++) {
             int val = (int)(curr[i] * 255.0f);
             currColors[i] = 0xFF000000 | (val << 16) | (val << 8) | val;
         }
-        currBitmap.setPixels(currColors, 0, 256, 0, 0, 256, 256);
+        currBitmap.setPixels(currColors, 0, searchW, 0, 0, searchW, searchH);
         
         // Draw a small red indicator showing the predicted target position inside search crop
         Canvas canvasCurr = new Canvas(currBitmap);
@@ -591,22 +634,22 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         paintCurr.setColor(Color.RED);
         paintCurr.setStyle(Paint.Style.FILL);
         paintCurr.setAntiAlias(true);
-        canvasCurr.drawCircle(px * 256.0f, py * 256.0f, 6.0f, paintCurr);
+        canvasCurr.drawCircle(px * searchW, py * searchH, 6.0f, paintCurr);
         
         cropCurrView.setImageBitmap(currBitmap);
 
         // 3. Render cropHistView (the locked target reference template layer)
-        Bitmap histBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888);
-        int[] histColors = new int[64 * 64];
+        Bitmap histBitmap = Bitmap.createBitmap(refW, refH, Bitmap.Config.ARGB_8888);
+        int[] histColors = new int[refW * refH];
         java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
-        for (int y = 0; y < 64; y++) {
-            for (int x = 0; x < 64; x++) {
+        for (int y = 0; y < refH; y++) {
+            for (int x = 0; x < refW; x++) {
                 // Read from NHWC Row-Major layout: batch=0, dim=0, y, x, layer
-                int val = (int)(refFloatBuffer.get(y * 64 * 16 + x * 16 + selectedHistLayer) * 255.0f);
-                histColors[y * 64 + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
+                int val = (int)(refFloatBuffer.get(y * refW * refLayers + x * refLayers + selectedHistLayer) * 255.0f);
+                histColors[y * refW + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
             }
         }
-        histBitmap.setPixels(histColors, 0, 64, 0, 0, 64, 64);
+        histBitmap.setPixels(histColors, 0, refW, 0, 0, refW, refH);
         
         // Draw a small red indicator at the center of the reference crop template (the target origin)
         Canvas canvasHist = new Canvas(histBitmap);
@@ -614,7 +657,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         paintHist.setColor(Color.RED);
         paintHist.setStyle(Paint.Style.FILL);
         paintHist.setAntiAlias(true);
-        canvasHist.drawCircle(32.0f, 32.0f, 3.0f, paintHist);
+        canvasHist.drawCircle(refW / 2.0f, refH / 2.0f, 3.0f, paintHist);
         
         cropHistView.setImageBitmap(histBitmap);
 
