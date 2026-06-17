@@ -6,23 +6,36 @@
 #include <chrono>
 #include <math.h>
 
-TrackerService::TrackerService(const char* model_path)
+#if defined(USE_RGA)
+#include <RgaApi.h>
+#include <im2d.h>
+#endif
+
+TrackerService::TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop, bool quality_enabled)
 {
     FILE* fp;
     long model_size;
     void* model_data;
     int ret;
-    rknn_input_output_num io_num;
-    rknn_tensor_attr in_attrs[2];
-    rknn_tensor_attr out_attrs[2];
-
-    m_ctx = 0;
+    rknn_input_output_num io_num_temp;
+    rknn_input_output_num io_num_frame;
+    rknn_tensor_attr template_in_attrs[1];
+    rknn_tensor_attr template_out_attrs[1];
+    rknn_tensor_attr frame_in_attrs[2];
+    rknn_tensor_attr frame_out_attrs[2];
+ 
+    m_ctx_template = 0;
+    m_ctx_frame = 0;
     m_is_model_loaded = false;
     m_is_target_defined = false;
     m_callback = NULL;
+ 
+    m_min_crop = min_crop;
+    m_max_crop = max_crop;
+    m_quality_enabled = quality_enabled;
 
-    m_in_width_ref = 32;
-    m_in_height_ref = 32;
+    m_in_width_ref = 64;
+    m_in_height_ref = 64;
     m_in_channels_ref = 16;
 
     m_in_width_search = 256;
@@ -32,12 +45,12 @@ TrackerService::TrackerService(const char* model_path)
     m_out_width_hm = 256;
     m_out_height_hm = 256;
 
-    // Load model file into memory
-    fp = fopen(model_path, "rb");
+    // 1. Load template model file into memory
+    fp = fopen(template_path, "rb");
     if (fp == NULL)
     {
-        fprintf(stderr, "[TrackerService] Failed to open model file: %s\n", model_path);
-        StatusObject::instance()->update("tracker_model_status", "Error: File Not Found");
+        fprintf(stderr, "[TrackerService] Failed to open template model file: %s\n", template_path);
+        StatusObject::instance()->update("tracker_model_status", "Error: Template File Not Found");
         return;
     }
 
@@ -49,7 +62,7 @@ TrackerService::TrackerService(const char* model_path)
     if (model_data == NULL)
     {
         fclose(fp);
-        fprintf(stderr, "[TrackerService] Failed to allocate memory for model buffer.\n");
+        fprintf(stderr, "[TrackerService] Failed to allocate memory for template model buffer.\n");
         StatusObject::instance()->update("tracker_model_status", "Error: OOM on Load");
         return;
     }
@@ -58,76 +71,137 @@ TrackerService::TrackerService(const char* model_path)
     {
         free(model_data);
         fclose(fp);
-        fprintf(stderr, "[TrackerService] Failed to read model file contents.\n");
+        fprintf(stderr, "[TrackerService] Failed to read template model file contents.\n");
         StatusObject::instance()->update("tracker_model_status", "Error: Read Failure");
         return;
     }
     fclose(fp);
 
-    // Initialize RKNN NPU context
-    ret = rknn_init(&m_ctx, model_data, model_size, 0, NULL);
+    // Initialize RKNN context for template encoder
+    ret = rknn_init(&m_ctx_template, model_data, model_size, 0, NULL);
     free(model_data);
 
     if (ret < 0)
     {
-        fprintf(stderr, "[TrackerService] rknn_init failed with error code: %d\n", ret);
-        StatusObject::instance()->update("tracker_model_status", "Error: NPU Init Failed");
+        fprintf(stderr, "[TrackerService] rknn_init for template failed: %d\n", ret);
+        StatusObject::instance()->update("tracker_model_status", "Error: Template NPU Init Failed");
         return;
     }
 
-    // Query inputs & outputs attributes
-    ret = rknn_query(m_ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
+    // 2. Load frame model file into memory
+    fp = fopen(frame_path, "rb");
+    if (fp == NULL)
+    {
+        rknn_destroy(m_ctx_template);
+        fprintf(stderr, "[TrackerService] Failed to open frame model file: %s\n", frame_path);
+        StatusObject::instance()->update("tracker_model_status", "Error: Frame File Not Found");
+        return;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    model_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    model_data = malloc(model_size);
+    if (model_data == NULL)
+    {
+        fclose(fp);
+        rknn_destroy(m_ctx_template);
+        fprintf(stderr, "[TrackerService] Failed to allocate memory for frame model buffer.\n");
+        StatusObject::instance()->update("tracker_model_status", "Error: OOM on Load");
+        return;
+    }
+
+    if (fread(model_data, 1, model_size, fp) != (size_t)model_size)
+    {
+        free(model_data);
+        fclose(fp);
+        rknn_destroy(m_ctx_template);
+        fprintf(stderr, "[TrackerService] Failed to read frame model file contents.\n");
+        StatusObject::instance()->update("tracker_model_status", "Error: Read Failure");
+        return;
+    }
+    fclose(fp);
+
+    // Initialize RKNN context for frame tracker
+    ret = rknn_init(&m_ctx_frame, model_data, model_size, 0, NULL);
+    free(model_data);
+
     if (ret < 0)
     {
-        fprintf(stderr, "[TrackerService] Failed to query model IO numbers: %d\n", ret);
+        rknn_destroy(m_ctx_template);
+        fprintf(stderr, "[TrackerService] rknn_init for frame failed: %d\n", ret);
+        StatusObject::instance()->update("tracker_model_status", "Error: Frame NPU Init Failed");
+        return;
+    }
+
+    // 3. Query dynamic tensor dimensions & attributes
+    ret = rknn_query(m_ctx_template, RKNN_QUERY_IN_OUT_NUM, &io_num_temp, sizeof(io_num_temp));
+    if (ret < 0)
+    {
+        fprintf(stderr, "[TrackerService] Failed to query template model IO numbers: %d\n", ret);
+        rknn_destroy(m_ctx_template);
+        rknn_destroy(m_ctx_frame);
         StatusObject::instance()->update("tracker_model_status", "Error: Query Failed");
         return;
     }
 
-    if (io_num.n_input < 2 || io_num.n_output < 1)
+    ret = rknn_query(m_ctx_frame, RKNN_QUERY_IN_OUT_NUM, &io_num_frame, sizeof(io_num_frame));
+    if (ret < 0)
     {
-        fprintf(stderr, "[TrackerService] Invalid model architecture: needs 2 inputs, 1+ outputs.\n");
-        StatusObject::instance()->update("tracker_model_status", "Error: Invalid RKNN Architecture");
+        fprintf(stderr, "[TrackerService] Failed to query frame model IO numbers: %d\n", ret);
+        rknn_destroy(m_ctx_template);
+        rknn_destroy(m_ctx_frame);
+        StatusObject::instance()->update("tracker_model_status", "Error: Query Failed");
         return;
     }
 
-    // Query dynamic tensor dimensions
-    memset(in_attrs, 0, sizeof(in_attrs));
-    in_attrs[0].index = 0;
-    rknn_query(m_ctx, RKNN_QUERY_INPUT_ATTR, &in_attrs[0], sizeof(rknn_tensor_attr));
-    in_attrs[1].index = 1;
-    rknn_query(m_ctx, RKNN_QUERY_INPUT_ATTR, &in_attrs[1], sizeof(rknn_tensor_attr));
+    // Query attributes for template model
+    memset(template_in_attrs, 0, sizeof(template_in_attrs));
+    template_in_attrs[0].index = 0;
+    rknn_query(m_ctx_template, RKNN_QUERY_INPUT_ATTR, &template_in_attrs[0], sizeof(rknn_tensor_attr));
 
-    memset(out_attrs, 0, sizeof(out_attrs));
-    out_attrs[0].index = 0;
-    rknn_query(m_ctx, RKNN_QUERY_OUTPUT_ATTR, &out_attrs[0], sizeof(rknn_tensor_attr));
+    memset(template_out_attrs, 0, sizeof(template_out_attrs));
+    template_out_attrs[0].index = 0;
+    rknn_query(m_ctx_template, RKNN_QUERY_OUTPUT_ATTR, &template_out_attrs[0], sizeof(rknn_tensor_attr));
 
-    // Directly parse input/output dimensions assuming HWC layout
-    m_in_height_ref = in_attrs[0].dims[1];
-    m_in_width_ref = in_attrs[0].dims[2];
-    m_in_channels_ref = in_attrs[0].dims[3];
+    // Query attributes for frame model
+    memset(frame_in_attrs, 0, sizeof(frame_in_attrs));
+    frame_in_attrs[0].index = 0;
+    rknn_query(m_ctx_frame, RKNN_QUERY_INPUT_ATTR, &frame_in_attrs[0], sizeof(rknn_tensor_attr));
+    frame_in_attrs[1].index = 1;
+    rknn_query(m_ctx_frame, RKNN_QUERY_INPUT_ATTR, &frame_in_attrs[1], sizeof(rknn_tensor_attr));
 
-    m_in_height_search = in_attrs[1].dims[1];
-    m_in_width_search = in_attrs[1].dims[2];
-    m_in_channels_search = in_attrs[1].dims[3];
+    memset(frame_out_attrs, 0, sizeof(frame_out_attrs));
+    frame_out_attrs[0].index = 0;
+    rknn_query(m_ctx_frame, RKNN_QUERY_OUTPUT_ATTR, &frame_out_attrs[0], sizeof(rknn_tensor_attr));
+    if (m_quality_enabled)
+    {
+        frame_out_attrs[1].index = 1;
+        rknn_query(m_ctx_frame, RKNN_QUERY_OUTPUT_ATTR, &frame_out_attrs[1], sizeof(rknn_tensor_attr));
+    }
 
-    m_out_height_hm = out_attrs[0].dims[1];
-    m_out_width_hm = out_attrs[0].dims[2];
+    // Keep shapes
+    m_in_height_ref = template_in_attrs[0].dims[1];
+    m_in_width_ref = template_in_attrs[0].dims[2];
+    m_in_channels_ref = template_in_attrs[0].dims[3];
 
-    fprintf(stdout, "[DEBUG] Input 0 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
-            in_attrs[0].name, in_attrs[0].n_dims, in_attrs[0].dims[0], in_attrs[0].dims[1], in_attrs[0].dims[2], in_attrs[0].dims[3],
-            in_attrs[0].size, in_attrs[0].fmt, in_attrs[0].type);
-    fprintf(stdout, "[DEBUG] Input 1 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
-            in_attrs[1].name, in_attrs[1].n_dims, in_attrs[1].dims[0], in_attrs[1].dims[1], in_attrs[1].dims[2], in_attrs[1].dims[3],
-            in_attrs[1].size, in_attrs[1].fmt, in_attrs[1].type);
-    fprintf(stdout, "[DEBUG] Output 0 name: %s, n_dims: %d, dims: [%d, %d, %d, %d], size: %d, fmt: %d, type: %d\n",
-            out_attrs[0].name, out_attrs[0].n_dims, out_attrs[0].dims[0], out_attrs[0].dims[1], out_attrs[0].dims[2], out_attrs[0].dims[3],
-            out_attrs[0].size, out_attrs[0].fmt, out_attrs[0].type);
+    m_in_height_search = frame_in_attrs[0].dims[1];
+    m_in_width_search = frame_in_attrs[0].dims[2];
+    m_in_channels_search = frame_in_attrs[0].dims[3];
 
-    fprintf(stdout, "[TrackerService] Loaded RKNN model successfully.\n");
-    fprintf(stdout, " - Input 0 (Reference): %dx%dx%d\n", m_in_width_ref, m_in_height_ref, m_in_channels_ref);
-    fprintf(stdout, " - Input 1 (Search): %dx%dx%d\n", m_in_width_search, m_in_height_search, m_in_channels_search);
-    fprintf(stdout, " - Output 0 (Heatmap): %dx%d\n", m_out_width_hm, m_out_height_hm);
+    m_out_height_hm = frame_out_attrs[0].dims[1];
+    m_out_width_hm = frame_out_attrs[0].dims[2];
+
+    m_template_features_size = template_out_attrs[0].size;
+    m_template_features_type = frame_in_attrs[1].type;
+    m_template_features_fmt = frame_in_attrs[1].fmt;
+
+    fprintf(stdout, "[TrackerService] Loaded RKNN model subgraphs successfully.\n");
+    fprintf(stdout, " - Template Input (Reference): %dx%dx%d\n", m_in_width_ref, m_in_height_ref, m_in_channels_ref);
+    fprintf(stdout, " - Frame Input 0 (Search): %dx%dx%d\n", m_in_width_search, m_in_height_search, m_in_channels_search);
+    fprintf(stdout, " - Frame Input 1 (Features): size %d, type %d, fmt %d\n", m_template_features_size, m_template_features_type, m_template_features_fmt);
+    fprintf(stdout, " - Frame Output 0 (Heatmap): %dx%d\n", m_out_width_hm, m_out_height_hm);
 
     m_is_model_loaded = true;
     StatusObject::instance()->update("tracker_model_status", "Loaded & Ready");
@@ -139,18 +213,20 @@ TrackerService::TrackerService(const char* model_path)
     m_search_buf = (uchar*)malloc(m_in_width_search * m_in_height_search * m_in_channels_search);
     m_heatmap_buf = (float*)malloc(m_out_width_hm * m_out_height_hm * sizeof(float));
 
-
+    m_template_features_buf = malloc(m_template_features_size);
+    memset(m_template_features_buf, 0, m_template_features_size);
 }
 
 TrackerService::~TrackerService()
 {
     if (m_is_model_loaded)
     {
-        rknn_destroy(m_ctx);
+        rknn_destroy(m_ctx_template);
+        rknn_destroy(m_ctx_frame);
         free(m_ref_stack_buf);
         free(m_search_buf);
         free(m_heatmap_buf);
-
+        free(m_template_features_buf);
     }
 }
 
@@ -183,14 +259,17 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
     float min_sz;
     int y, x;
     uchar* temp_64x64;
+    int ret;
+    rknn_input inputs[1];
+    rknn_output outputs[1];
 
     if (!m_is_model_loaded)
     {
         return;
     }
 
-    max_sz = (float)(w < h ? w : h);
-    min_sz = 16.0f;
+    max_sz = m_max_crop;
+    min_sz = m_min_crop;
     temp_64x64 = (uchar*)malloc(m_in_width_ref * m_in_height_ref);
 
     for (c = 0; c < m_in_channels_ref; ++c)
@@ -200,6 +279,7 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
         int x1 = (int)roundf((float)target_x - half);
         int y1 = (int)roundf((float)target_y - half);
         int sz_int = (int)sz;
+        if (sz_int < 1) sz_int = 1;
         uchar* crop_buf = (uchar*)calloc(sz_int * sz_int, 1);
         int cy, cx;
 
@@ -234,6 +314,41 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
 
     free(temp_64x64);
 
+    // Run NPU inference on template context to compute template features
+    memset(inputs, 0, sizeof(inputs));
+    inputs[0].index = 0;
+    inputs[0].type = RKNN_TENSOR_UINT8;
+    inputs[0].size = m_in_width_ref * m_in_height_ref * m_in_channels_ref;
+    inputs[0].buf = m_ref_stack_buf;
+    inputs[0].fmt = RKNN_TENSOR_NHWC;
+
+    ret = rknn_inputs_set(m_ctx_template, 1, inputs);
+    if (ret < 0)
+    {
+        fprintf(stderr, "[TrackerService] Failed to set inputs for template model: %d\n", ret);
+        return;
+    }
+
+    ret = rknn_run(m_ctx_template, NULL);
+    if (ret < 0)
+    {
+        fprintf(stderr, "[TrackerService] Failed to run template model: %d\n", ret);
+        return;
+    }
+
+    memset(outputs, 0, sizeof(outputs));
+    outputs[0].want_float = 0; // Get raw features to feed directly to frame model
+    ret = rknn_outputs_get(m_ctx_template, 1, outputs, NULL);
+    if (ret < 0)
+    {
+        fprintf(stderr, "[TrackerService] Failed to get outputs for template model: %d\n", ret);
+        return;
+    }
+
+    // Copy to template features cache
+    memcpy(m_template_features_buf, outputs[0].buf, m_template_features_size);
+    rknn_outputs_release(m_ctx_template, 1, outputs);
+
     std::lock_guard<std::mutex> lock(m_mutex);
     m_is_target_defined = true;
     if (m_callback != NULL)
@@ -246,7 +361,7 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
 void TrackerService::update_frame(uchar* frame, int w, int h)
 {
     rknn_input inputs[2];
-    rknn_output outputs[1];
+    rknn_output outputs[2];
     int ret;
     int out_x;
     int out_y;
@@ -271,28 +386,34 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     t_start = std::chrono::steady_clock::now();
 
-    // 1. Resize incoming frame to search window size (using Bilinear Interpolation)
+    // 1. Resize incoming frame to search window size (conditional compile-time flags)
     t_resize_start = std::chrono::steady_clock::now();
+#if defined(USE_RGA)
+    resize_rga(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
+#elif defined(USE_OMP)
+    resize_bilinear_omp(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
+#else
     resize_bilinear_gray(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
+#endif
     t_resize_end = std::chrono::steady_clock::now();
 
     // 2. Setup inputs
     memset(inputs, 0, sizeof(inputs));
-    // Input 0: Reference Stack
+    // Input 0: Search Frame
     inputs[0].index = 0;
     inputs[0].type = RKNN_TENSOR_UINT8;
-    inputs[0].size = m_in_width_ref * m_in_height_ref * m_in_channels_ref;
-    inputs[0].buf = m_ref_stack_buf;
+    inputs[0].size = m_in_width_search * m_in_height_search * m_in_channels_search;
+    inputs[0].buf = m_search_buf;
     inputs[0].fmt = RKNN_TENSOR_NHWC;
 
-    // Input 1: Search Frame
+    // Input 1: Reference Features (from cached buffer)
     inputs[1].index = 1;
-    inputs[1].type = RKNN_TENSOR_UINT8;
-    inputs[1].size = m_in_width_search * m_in_height_search * m_in_channels_search;
-    inputs[1].buf = m_search_buf;
-    inputs[1].fmt = RKNN_TENSOR_NHWC;
+    inputs[1].type = m_template_features_type;
+    inputs[1].size = m_template_features_size;
+    inputs[1].buf = m_template_features_buf;
+    inputs[1].fmt = m_template_features_fmt;
 
-    ret = rknn_inputs_set(m_ctx, 2, inputs);
+    ret = rknn_inputs_set(m_ctx_frame, 2, inputs);
     if (ret < 0)
     {
         fprintf(stderr, "[TrackerService] rknn_inputs_set failed: %d\n", ret);
@@ -301,7 +422,7 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     // 3. Run inference on NPU
     t_npu_start = std::chrono::steady_clock::now();
-    ret = rknn_run(m_ctx, NULL);
+    ret = rknn_run(m_ctx_frame, NULL);
     t_npu_end = std::chrono::steady_clock::now();
     if (ret < 0)
     {
@@ -311,9 +432,20 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     // 4. Retrieve outputs
     memset(outputs, 0, sizeof(outputs));
+    // Output 0: predicted_heatmap
+    outputs[0].index = 0;
     outputs[0].want_float = 1; // get floating point values for heatmap post-processing
+    
+    int num_outputs = 1;
+    if (m_quality_enabled)
+    {
+        // Output 1: predicted_quality
+        outputs[1].index = 1;
+        outputs[1].want_float = 1;
+        num_outputs = 2;
+    }
 
-    ret = rknn_outputs_get(m_ctx, 1, outputs, NULL);
+    ret = rknn_outputs_get(m_ctx_frame, num_outputs, outputs, NULL);
     if (ret < 0)
     {
         fprintf(stderr, "[TrackerService] rknn_outputs_get failed: %d\n", ret);
@@ -322,15 +454,27 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     // Copy raw output heatmap buffer
     memcpy(m_heatmap_buf, outputs[0].buf, m_out_width_hm * m_out_height_hm * sizeof(float));
+    float pred_quality = 0.0f;
+    if (m_quality_enabled)
+    {
+        pred_quality = *((float*)(outputs[1].buf));
+    }
 
     // Release outputs immediately
-    rknn_outputs_release(m_ctx, 1, outputs);
+    rknn_outputs_release(m_ctx_frame, num_outputs, outputs);
 
-    // 5. Decode heatmap using local 5x5 sub-pixel centroid
+    // 5. Decode heatmap using standard argmax
     t_decode_start = std::chrono::steady_clock::now();
     out_x = -1;
     out_y = -1;
     decode_heatmap(m_heatmap_buf, &out_x, &out_y);
+    
+    // Scale coordinates dynamically back to the standard 256x256 grid expected by the UI/WebServer
+    if (out_x >= 0 && out_y >= 0)
+    {
+        out_x = (out_x * 256) / m_out_width_hm;
+        out_y = (out_y * 256) / m_out_height_hm;
+    }
     t_decode_end = std::chrono::steady_clock::now();
 
     t_end = std::chrono::steady_clock::now();
@@ -353,6 +497,17 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     snprintf(time_buf, sizeof(time_buf), "%.2f ms", total_ms);
     StatusObject::instance()->update("tracker_time_total", time_buf);
+
+    // Update StatusObject with quality telemetry
+    if (m_quality_enabled)
+    {
+        snprintf(time_buf, sizeof(time_buf), "%.2f", pred_quality);
+        StatusObject::instance()->update("tracker_quality", time_buf);
+    }
+    else
+    {
+        StatusObject::instance()->update("tracker_quality", "Disabled");
+    }
 
     // 6. Trigger TrackerCallback
     {
@@ -428,6 +583,63 @@ void TrackerService::resize_nearest_gray(const uchar* src, int src_w, int src_h,
         }
     }
 }
+
+#if defined(USE_RGA)
+void TrackerService::resize_rga(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h)
+{
+    rga_buffer_t src_buf = wrapbuffer_virtualaddr((void*)src, src_w, src_h, RK_FORMAT_Y8);
+    rga_buffer_t dst_buf = wrapbuffer_virtualaddr((void*)dst, dst_w, dst_h, RK_FORMAT_Y8);
+    
+    IM_STATUS status = imresize(src_buf, dst_buf);
+    if (status != IM_STATUS_SUCCESS)
+    {
+        fprintf(stderr, "[TrackerService] RGA hardware resize failed: %d. Falling back to CPU.\n", status);
+        resize_bilinear_gray(src, src_w, src_h, dst, dst_w, dst_h);
+    }
+}
+#elif defined(USE_OMP)
+void TrackerService::resize_bilinear_omp(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h)
+{
+    float x_ratio = ((float)(src_w - 1)) / dst_w;
+    float y_ratio = ((float)(src_h - 1)) / dst_h;
+
+    #pragma omp parallel for schedule(dynamic)
+    for (int y = 0; y < dst_h; ++y)
+    {
+        for (int x = 0; x < dst_w; ++x)
+        {
+            int x_l = (int)(x_ratio * x);
+            int y_l = (int)(y_ratio * y);
+            int x_h = x_l + 1;
+            int y_h = y_l + 1;
+
+            if (x_h >= src_w)
+            {
+                x_h = src_w - 1;
+            }
+            if (y_h >= src_h)
+            {
+                y_h = src_h - 1;
+            }
+
+            float x_weight = (x_ratio * x) - x_l;
+            float y_weight = (y_ratio * y) - y_l;
+
+            uchar a = src[y_l * src_w + x_l];
+            uchar b = src[y_l * src_w + x_h];
+            uchar c = src[y_h * src_w + x_l];
+            uchar d = src[y_h * src_w + x_h];
+
+            dst[y * dst_w + x] = (uchar)(
+                a * (1.0f - x_weight) * (1.0f - y_weight) +
+                b * x_weight * (1.0f - y_weight) +
+                c * (1.0f - x_weight) * y_weight +
+                d * x_weight * y_weight
+            );
+        }
+    }
+}
+#endif
 
 void TrackerService::decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y)
 {

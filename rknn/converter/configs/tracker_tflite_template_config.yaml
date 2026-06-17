@@ -1,9 +1,9 @@
-# RKNN Model Conversion Configuration (TFLite)
+# RKNN Model Conversion Configuration (TFLite - Template Subgraph)
 
 model:
-  name: "tracker_ver4_tflite"
-  tflite_model_path: "../../training/tracker/tracker_ver4/outputs/tracker_coords_3.tflite"
-  output_rknn_path: "./outputs/tracker_tflite.rknn"
+  name: "tracker_template_tflite"
+  tflite_model_path: "../../training/tracker/tracker_ver5/outputs/tracker_template.tflite"
+  output_rknn_path: "./outputs/tracker_template.rknn"
 
 rknn_config:
   # Target platform for Radxa Zero 3 (RK3566)
@@ -13,15 +13,15 @@ rknn_config:
   optimization_level: 3
   
   # Normalization parameters (mean and std values) for inputs.
-  mean_values: [[0], [0]]
-  std_values: [[255], [255]]
+  mean_values: [[0]]
+  std_values: [[255]]
 
 quantization:
   # Enable INT8 quantization. If false, model compiles in FP16.
   do_quantization: false
   
   # Path to the calibration dataset descriptor file
-  dataset_path: "./configs/dataset.txt"
+  dataset_path: "./configs/dataset_template.txt"
   
   # Quantization algorithm: 'normal' or 'mmse' (MMSE can provide better accuracy for some models)
   quantized_algorithm: "mmse"
@@ -33,5 +33,3 @@ quantization:
 inputs:
   - name: "reference_stack"
     shape: [64, 64, 16]
-  - name: "search_frame"
-    shape: [256, 256, 1]

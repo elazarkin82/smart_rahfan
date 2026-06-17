@@ -48,6 +48,29 @@ endif()
 # Thread support
 find_package(Threads REQUIRED)
 
+# Options for Resize Mode selection (RGA, OMP, CPU)
+set(RESIZE_MODE "RGA" CACHE STRING "Resize mode: RGA, OMP, CPU")
+set_property(CACHE RESIZE_MODE PROPERTY STRINGS "RGA" "OMP" "CPU")
+
+set(EXTRA_LIBS "")
+
+if(RESIZE_MODE STREQUAL "RGA")
+    message(STATUS "[CMake] Using RGA Hardware acceleration for resizing")
+    find_library(RGA_LIB rga
+        HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../docker/rknn-toolkit2/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64
+    )
+    if(NOT RGA_LIB)
+        message(FATAL_ERROR "[CMake] librga not found! Install it or select another RESIZE_MODE (e.g. OMP or CPU).")
+    endif()
+    message(STATUS "[CMake] Found librga: ${RGA_LIB}")
+    list(APPEND EXTRA_LIBS ${RGA_LIB})
+elseif(RESIZE_MODE STREQUAL "OMP")
+    message(STATUS "[CMake] Using OpenMP Parallel CPU acceleration for resizing")
+    find_package(OpenMP REQUIRED)
+else()
+    message(STATUS "[CMake] Using simple CPU single-threaded resizing")
+endif()
+
 # Define target tracking demo executable
 add_executable(first_demo
     src/main.cpp
@@ -57,11 +80,19 @@ add_executable(first_demo
     src/core/WebServer.cpp
 )
 
+# Apply compile definitions based on selected Resize Mode
+if(RESIZE_MODE STREQUAL "RGA")
+    target_compile_definitions(first_demo PRIVATE USE_RGA)
+elseif(RESIZE_MODE STREQUAL "OMP")
+    target_compile_definitions(first_demo PRIVATE USE_OMP)
+endif()
+
 # Header search directories
 target_include_directories(first_demo PRIVATE
     include
     ${JPEG_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../docker/rknn-toolkit2/rknpu2/runtime/Linux/librknn_api/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../docker/rknn-toolkit2/rknpu2/examples/3rdparty/rga/include
 )
 
 # Link dependencies
@@ -70,6 +101,12 @@ target_link_libraries(first_demo PRIVATE
     civetweb-c-library
     ${JPEG_LIBRARIES}
     ${RKNNRT_LIB}
+    ${EXTRA_LIBS}
     Threads::Threads
     dl
 )
+
+# Link OpenMP if selected
+if(RESIZE_MODE STREQUAL "OMP" AND OpenMP_CXX_FOUND)
+    target_link_libraries(first_demo PRIVATE OpenMP::OpenMP_CXX)
+endif()
