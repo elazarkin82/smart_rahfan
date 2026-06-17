@@ -344,6 +344,16 @@ def main():
             "  cce / CategoricalCrossentropy\n"
         ),
     )
+    parser.add_argument(
+        "--student_init_keras",
+        default=None,
+        help=(
+            "Path to a previously saved QAT Keras model (.keras) to resume training from. "
+            "When provided, the QAT model is loaded directly (skipping annotate/quantize_apply) "
+            "and fine-tuning continues from its weights with the specified --lr. "
+            "--keras_in is still required as the float32 teacher for distillation."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -379,9 +389,9 @@ def main():
         tfmot_keras.layers.DepthwiseConv2D = tracker_model._orig_dw_conv2d
 
     # ------------------------------------------------------------------
-    # 2. Load the pre-trained float32 model
+    # 2. Load the float32 teacher model (always required)
     # ------------------------------------------------------------------
-    print(f"[*] Loading pre-trained model from: {args.keras_in} ...")
+    print(f"[*] Loading teacher (float32) model from: {args.keras_in} ...")
     custom_objects = {
         "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
         "DepthToSpace":               tracker_model.DepthToSpace,
@@ -395,33 +405,86 @@ def main():
             custom_objects=custom_objects,
         )
 
-        # 3. Annotate and wrap with QAT
-        print("[*] Annotating model layers for QAT...")
-
-        def annotate_layer(layer):
-            if any(k in layer.name for k in ["quality", "predicted_quality"]):
-                return layer
-            if layer.__class__.__name__ in ("Conv2D", "DepthwiseConv2D", "Dense"):
-                return tfmot.quantization.keras.quantize_annotate_layer(layer)
-            if layer.__class__.__name__ in (
-                "DepthwiseCorrelationFusion", "DepthToSpace", "HeatmapNormalization",
-                "UpSampling2D", "AveragePooling2D", "MaxPooling2D", "Concatenate", "Add",
-            ):
-                return tfmot.quantization.keras.quantize_annotate_layer(
-                    layer, CustomLayerQuantizeConfig()
+        # 3. Build or load the QAT student model
+        if args.student_init_keras:
+            # ------------------------------------------------------------------
+            # Resume path: build a clean QAT architecture from the teacher
+            # (same annotate/quantize_apply flow), then transplant weights from
+            # the saved student checkpoint via load_weights(skip_mismatch=True).
+            #
+            # Why not load_model directly?
+            #   A .keras file saved WITH optimizer state embeds extra variables
+            #   (e.g. optimizer_step) that cause a variable-count mismatch when
+            #   reloading with compile=False.  Building fresh + load_weights
+            #   sidesteps this entirely.
+            # ------------------------------------------------------------------
+            print(f"[*] Resuming from existing QAT student model: {args.student_init_keras} ...")
+            if not os.path.exists(args.student_init_keras):
+                print(
+                    f"[ERROR] --student_init_keras path not found: {args.student_init_keras}",
+                    file=sys.stderr,
                 )
-            if isinstance(layer, tf.keras.Model):
-                return tf.keras.models.clone_model(layer, clone_function=annotate_layer)
-            return layer
+                sys.exit(1)
 
-        qat_annotated = tf.keras.models.clone_model(
-            teacher_model, clone_function=annotate_layer
-        )
-        print("[*] Transferring pre-trained weights to annotated model...")
-        qat_annotated.set_weights(teacher_model.get_weights())
+            print("[*] Annotating model layers for QAT (fresh architecture for weight transplant)...")
 
-        print("[*] Applying quantization wrappers...")
-        qat_model = tfmot.quantization.keras.quantize_apply(qat_annotated)
+            def annotate_layer(layer):
+                if any(k in layer.name for k in ["quality", "predicted_quality"]):
+                    return layer
+                if layer.__class__.__name__ in ("Conv2D", "DepthwiseConv2D", "Dense"):
+                    return tfmot.quantization.keras.quantize_annotate_layer(layer)
+                if layer.__class__.__name__ in (
+                    "DepthwiseCorrelationFusion", "DepthToSpace", "HeatmapNormalization",
+                    "UpSampling2D", "AveragePooling2D", "MaxPooling2D", "Concatenate", "Add",
+                ):
+                    return tfmot.quantization.keras.quantize_annotate_layer(
+                        layer, CustomLayerQuantizeConfig()
+                    )
+                if isinstance(layer, tf.keras.Model):
+                    return tf.keras.models.clone_model(layer, clone_function=annotate_layer)
+                return layer
+
+            qat_annotated = tf.keras.models.clone_model(
+                teacher_model, clone_function=annotate_layer
+            )
+            qat_annotated.set_weights(teacher_model.get_weights())
+            qat_model = tfmot.quantization.keras.quantize_apply(qat_annotated)
+
+            # Transplant student weights; skip_mismatch=True ignores any
+            # optimizer-state variables that were baked into the saved file.
+            print(f"[*] Loading student weights (skip_mismatch=True): {args.student_init_keras} ...")
+            qat_model.load_weights(args.student_init_keras, skip_mismatch=True)
+            print("[*] Student weights loaded successfully (optimizer state skipped).")
+        else:
+            # ------------------------------------------------------------------
+            # Fresh path: annotate and wrap the teacher with QAT from scratch.
+            # ------------------------------------------------------------------
+            print("[*] Annotating model layers for QAT...")
+
+            def annotate_layer(layer):
+                if any(k in layer.name for k in ["quality", "predicted_quality"]):
+                    return layer
+                if layer.__class__.__name__ in ("Conv2D", "DepthwiseConv2D", "Dense"):
+                    return tfmot.quantization.keras.quantize_annotate_layer(layer)
+                if layer.__class__.__name__ in (
+                    "DepthwiseCorrelationFusion", "DepthToSpace", "HeatmapNormalization",
+                    "UpSampling2D", "AveragePooling2D", "MaxPooling2D", "Concatenate", "Add",
+                ):
+                    return tfmot.quantization.keras.quantize_annotate_layer(
+                        layer, CustomLayerQuantizeConfig()
+                    )
+                if isinstance(layer, tf.keras.Model):
+                    return tf.keras.models.clone_model(layer, clone_function=annotate_layer)
+                return layer
+
+            qat_annotated = tf.keras.models.clone_model(
+                teacher_model, clone_function=annotate_layer
+            )
+            print("[*] Transferring pre-trained weights to annotated model...")
+            qat_annotated.set_weights(teacher_model.get_weights())
+
+            print("[*] Applying quantization wrappers...")
+            qat_model = tfmot.quantization.keras.quantize_apply(qat_annotated)
 
     # ------------------------------------------------------------------
     # 4. Resolve output_ops against the model's actual output names

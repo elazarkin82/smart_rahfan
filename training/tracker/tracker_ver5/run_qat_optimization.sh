@@ -28,7 +28,7 @@ QAT_TRAIN_MODE="teacher-student"
 H5_DATASET="dataset_generator/compiled/dataset.h5"
 
 # Number of epochs to run QAT fine-tuning (usually 1-3 is enough to adapt weights to quantization noise)
-QAT_EPOCHS=5
+QAT_EPOCHS=10
 
 # Batch size for QAT training
 QAT_BATCH_SIZE=4
@@ -53,7 +53,7 @@ OUTPUT_OPS="predicted_heatmap:SoftArgmaxCoordLoss"
 # --- TFLite Converter Config ---
 
 # Path to save the compiled static TFLite model (.tflite)
-TFLITE_OUT="outputs/tracker_coords_3_qat.tflite"
+TFLITE_OUT="outputs/tracker_coords_qat.tflite"
 
 # Quantization type for TFLite conversion:
 #   - "none"    : Standard FP32 float model (no quantization)
@@ -73,9 +73,48 @@ python3 utils/quantization_optimization.py \
   --keras_out "$KERAS_QAT_OUT" \
   --train_mode "$QAT_TRAIN_MODE" \
   --h5_dataset "$H5_DATASET" \
-  --epochs "$QAT_EPOCHS" \
+  --epochs 3 \
   --batch_size "$QAT_BATCH_SIZE" \
-  --lr "$QAT_LR" \
+  --lr 1e-5 \
+  --max_samples 4000 \
+  ${OUTPUT_OPS:+--output_ops "$OUTPUT_OPS"}
+  
+echo "[*] Running Quantization-Aware Training (QAT)..."
+python3 utils/quantization_optimization.py \
+  --keras_in "$KERAS_IN" \
+  --student_init_keras "$KERAS_QAT_OUT" \
+  --keras_out "$KERAS_QAT_OUT" \
+  --train_mode "$QAT_TRAIN_MODE" \
+  --h5_dataset "$H5_DATASET" \
+  --epochs 2 \
+  --batch_size "$QAT_BATCH_SIZE" \
+  --lr 1e-6 \
+  --max_samples 4000 \
+  ${OUTPUT_OPS:+--output_ops "$OUTPUT_OPS"}
+
+echo "[*] Running Quantization-Aware Training (QAT)..."
+python3 utils/quantization_optimization.py \
+  --keras_in "$KERAS_IN" \
+  --student_init_keras "$KERAS_QAT_OUT" \
+  --keras_out "$KERAS_QAT_OUT" \
+  --train_mode "$QAT_TRAIN_MODE" \
+  --h5_dataset "$H5_DATASET" \
+  --epochs 2 \
+  --batch_size "$QAT_BATCH_SIZE" \
+  --lr 1e-7 \
+  --max_samples 4000 \
+  ${OUTPUT_OPS:+--output_ops "$OUTPUT_OPS"}
+  
+#echo "[*] Running Quantization-Aware Training (QAT)..."
+python3 utils/quantization_optimization.py \
+  --keras_in "$KERAS_IN" \
+  --student_init_keras "$KERAS_QAT_OUT" \
+  --keras_out "$KERAS_QAT_OUT" \
+  --train_mode "$QAT_TRAIN_MODE" \
+  --h5_dataset "$H5_DATASET" \
+  --epochs 2 \
+  --batch_size "$QAT_BATCH_SIZE" \
+  --lr 1e-8 \
   --max_samples 4000 \
   ${OUTPUT_OPS:+--output_ops "$OUTPUT_OPS"}
 
