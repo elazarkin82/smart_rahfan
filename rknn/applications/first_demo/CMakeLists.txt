@@ -49,7 +49,7 @@ endif()
 find_package(Threads REQUIRED)
 
 # Options for Resize Mode selection (RGA, OMP, CPU)
-set(RESIZE_MODE "RGA" CACHE STRING "Resize mode: RGA, OMP, CPU")
+set(RESIZE_MODE "OMP" CACHE STRING "Resize mode: RGA, OMP, CPU")
 set_property(CACHE RESIZE_MODE PROPERTY STRINGS "RGA" "OMP" "CPU")
 
 set(EXTRA_LIBS "")
@@ -64,6 +64,7 @@ if(RESIZE_MODE STREQUAL "RGA")
     endif()
     message(STATUS "[CMake] Found librga: ${RGA_LIB}")
     list(APPEND EXTRA_LIBS ${RGA_LIB})
+    set(RGA_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../docker/rknn-toolkit2/rknpu2/examples/3rdparty/rga/include)
 elseif(RESIZE_MODE STREQUAL "OMP")
     message(STATUS "[CMake] Using OpenMP Parallel CPU acceleration for resizing")
     find_package(OpenMP REQUIRED)
@@ -92,7 +93,7 @@ target_include_directories(first_demo PRIVATE
     include
     ${JPEG_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../docker/rknn-toolkit2/rknpu2/runtime/Linux/librknn_api/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../docker/rknn-toolkit2/rknpu2/examples/3rdparty/rga/include
+    ${RGA_INCLUDE_DIR}
 )
 
 # Link dependencies
