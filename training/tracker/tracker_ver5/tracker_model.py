@@ -185,7 +185,10 @@ def load_model_config(config_path="model.conf"):
     hm_loss_default = config.get("Loss", "heatmap_loss_default", fallback="dbsz_relu")
     
     norm_type = config.get("Normalization", "type", fallback="group_norm")
-    
+
+    stack_layers      = config.getint("Stack", "stack_layers",      fallback=16)
+    stack_target_size = config.getint("Stack", "stack_target_size", fallback=64)
+
     return {
         "reference_backbone": ref_backbone,
         "search_backbone": search_backbone,
@@ -194,7 +197,9 @@ def load_model_config(config_path="model.conf"):
         "decoder_type": dec_type,
         "heatmap_pxl_size": heatmap_pxl_size,
         "heatmap_loss_default": hm_loss_default,
-        "normalization_type": norm_type
+        "normalization_type": norm_type,
+        "stack_layers": stack_layers,
+        "stack_target_size": stack_target_size,
     }
 
 def check_and_create_default_config(config_path="model.conf"):
@@ -255,6 +260,15 @@ heatmap_loss_default = dbsz_relu
 # Normalization Type
 # Options: group_norm, batch_norm
 type = group_norm
+
+[Stack]
+# Number of multi-scale layers in the reference stack.
+# Must match compiler.stack_layers in dataset_generator/pipeline_config.json.
+stack_layers = 16
+
+# Spatial size (px) of each reference stack frame.
+# Must match compiler.stack_target_size in dataset_generator/pipeline_config.json.
+stack_target_size = 64
 """
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(default_content)
@@ -437,12 +451,11 @@ def fold_model_weights(unfolded_model, folded_model):
 # =====================================================================
 
 class TargetTrackerVer4:
-    def __init__(self, ref_shape=(64, 64, 16), search_shape=(256, 256, 1), config_path="model.conf"):
-        self.ref_shape = ref_shape
+    def __init__(self, ref_shape=None, search_shape=(256, 256, 1), config_path="model.conf"):
         self.search_shape = search_shape
         self.model = None
-        
-        # Load configuration
+
+        # Load configuration first so ref_shape can be derived from stack params
         if os.path.exists(config_path):
             self.config = load_model_config(config_path)
         else:
@@ -453,8 +466,18 @@ class TargetTrackerVer4:
                 "attention_mechanism": "depthwise_corr",
                 "decoder_type": "fpn_add",
                 "heatmap_pxl_size": 64,
-                "heatmap_loss_default": "dbsz_relu"
+                "heatmap_loss_default": "dbsz_relu",
+                "stack_layers": 16,
+                "stack_target_size": 64,
             }
+
+        # Derive ref_shape from config unless explicitly overridden by the caller
+        if ref_shape is None:
+            sz = self.config.get("stack_target_size", 64)
+            ch = self.config.get("stack_layers", 16)
+            self.ref_shape = (sz, sz, ch)
+        else:
+            self.ref_shape = ref_shape
 
     def _inverted_residual_block(self, inputs, expansion, filters, strides, name_prefix):
         x = inputs
@@ -1223,7 +1246,7 @@ def read_hdf5_sliced(dataset_obj, indices, chunk_size=10000):
         
     return np.concatenate(chunks, axis=0)
 
-def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mode="joint"):
+def load_hdf5_dataset(h5_path, batch_size, ref_shape, search_shape, val_split=0.1, is_val=False, train_mode="joint"):
     import h5py
     import psutil
     import numpy as np
@@ -1255,7 +1278,7 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
         raise ValueError(f"No samples remaining after filtering/balancing for train_mode={train_mode}, is_val={is_val}")
         
     # Check RAM caching capability using psutil
-    sample_size_bytes = (64 * 64 * 16 + 256 * 256 * 1) * 4 + 2 * 4 + 4
+    sample_size_bytes = (ref_shape[0] * ref_shape[1] * ref_shape[2] + search_shape[0] * search_shape[1] * search_shape[2]) * 4 + 2 * 4 + 4
     total_expected_bytes = len(selected_indices) * sample_size_bytes
     
     mem = psutil.virtual_memory()
@@ -1328,8 +1351,8 @@ def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mo
     # Define output signature with dynamic leading dimension
     output_signature = (
         (
-            tf.TensorSpec(shape=(None, 64, 64, 16), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32)
+            tf.TensorSpec(shape=(None, *ref_shape), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, *search_shape), dtype=tf.float32)
         ),
         (
             tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
@@ -1388,24 +1411,25 @@ def main():
             raise FileNotFoundError(f"dataset.h5 not found in any of the specified directories: {args.dataset_dir}")
             
         print(f"Loading dataset from: {h5_path}")
-        
-        train_ds, train_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, val_split=args.val_split, is_val=False, train_mode=args.train_mode)
-        val_ds, val_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, val_split=args.val_split, is_val=True, train_mode=args.train_mode)
-        
-        train_steps = train_samples // args.batch_size
-        val_steps = val_samples // args.batch_size
-        
-        print(f"Train samples: {train_samples} ({train_steps} steps/epoch)")
-        print(f"Val samples: {val_samples} ({val_steps} steps/epoch)")
-        
+
+        # Create tracker first so ref_shape / search_shape are derived from model.conf
         tracker = TargetTrackerVer4()
         print("Building TargetTrackerVer4 model...")
         tracker.create_model()
-        
+
+        train_ds, train_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, ref_shape=tracker.ref_shape, search_shape=tracker.search_shape, val_split=args.val_split, is_val=False, train_mode=args.train_mode)
+        val_ds, val_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, ref_shape=tracker.ref_shape, search_shape=tracker.search_shape, val_split=args.val_split, is_val=True, train_mode=args.train_mode)
+
+        train_steps = train_samples // args.batch_size
+        val_steps = val_samples // args.batch_size
+
+        print(f"Train samples: {train_samples} ({train_steps} steps/epoch)")
+        print(f"Val samples: {val_samples} ({val_steps} steps/epoch)")
+
         if args.init_keras_file and os.path.exists(args.init_keras_file):
             print(f"Resuming training: loading weights from {args.init_keras_file}...")
             tracker.model.load_weights(args.init_keras_file, by_name=True, skip_mismatch=True)
-            
+
         tracker.train(
             train_dataset=train_ds,
             val_dataset=val_ds,
@@ -1419,6 +1443,7 @@ def main():
             best_train_loss_output=args.best_train_loss_output,
             log_file=args.log_file
         )
+
 
 if __name__ == '__main__':
     main()
