@@ -9,6 +9,12 @@
 #if defined(USE_RGA)
 #include <RgaApi.h>
 #include <im2d.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <errno.h>
+#include <linux/dma-heap.h>
 #endif
 
 TrackerService::TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop, bool quality_enabled)
@@ -33,6 +39,17 @@ TrackerService::TrackerService(const char* template_path, const char* frame_path
     m_min_crop = min_crop;
     m_max_crop = max_crop;
     m_quality_enabled = quality_enabled;
+#if defined(USE_RGA)
+    m_rga_initialized = false;
+    m_rga_src_w      = 0;
+    m_rga_src_h      = 0;
+    m_rga_src_fd     = -1;
+    m_rga_dst_fd     = -1;
+    m_rga_src_va     = NULL;
+    m_rga_dst_va     = NULL;
+    m_rga_src_handle = 0;
+    m_rga_dst_handle = 0;
+#endif
 
     m_in_width_ref = 64;
     m_in_height_ref = 64;
@@ -227,6 +244,9 @@ TrackerService::~TrackerService()
         free(m_search_buf);
         free(m_heatmap_buf);
         free(m_template_features_buf);
+#if defined(USE_RGA)
+        release_rga_buffers();
+#endif
     }
 }
 
@@ -585,17 +605,178 @@ void TrackerService::resize_nearest_gray(const uchar* src, int src_w, int src_h,
 }
 
 #if defined(USE_RGA)
+bool TrackerService::init_rga_buffers(int src_w, int src_h)
+{
+    if (m_rga_initialized && m_rga_src_w == src_w && m_rga_src_h == src_h)
+    {
+        return true;
+    }
+
+    release_rga_buffers();
+
+    // Store source dimensions early so release_rga_buffers() can compute
+    // munmap sizes if init fails partway through.
+    m_rga_src_w = src_w;
+    m_rga_src_h = src_h;
+
+    int heap_fd = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
+    if (heap_fd < 0)
+    {
+        fprintf(stderr, "[TrackerService] Cannot open /dev/dma_heap/system: %s\n", strerror(errno));
+        return false;
+    }
+
+    struct dma_heap_allocation_data alloc;
+    bool ok = true;
+
+    // Allocate src DMA buffer (grayscale camera frame: src_w * src_h bytes)
+    memset(&alloc, 0, sizeof(alloc));
+    alloc.len      = (uint64_t)(src_w * src_h);
+    alloc.fd_flags = O_RDWR | O_CLOEXEC;
+    if (ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc) < 0)
+    {
+        fprintf(stderr, "[TrackerService] DMA heap alloc (src) failed: %s\n", strerror(errno));
+        ok = false;
+    }
+    else
+    {
+        m_rga_src_fd = (int)alloc.fd;
+    }
+
+    // Allocate dst DMA buffer (resized search window)
+    if (ok)
+    {
+        size_t dst_size = (size_t)(m_in_width_search * m_in_height_search * m_in_channels_search);
+        memset(&alloc, 0, sizeof(alloc));
+        alloc.len      = (uint64_t)dst_size;
+        alloc.fd_flags = O_RDWR | O_CLOEXEC;
+        if (ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc) < 0)
+        {
+            fprintf(stderr, "[TrackerService] DMA heap alloc (dst) failed: %s\n", strerror(errno));
+            ok = false;
+        }
+        else
+        {
+            m_rga_dst_fd = (int)alloc.fd;
+        }
+    }
+
+    close(heap_fd);
+
+    if (!ok)
+    {
+        release_rga_buffers();
+        return false;
+    }
+
+    // Map src buffer into process address space
+    m_rga_src_va = (uchar*)mmap(NULL, (size_t)(src_w * src_h),
+                                 PROT_READ | PROT_WRITE, MAP_SHARED, m_rga_src_fd, 0);
+    if (m_rga_src_va == (uchar*)MAP_FAILED)
+    {
+        fprintf(stderr, "[TrackerService] mmap RGA src failed: %s\n", strerror(errno));
+        m_rga_src_va = NULL;
+        release_rga_buffers();
+        return false;
+    }
+
+    // Map dst buffer into process address space
+    size_t dst_size = (size_t)(m_in_width_search * m_in_height_search * m_in_channels_search);
+    m_rga_dst_va = (uchar*)mmap(NULL, dst_size,
+                                 PROT_READ | PROT_WRITE, MAP_SHARED, m_rga_dst_fd, 0);
+    if (m_rga_dst_va == (uchar*)MAP_FAILED)
+    {
+        fprintf(stderr, "[TrackerService] mmap RGA dst failed: %s\n", strerror(errno));
+        m_rga_dst_va = NULL;
+        release_rga_buffers();
+        return false;
+    }
+
+    // Register buffers with the RGA driver (one-time import per session)
+    m_rga_src_handle = importbuffer_fd(m_rga_src_fd, src_w * src_h);
+    if (m_rga_src_handle == 0)
+    {
+        fprintf(stderr, "[TrackerService] RGA importbuffer_fd (src) failed\n");
+        release_rga_buffers();
+        return false;
+    }
+
+    m_rga_dst_handle = importbuffer_fd(m_rga_dst_fd, (int)dst_size);
+    if (m_rga_dst_handle == 0)
+    {
+        fprintf(stderr, "[TrackerService] RGA importbuffer_fd (dst) failed\n");
+        release_rga_buffers();
+        return false;
+    }
+
+    // Build rga_buffer_t descriptors — reused on every call to imresize
+    m_rga_src_buf = wrapbuffer_handle(m_rga_src_handle, src_w, src_h, RK_FORMAT_YCbCr_400);
+    m_rga_dst_buf = wrapbuffer_handle(m_rga_dst_handle,
+                                       m_in_width_search, m_in_height_search, RK_FORMAT_YCbCr_400);
+
+    m_rga_initialized = true;
+    fprintf(stdout, "[TrackerService] RGA DMA buffers ready: src=%dx%d dst=%dx%d\n",
+            src_w, src_h, m_in_width_search, m_in_height_search);
+    return true;
+}
+
+void TrackerService::release_rga_buffers()
+{
+    if (m_rga_src_handle != 0)
+    {
+        releasebuffer_handle(m_rga_src_handle);
+        m_rga_src_handle = 0;
+    }
+    if (m_rga_dst_handle != 0)
+    {
+        releasebuffer_handle(m_rga_dst_handle);
+        m_rga_dst_handle = 0;
+    }
+    if (m_rga_src_va != NULL)
+    {
+        munmap(m_rga_src_va, (size_t)(m_rga_src_w * m_rga_src_h));
+        m_rga_src_va = NULL;
+    }
+    if (m_rga_dst_va != NULL)
+    {
+        munmap(m_rga_dst_va, (size_t)(m_in_width_search * m_in_height_search * m_in_channels_search));
+        m_rga_dst_va = NULL;
+    }
+    if (m_rga_src_fd >= 0)
+    {
+        close(m_rga_src_fd);
+        m_rga_src_fd = -1;
+    }
+    if (m_rga_dst_fd >= 0)
+    {
+        close(m_rga_dst_fd);
+        m_rga_dst_fd = -1;
+    }
+    m_rga_initialized = false;
+}
+
 void TrackerService::resize_rga(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h)
 {
-    rga_buffer_t src_buf = wrapbuffer_virtualaddr((void*)src, src_w, src_h, RK_FORMAT_Y8);
-    rga_buffer_t dst_buf = wrapbuffer_virtualaddr((void*)dst, dst_w, dst_h, RK_FORMAT_Y8);
-    
-    IM_STATUS status = imresize(src_buf, dst_buf);
+    if (!init_rga_buffers(src_w, src_h))
+    {
+        fprintf(stderr, "[TrackerService] RGA init failed, falling back to CPU resize.\n");
+        resize_bilinear_gray(src, src_w, src_h, dst, dst_w, dst_h);
+        return;
+    }
+
+    // Copy the incoming (non-DMA) camera frame into the DMA-accessible src buffer
+    memcpy(m_rga_src_va, src, (size_t)(src_w * src_h));
+
+    IM_STATUS status = imresize(m_rga_src_buf, m_rga_dst_buf);
     if (status != IM_STATUS_SUCCESS)
     {
         fprintf(stderr, "[TrackerService] RGA hardware resize failed: %d. Falling back to CPU.\n", status);
         resize_bilinear_gray(src, src_w, src_h, dst, dst_w, dst_h);
+        return;
     }
+
+    // Copy RGA output from DMA buffer into the caller's dst (m_search_buf)
+    memcpy(dst, m_rga_dst_va, (size_t)(dst_w * dst_h));
 }
 #elif defined(USE_OMP)
 void TrackerService::resize_bilinear_omp(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h)
