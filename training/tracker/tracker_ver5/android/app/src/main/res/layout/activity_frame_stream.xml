@@ -109,6 +109,19 @@
                     android:textStyle="bold" />
             </RelativeLayout>
 
+            <!-- Quality Filter Bypass Toggle -->
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switch_bypass_quality"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Bypass Quality Filter (Force Display)"
+                android:textColor="#ffffff"
+                android:textSize="12sp"
+                android:checked="false"
+                app:thumbTint="#00e6ff"
+                app:trackTint="#555555" />
+
             <!-- Results Section (Heatmap & Telemetry) -->
             <LinearLayout
                 android:id="@+id/results_panel"

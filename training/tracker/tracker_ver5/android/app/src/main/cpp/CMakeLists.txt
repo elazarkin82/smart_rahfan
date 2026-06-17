@@ -5,11 +5,8 @@
 # Sets the minimum CMake version required for this project.
 cmake_minimum_required(VERSION 3.22.1)
 
-# Declares the project name. The project name can be accessed via ${ PROJECT_NAME},
-# Since this is the top level CMakeLists.txt, the project name is also accessible
-# with ${CMAKE_PROJECT_NAME} (both CMake variables are in-sync within the top level
-# build script scope).
-project("tracker4")
+# Declares the project name.
+project("tracker4_native")
 
 # Creates and names a library, sets it as either STATIC
 # or SHARED, and provides the relative paths to its source code.
@@ -24,18 +21,18 @@ project("tracker4")
 # System.loadLibrary() and pass the name of the library defined here;
 # for GameActivity/NativeActivity derived applications, the same library name must be
 # used in the AndroidManifest.xml file.
-add_library(${CMAKE_PROJECT_NAME} SHARED
+add_library(tracker4 SHARED
         # List C/C++ source files with relative paths to this CMakeLists.txt.
         native-lib.cpp)
 
 # Specifies libraries CMake should link to your target library. You
 # can link libraries from various origins, such as libraries defined in this
 # build script, prebuilt third-party libraries, or Android system libraries.
-target_link_libraries(${CMAKE_PROJECT_NAME}
+target_link_libraries(tracker4
         # List libraries link to the target library
         android
         log
         jnigraphics)
 
 # Force 16 KB page alignment for Android 15 (API 35/36) compatibility
-target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,-z,max-page-size=16384")
+# target_link_options(tracker4 PRIVATE "-Wl,-z,max-page-size=16384")
