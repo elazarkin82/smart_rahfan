@@ -204,7 +204,7 @@ def load_model_config(config_path="model.conf"):
 
 def check_and_create_default_config(config_path="model.conf"):
     if not os.path.exists(config_path):
-        default_content = """# TargetTrackerVer4 Model Configuration File
+        default_content = """# TargetTrackerVer5 Model Configuration File
 # This file configures the backbones, attention mechanism, and decoder of the tracking network.
 # Optimizing these parameters helps balance tracking precision and real-time execution on weak boards.
 
@@ -216,7 +216,7 @@ def check_and_create_default_config(config_path="model.conf"):
 #   - mnv2            : Full MobileNetV2 backbone.
 #   - yolo5           : CSPDarknet-style backbone.
 #   - unet            : UNet-style encoder, 2 Conv blocks per scale, 3 downsampling stages (stride x8).
-#   - custom_legacy   : The original hardcoded tracker_ver4 reference backbone.
+#   - custom_legacy   : The original hardcoded tracker_ver5 reference backbone.
 reference_backbone = mini_mnv2
 
 # Search Frame Backbone
@@ -226,7 +226,7 @@ reference_backbone = mini_mnv2
 #   - mnv2            : Full MobileNetV2 backbone.
 #   - yolo5           : CSPDarknet-style backbone.
 #   - unet            : UNet-style encoder, 2 Conv blocks per scale, 4 downsampling stages (stride x16).
-#   - custom_legacy   : The original hardcoded tracker_ver4 search backbone.
+#   - custom_legacy   : The original hardcoded tracker_ver5 search backbone.
 search_backbone = mnv2_nano
 
 # Channel width multiplier to scale both backbones (e.g., 0.5, 0.75, 1.0). Smaller values reduce FLOPs.
@@ -284,17 +284,11 @@ stack_target_size = 64
 # Coordinate-Based Loss Helpers
 # =====================================================================
 
-def get_peak_coords_tf(heatmap, threshold=0.5, filter_size=5):
-    # 1. Apply threshold gate using the ReLU trick (NPU-friendly, no branching)
-    thresholded = tf.nn.relu(heatmap - threshold) * 2.0
-    
-    # 2. Smooth using average pooling (strides=1 keeps dimensions intact)
-    smoothed = tf.nn.avg_pool2d(thresholded, ksize=filter_size, strides=1, padding='SAME')
-    
-    H = tf.shape(smoothed)[1]
-    W = tf.shape(smoothed)[2]
+def get_peak_coords_tf(heatmap):
+    H = tf.shape(heatmap)[1]
+    W = tf.shape(heatmap)[2]
     # Flatten spatial dimensions to (B, H*W)
-    flat_hm = tf.reshape(smoothed, [-1, H * W])
+    flat_hm = tf.reshape(heatmap, [-1, H * W])
     flat_idx = tf.argmax(flat_hm, axis=-1)
     
     # Convert flat indices back to y, x coordinates
@@ -449,10 +443,10 @@ def fold_model_weights(unfolded_model, folded_model):
                 folded_layer.set_weights(weights)
 
 # =====================================================================
-# Target Tracker Ver 4 Class
+# Target Tracker Ver 5 Class
 # =====================================================================
 
-class TargetTrackerVer4:
+class TargetTrackerVer5:
     def __init__(self, ref_shape=None, search_shape=(256, 256, 1), config_path="model.conf"):
         self.search_shape = search_shape
         self.model = None
@@ -638,23 +632,23 @@ class TargetTrackerVer4:
         elif bb_type == "unet":
             # UNet-style encoder: 2 conv blocks per resolution, strided-conv for downsampling (NPU-friendly, no MaxPool)
             # Stage 1: stride 2 -> (128, 128, C16)
-            x1 = layers.Conv2D(scale_filters(16), (11, 11), strides=2, padding="same", use_bias=False, name="sb_ue1_conv1")(inputs)
+            x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ue1_conv1")(inputs)
             x1 = _GroupNormalization(scale_filters(16), name="sb_ue1_gn1")(x1)
             x1 = layers.ReLU(6.0, name="sb_ue1_relu1")(x1)
-            x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=1, padding="same", use_bias=False, name="sb_ue1_conv2")(x1)
+            x1 = layers.Conv2D(scale_filters(16), (7, 7), strides=1, padding="same", use_bias=False, name="sb_ue1_conv2")(x1)
             x1 = _GroupNormalization(scale_filters(16), name="sb_ue1_gn2")(x1)
             x1 = layers.ReLU(6.0, name="sb_ue1_relu2")(x1)
             
             # Stage 2: stride 4 -> (64, 64, C24)
-            x2 = layers.Conv2D(scale_filters(24), (7, 7), strides=2, padding="same", use_bias=False, name="sb_ue2_conv1")(x1)
+            x2 = layers.Conv2D(scale_filters(24), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ue2_conv1")(x1)
             x2 = _GroupNormalization(scale_filters(24), name="sb_ue2_gn1")(x2)
             x2 = layers.ReLU(6.0, name="sb_ue2_relu1")(x2)
-            x2 = layers.Conv2D(scale_filters(24), (3, 3), strides=1, padding="same", use_bias=False, name="sb_ue2_conv2")(x2)
+            x2 = layers.Conv2D(scale_filters(24), (5, 5), strides=1, padding="same", use_bias=False, name="sb_ue2_conv2")(x2)
             x2 = _GroupNormalization(scale_filters(24), name="sb_ue2_gn2")(x2)
             x2 = layers.ReLU(6.0, name="sb_ue2_relu2")(x2)
             
             # Stage 3: stride 8 -> (32, 32, C32)
-            x3 = layers.Conv2D(scale_filters(32), (5, 5), strides=2, padding="same", use_bias=False, name="sb_ue3_conv1")(x2)
+            x3 = layers.Conv2D(scale_filters(32), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ue3_conv1")(x2)
             x3 = _GroupNormalization(scale_filters(32), name="sb_ue3_gn1")(x3)
             x3 = layers.ReLU(6.0, name="sb_ue3_relu1")(x3)
             x3 = layers.Conv2D(scale_filters(32), (3, 3), strides=1, padding="same", use_bias=False, name="sb_ue3_conv2")(x3)
@@ -822,15 +816,15 @@ class TargetTrackerVer4:
         elif bb_type == "unet":
             # UNet-style encoder: 2 conv blocks per resolution, strided-conv for downsampling (NPU-friendly, no MaxPool)
             # Stage 1: stride 2 -> (32, 32, C16)
-            x = layers.Conv2D(scale_filters(16), (11, 11), strides=2, padding="same", use_bias=False, name="ref_ue1_conv1")(x)
+            x = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="ref_ue1_conv1")(x)
             x = _GroupNormalization(scale_filters(16), name="ref_ue1_gn1")(x)
             x = layers.ReLU(6.0, name="ref_ue1_relu1")(x)
-            x = layers.Conv2D(scale_filters(16), (3, 3), strides=1, padding="same", use_bias=False, name="ref_ue1_conv2")(x)
+            x = layers.Conv2D(scale_filters(16), (5, 5), strides=1, padding="same", use_bias=False, name="ref_ue1_conv2")(x)
             x = _GroupNormalization(scale_filters(16), name="ref_ue1_gn2")(x)
             x = layers.ReLU(6.0, name="ref_ue1_relu2")(x)
             
             # Stage 2: stride 4 -> (16, 16, C32)
-            x = layers.Conv2D(scale_filters(32), (7, 7), strides=2, padding="same", use_bias=False, name="ref_ue2_conv1")(x)
+            x = layers.Conv2D(scale_filters(32), (3, 3), strides=2, padding="same", use_bias=False, name="ref_ue2_conv1")(x)
             x = _GroupNormalization(scale_filters(32), name="ref_ue2_gn1")(x)
             x = layers.ReLU(6.0, name="ref_ue2_relu1")(x)
             x = layers.Conv2D(scale_filters(32), (3, 3), strides=1, padding="same", use_bias=False, name="ref_ue2_conv2")(x)
@@ -838,7 +832,7 @@ class TargetTrackerVer4:
             x = layers.ReLU(6.0, name="ref_ue2_relu2")(x)
             
             # Bottleneck: stride 8 -> (8, 8, C128)
-            x = layers.Conv2D(scale_filters(64), (5, 5), strides=2, padding="same", use_bias=False, name="ref_ue3_conv1")(x)
+            x = layers.Conv2D(scale_filters(64), (3, 3), strides=2, padding="same", use_bias=False, name="ref_ue3_conv1")(x)
             x = _GroupNormalization(scale_filters(64), name="ref_ue3_gn1")(x)
             x = layers.ReLU(6.0, name="ref_ue3_relu1")(x)
             x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="ref_ue3_conv2")(x)
@@ -1000,7 +994,8 @@ class TargetTrackerVer4:
         # Final prediction heatmap
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
         output_heatmap_norm = HeatmapNormalization(name="predicted_heatmap_norm")(output_heatmap_raw)
-        thresholded = tf.nn.relu(output_heatmap_norm - 0.5) * 2.0
+        thresholded = layers.Rescaling(scale=2.0, offset=-1.0, name="heatmap_threshold_rescale")(output_heatmap_norm)
+        thresholded = layers.ReLU(name="heatmap_threshold_relu")(thresholded)
         output_heatmap = layers.DepthwiseConv2D(
             kernel_size=(5, 5),
             strides=(1, 1),
@@ -1042,7 +1037,7 @@ class TargetTrackerVer4:
         self.model = models.Model(
             inputs=[ref_input, search_input],
             outputs=[output_heatmap, output_quality],
-            name="TargetTrackerVer4"
+            name="TargetTrackerVer5"
         )
         
         print("\\n" + "="*50)
@@ -1101,8 +1096,10 @@ class TargetTrackerVer4:
             else:
                 loss_heatmap = coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality)
                 
-            if train_mode in ("quality_only", "joint"):
-                pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
+            if train_mode == "heatmap_only":
+                loss_quality = tf.constant(0.0, dtype=tf.float32)
+            else:
+                pred_coords = get_peak_coords_tf(pred_heatmap)
                 # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
                 H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
                 pred_coords_scaled = pred_coords * (256.0 / H)
@@ -1111,10 +1108,7 @@ class TargetTrackerVer4:
                 dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                 target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                 target_quality = tf.stop_gradient(target_quality)
-            else:
-                target_quality = gt_quality
-
-            loss_quality = loss_fn_quality(target_quality, pred_quality)
+                loss_quality = loss_fn_quality(target_quality, pred_quality)
             
             if train_mode == "heatmap_only":
                 loss_value = loss_heatmap
@@ -1145,11 +1139,27 @@ class TargetTrackerVer4:
         epoch_hm_loss_avg = tf.keras.metrics.Mean()
         epoch_q_loss_avg = tf.keras.metrics.Mean()
         import tqdm
+        import time as _time
         progress_bar = tqdm.tqdm(dataset, desc=f"Epoch {epoch:03d}/{num_epochs:03d}", total=steps, leave=False)
-        
-        for inputs, targets in progress_bar:
+
+        # Per-epoch timing accumulators
+        t_data = 0.0  # time waiting for next batch from the dataset iterator (data loading / prefetch stall)
+        t_step = 0.0  # time inside GradientTape forward+backward + apply_gradients
+
+        _it = iter(progress_bar)
+        _t0 = _time.perf_counter()
+        while True:
+            try:
+                batch = next(_it)
+            except StopIteration:
+                break
+            t_data += _time.perf_counter() - _t0  # iterator returned → batch was ready
+
+            inputs, targets = batch
             gt_coords = targets["predicted_coords"]
             gt_quality = targets["predicted_quality"]
+
+            _t1 = _time.perf_counter()
             with tf.GradientTape() as tape:
                 predictions = self.model(inputs, training=True)
                 pred_heatmap, pred_quality = predictions
@@ -1159,8 +1169,10 @@ class TargetTrackerVer4:
                 else:
                     loss_heatmap = coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality)
                     
-                if train_mode in ("quality_only", "joint"):
-                    pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
+                if train_mode == "heatmap_only":
+                    loss_quality = tf.constant(0.0, dtype=tf.float32)
+                else:
+                    pred_coords = get_peak_coords_tf(pred_heatmap)
                     # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
                     H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
                     pred_coords_scaled = pred_coords * (256.0 / H)
@@ -1169,10 +1181,7 @@ class TargetTrackerVer4:
                     dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                     target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                     target_quality = tf.stop_gradient(target_quality)
-                else:
-                    target_quality = gt_quality
-                
-                loss_quality = loss_fn_quality(target_quality, pred_quality)
+                    loss_quality = loss_fn_quality(target_quality, pred_quality)
                 
                 if train_mode == "heatmap_only":
                     loss_value = loss_heatmap
@@ -1183,7 +1192,8 @@ class TargetTrackerVer4:
                 
             grads = tape.gradient(loss_value, self.model.trainable_variables)
             optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
-            
+            t_step += _time.perf_counter() - _t1
+
             epoch_loss_avg.update_state(loss_value)
             epoch_hm_loss_avg.update_state(loss_heatmap)
             epoch_q_loss_avg.update_state(loss_quality)
@@ -1193,8 +1203,9 @@ class TargetTrackerVer4:
                 hm=float(epoch_hm_loss_avg.result()),
                 q=float(epoch_q_loss_avg.result())
             )
-            
-        return float(epoch_loss_avg.result()), float(epoch_hm_loss_avg.result()), float(epoch_q_loss_avg.result())
+            _t0 = _time.perf_counter()  # restart timer for the next data-load wait
+
+        return float(epoch_loss_avg.result()), float(epoch_hm_loss_avg.result()), float(epoch_q_loss_avg.result()), t_data, t_step
 
     def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_quality="bce", train_mode="joint", output_path=None, best_train_loss_output=None, log_file=None):
         if loss_quality == "bce":
@@ -1241,10 +1252,17 @@ class TargetTrackerVer4:
         best_train_loss = float('inf')
         self.log(f"Initial Validation Loss: {best_val_loss:.6f} (HM: {init_val_hm:.6f}, Q: {init_val_q:.6f})", log_file)
         
+        import time as _time
+        import gc
+
         for epoch in range(1, num_of_epochs + 1):
-            epoch_loss, epoch_hm, epoch_q = self.train_epoch(train_dataset, optimizer, loss_fn_quality, epoch, num_of_epochs, train_mode=train_mode, steps=train_steps)
-            
+            _t_epoch_start = _time.perf_counter()
+            epoch_loss, epoch_hm, epoch_q, t_data, t_step = self.train_epoch(train_dataset, optimizer, loss_fn_quality, epoch, num_of_epochs, train_mode=train_mode, steps=train_steps)
+
+            # --- Save best train (timed) ---
+            t_save = 0.0
             if best_train_loss_output and epoch_loss < best_train_loss:
+                _t_s = _time.perf_counter()
                 self.log(f"   [TRAIN IMPROVEMENT] Train loss improved from {best_train_loss:.6f} to {epoch_loss:.6f}. Saving to {best_train_loss_output}", log_file)
                 best_train_loss = epoch_loss
                 if os.path.dirname(best_train_loss_output):
@@ -1253,11 +1271,18 @@ class TargetTrackerVer4:
                 if self.config.get("normalization_type", "group_norm") == "batch_norm":
                      base, ext = os.path.splitext(best_train_loss_output)
                      self.fold_and_save(f"{base}_fbn{ext}")
-            
+                t_save += _time.perf_counter() - _t_s
+
+            # --- Validation (timed) ---
+            _t_val_start = _time.perf_counter()
             val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_quality, train_mode=train_mode, steps=val_steps)
+            t_val = _time.perf_counter() - _t_val_start
+
             self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} (HM: {epoch_hm:.6f}, Q: {epoch_q:.6f}) | Val Loss: {val_loss:.6f} (HM: {val_hm:.6f}, Q: {val_q:.6f})", log_file)
-            
+
+            # --- Save best val (timed) ---
             if val_loss < best_val_loss:
+                _t_s = _time.perf_counter()
                 self.log(f"   [VAL IMPROVEMENT] Val loss improved from {best_val_loss:.6f} to {val_loss:.6f}. Saving model...", log_file)
                 best_val_loss = val_loss
                 if output_path:
@@ -1269,9 +1294,28 @@ class TargetTrackerVer4:
                         self.fold_and_save(f"{base}_fbn{ext}")
                         dir_name = os.path.dirname(output_path)
                         self.fold_and_save(os.path.join(dir_name, "tracker_model_fbn.keras"))
-            
-            import gc
+                t_save += _time.perf_counter() - _t_s
+
+            # --- Timing breakdown → log file only ---
+            t_epoch_total = _time.perf_counter() - _t_epoch_start
+            t_overhead = max(0.0, t_epoch_total - t_step - t_data - t_val - t_save)
+            if log_file:
+                def _pct(t):
+                    return 100.0 * t / t_epoch_total if t_epoch_total > 0.0 else 0.0
+                with open(log_file, "a") as _lf:
+                    _lf.write(
+                        f"   [TIMING] Total: {t_epoch_total:.1f}s"
+                        f" | TrainStep: {t_step:.1f}s ({_pct(t_step):.1f}%)"
+                        f" | DataLoad: {t_data:.1f}s ({_pct(t_data):.1f}%)"
+                        f" | Validation: {t_val:.1f}s ({_pct(t_val):.1f}%)"
+                        f" | Save: {t_save:.1f}s ({_pct(t_save):.1f}%)"
+                        f" | Overhead: {t_overhead:.1f}s ({_pct(t_overhead):.1f}%)\n"
+                    )
+
             gc.collect()
+
+# Backward-compatible alias for existing utility scripts.
+TargetTrackerVer4 = TargetTrackerVer5
 
 # =====================================================================
 # Dataset Pipeline
@@ -1443,7 +1487,7 @@ def load_hdf5_dataset(h5_path, batch_size, ref_shape, search_shape, val_split=0.
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description="TargetTrackerVer4 Training CLI")
+    parser = argparse.ArgumentParser(description="TargetTrackerVer5 Training CLI")
     parser.add_argument("command", choices=["train"])
     parser.add_argument("--dataset_dir", nargs="+", required=True, help="One or more paths to dataset directories containing dataset.h5")
     parser.add_argument("--batch_size", type=int, default=16, help="Training batch size")
@@ -1475,8 +1519,8 @@ def main():
         print(f"Loading dataset from: {h5_path}")
 
         # Create tracker first so ref_shape / search_shape are derived from model.conf
-        tracker = TargetTrackerVer4()
-        print("Building TargetTrackerVer4 model...")
+        tracker = TargetTrackerVer5()
+        print("Building TargetTrackerVer5 model...")
         tracker.create_model()
 
         train_ds, train_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, ref_shape=tracker.ref_shape, search_shape=tracker.search_shape, val_split=args.val_split, is_val=False, train_mode=args.train_mode)
