@@ -73,6 +73,22 @@ def build_reference_stack(image, center, num_layers, max_size, min_size, target_
     stack = np.stack(stack_layers, axis=-1).astype(np.uint8)
     return stack
 
+def sample_crop_max_size(crop_max_cfg):
+    if isinstance(crop_max_cfg, (list, tuple)):
+        if len(crop_max_cfg) != 2:
+            raise ValueError("compiler.crop_max_size range must contain exactly two values: [min, max]")
+        min_crop, max_crop = float(crop_max_cfg[0]), float(crop_max_cfg[1])
+        if min_crop <= 0 or max_crop <= 0:
+            raise ValueError("compiler.crop_max_size values must be positive")
+        if max_crop < min_crop:
+            raise ValueError("compiler.crop_max_size range must be ordered as [min, max]")
+        return float(np.random.uniform(min_crop, max_crop))
+
+    crop_max = float(crop_max_cfg)
+    if crop_max <= 0:
+        raise ValueError("compiler.crop_max_size must be positive")
+    return crop_max
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config = load_config()
@@ -97,8 +113,10 @@ def main():
     
     # Compiler settings
     layers = compiler_cfg['stack_layers']
-    max_sz = compiler_cfg['crop_max_size']
-    min_sz = compiler_cfg['crop_min_size']
+    max_sz_cfg = compiler_cfg['crop_max_size']
+    min_sz = float(compiler_cfg['crop_min_size'])
+    if min_sz <= 0:
+        raise ValueError("compiler.crop_min_size must be positive")
     tgt_sz = compiler_cfg['stack_target_size']
     sigma = compiler_cfg['heatmap_sigma']
     relative_sigma = compiler_cfg.get('heatmap_relative_sigma', None)
@@ -136,8 +154,12 @@ def main():
             
         # 1. Reference Initialization (from frame 0)
         frame_0 = flight_data[0]
-        flight_max_sz = frame_0.get("crop_max_size", max_sz)
-        flight_min_sz = frame_0.get("crop_min_size", min_sz)
+        flight_max_sz = sample_crop_max_size(max_sz_cfg)
+        flight_min_sz = min_sz
+        if flight_max_sz < flight_min_sz:
+            raise ValueError(
+                f"Sampled crop_max_size ({flight_max_sz:.2f}) is smaller than crop_min_size ({flight_min_sz:.2f})"
+            )
         ref_stack = build_reference_stack(
             frame_0['image_gray'], 
             frame_0['target_2d'], 
