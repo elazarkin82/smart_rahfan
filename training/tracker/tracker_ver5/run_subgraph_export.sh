@@ -27,6 +27,9 @@ echo "============================================================"
 # Create outputs directory
 mkdir -p outputs
 
+KERAS_IN=outputs/tracker_coords_qat.keras
+#KERAS_IN=outputs/tracker_coords_fbn.keras
+
 # 1. Export Part 1: Template Encoder Graph
 # Input: reference_stack (1, 64, 64, 16)
 # Output: reference_target_encoder (1, 8, 8, 64)
@@ -36,29 +39,32 @@ python3 utils/convert_to_tflite_static.py \
     --tflite_out outputs/tracker_template.tflite \
     --input_tensors reference_stack \
     --output_tensors reference_target_encoder \
-    --quant "$QUANT"
+    --quant "$QUANT" \
+    --qat
 
 # 2. Export Part 2: Frame NPU Graph
 # Inputs: search_frame (1, 256, 256, 1), reference_target_encoder (1, 8, 8, 64)
 # Outputs: predicted_heatmap, predicted_quality
 echo "[*] Exporting Part 2: Frame NPU Tracking Subgraph..."
 python3 utils/convert_to_tflite_static.py \
-    --keras_in outputs/tracker_model_fbn.keras \
+    --keras_in ${KERAS_IN} \
     --tflite_out outputs/tracker_frame.tflite \
     --input_tensors search_frame,reference_target_encoder \
     --output_tensors predicted_heatmap,predicted_quality \
-    --quant "$QUANT"
+    --quant "$QUANT" \
+    --qat
 
 # 2a. Export Part 2a: Frame NPU Graph (No Quality)
 # Inputs: search_frame (1, 256, 256, 1), reference_target_encoder (1, 8, 8, 64)
 # Outputs: predicted_heatmap
 echo "[*] Exporting Part 2a: Frame NPU Tracking Subgraph (No Quality)..."
 python3 utils/convert_to_tflite_static.py \
-    --keras_in outputs/tracker_model_fbn.keras \
+    --keras_in ${KERAS_IN} \
     --tflite_out outputs/tracker_frame_no_quality.tflite \
     --input_tensors search_frame,reference_target_encoder \
     --output_tensors predicted_heatmap \
-    --quant "$QUANT"
+    --quant "$QUANT" \
+    --qat
 
 # 3. Export Full Model Graph
 # Inputs: reference_stack (1, 64, 64, 16), search_frame (1, 256, 256, 1)
@@ -67,7 +73,8 @@ echo "[*] Exporting Full Model Graph..."
 python3 utils/convert_to_tflite_static.py \
     --keras_in outputs/tracker_model_fbn.keras \
     --tflite_out outputs/tracker_full.tflite \
-    --quant "$QUANT"
+    --quant "$QUANT" \
+    --qat
 
 echo "============================================================"
 echo "[SUCCESS] TFLite models exported successfully:"

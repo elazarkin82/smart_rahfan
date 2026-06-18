@@ -34,10 +34,10 @@
     },
     "compiler": {
         "dataset_dir": "compiled",
-        "stack_layers": 16,
+        "stack_layers": 2,
         "stack_target_size": 64,
-        "crop_max_size": 512,
-        "crop_min_size": 16,
+        "crop_max_size": 256,
+        "crop_min_size": 32,
         "heatmap_sigma": 10.0,
         "heatmap_relative_sigma": 0.125,
         "synthetic_negative_ratio": 0.00

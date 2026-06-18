@@ -31,6 +31,15 @@
 
 mkdir -p outputs
 
+# TensorFlow GPU memory policy for this training process.
+# Override per run, for example: TRACKER_GPU_MEMORY_LIMIT_MB=0 TF_FORCE_GPU_ALLOW_GROWTH=true ./run_tracker_training_heatmap.sh
+export TF_GPU_ALLOCATOR="${TF_GPU_ALLOCATOR:-cuda_malloc_async}"
+export TRACKER_GPU_MEMORY_LIMIT_MB="${TRACKER_GPU_MEMORY_LIMIT_MB:-51200}"
+export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-1}"
+
+echo "[TF ENV] TF_GPU_ALLOCATOR=${TF_GPU_ALLOCATOR}"
+echo "[TF ENV] TRACKER_GPU_MEMORY_LIMIT_MB=${TRACKER_GPU_MEMORY_LIMIT_MB}"
+
 # Run training using the coordinate-based loss script
 #
 # --train_mode joint: Trains both the backbone (via Soft-Argmax coordinate loss) and the quality head.
@@ -38,7 +47,7 @@ mkdir -p outputs
 # --batch_size 32: Sets batch size for training.
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 30 \
+    --num_of_epochs 20 \
     --lr 1e-3 \
     --loss_quality bce \
     --output outputs/tracker_coords.keras \

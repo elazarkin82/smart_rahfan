@@ -7,6 +7,44 @@ import configparser
 import h5py
 import psutil
 
+
+def configure_tensorflow_gpu_memory():
+    gpus = tf.config.list_physical_devices("GPU")
+    if not gpus:
+        return
+
+    limit_raw = os.environ.get("TRACKER_GPU_MEMORY_LIMIT_MB", "").strip()
+    if limit_raw:
+        try:
+            limit_mb = float(limit_raw)
+        except ValueError:
+            print(f"[TF CONFIG] Ignoring invalid TRACKER_GPU_MEMORY_LIMIT_MB={limit_raw!r}")
+            limit_mb = 0.0
+
+        if limit_mb > 0.0:
+            try:
+                for gpu in gpus:
+                    tf.config.set_logical_device_configuration(
+                        gpu,
+                        [tf.config.LogicalDeviceConfiguration(memory_limit=limit_mb)]
+                    )
+                print(f"[TF CONFIG] Limited each GPU logical device to {limit_mb:.0f} MB.")
+                return
+            except RuntimeError as exc:
+                print(f"[TF CONFIG] Could not set GPU memory limit after runtime initialization: {exc}")
+
+    allow_growth = os.environ.get("TF_FORCE_GPU_ALLOW_GROWTH", "").strip().lower()
+    if allow_growth in ("1", "true", "yes", "on"):
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("[TF CONFIG] Enabled GPU memory growth.")
+        except RuntimeError as exc:
+            print(f"[TF CONFIG] Could not enable GPU memory growth after runtime initialization: {exc}")
+
+
+configure_tensorflow_gpu_memory()
+
 # Global Normalization setting for dynamic layer configuration
 _NORMALIZATION_TYPE = "group_norm"
 _OVERRIDE_USE_BIAS = False
@@ -185,7 +223,10 @@ def load_model_config(config_path="model.conf"):
     hm_loss_default = config.get("Loss", "heatmap_loss_default", fallback="dbsz_relu")
     
     norm_type = config.get("Normalization", "type", fallback="group_norm")
-    
+
+    stack_layers      = config.getint("Stack", "stack_layers",      fallback=16)
+    stack_target_size = config.getint("Stack", "stack_target_size", fallback=64)
+
     return {
         "reference_backbone": ref_backbone,
         "search_backbone": search_backbone,
@@ -194,12 +235,14 @@ def load_model_config(config_path="model.conf"):
         "decoder_type": dec_type,
         "heatmap_pxl_size": heatmap_pxl_size,
         "heatmap_loss_default": hm_loss_default,
-        "normalization_type": norm_type
+        "normalization_type": norm_type,
+        "stack_layers": stack_layers,
+        "stack_target_size": stack_target_size,
     }
 
 def check_and_create_default_config(config_path="model.conf"):
     if not os.path.exists(config_path):
-        default_content = """# TargetTrackerVer4 Model Configuration File
+        default_content = """# TargetTrackerVer5 Model Configuration File
 # This file configures the backbones, attention mechanism, and decoder of the tracking network.
 # Optimizing these parameters helps balance tracking precision and real-time execution on weak boards.
 
@@ -210,7 +253,8 @@ def check_and_create_default_config(config_path="model.conf"):
 #   - mnv1            : Standard MobileNetV1 backbone.
 #   - mnv2            : Full MobileNetV2 backbone.
 #   - yolo5           : CSPDarknet-style backbone.
-#   - custom_legacy   : The original hardcoded tracker_ver4 reference backbone.
+#   - unet            : UNet-style encoder, 2 Conv blocks per scale, 3 downsampling stages (stride x8).
+#   - custom_legacy   : The original hardcoded tracker_ver5 reference backbone.
 reference_backbone = mini_mnv2
 
 # Search Frame Backbone
@@ -219,7 +263,8 @@ reference_backbone = mini_mnv2
 #   - mnv1            : Standard MobileNetV1 backbone.
 #   - mnv2            : Full MobileNetV2 backbone.
 #   - yolo5           : CSPDarknet-style backbone.
-#   - custom_legacy   : The original hardcoded tracker_ver4 search backbone.
+#   - unet            : UNet-style encoder, 2 Conv blocks per scale, 4 downsampling stages (stride x16).
+#   - custom_legacy   : The original hardcoded tracker_ver5 search backbone.
 search_backbone = mnv2_nano
 
 # Channel width multiplier to scale both backbones (e.g., 0.5, 0.75, 1.0). Smaller values reduce FLOPs.
@@ -255,6 +300,15 @@ heatmap_loss_default = dbsz_relu
 # Normalization Type
 # Options: group_norm, batch_norm
 type = group_norm
+
+[Stack]
+# Number of multi-scale layers in the reference stack.
+# Must match compiler.stack_layers in dataset_generator/pipeline_config.json.
+stack_layers = 16
+
+# Spatial size (px) of each reference stack frame.
+# Must match compiler.stack_target_size in dataset_generator/pipeline_config.json.
+stack_target_size = 64
 """
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(default_content)
@@ -268,17 +322,11 @@ type = group_norm
 # Coordinate-Based Loss Helpers
 # =====================================================================
 
-def get_peak_coords_tf(heatmap, threshold=0.5, filter_size=5):
-    # 1. Apply threshold gate using the ReLU trick (NPU-friendly, no branching)
-    thresholded = tf.nn.relu(heatmap - threshold) * 2.0
-    
-    # 2. Smooth using average pooling (strides=1 keeps dimensions intact)
-    smoothed = tf.nn.avg_pool2d(thresholded, ksize=filter_size, strides=1, padding='SAME')
-    
-    H = tf.shape(smoothed)[1]
-    W = tf.shape(smoothed)[2]
+def get_peak_coords_tf(heatmap):
+    H = tf.shape(heatmap)[1]
+    W = tf.shape(heatmap)[2]
     # Flatten spatial dimensions to (B, H*W)
-    flat_hm = tf.reshape(smoothed, [-1, H * W])
+    flat_hm = tf.reshape(heatmap, [-1, H * W])
     flat_idx = tf.argmax(flat_hm, axis=-1)
     
     # Convert flat indices back to y, x coordinates
@@ -433,16 +481,15 @@ def fold_model_weights(unfolded_model, folded_model):
                 folded_layer.set_weights(weights)
 
 # =====================================================================
-# Target Tracker Ver 4 Class
+# Target Tracker Ver 5 Class
 # =====================================================================
 
-class TargetTrackerVer4:
-    def __init__(self, ref_shape=(64, 64, 16), search_shape=(256, 256, 1), config_path="model.conf"):
-        self.ref_shape = ref_shape
+class TargetTrackerVer5:
+    def __init__(self, ref_shape=None, search_shape=(256, 256, 1), config_path="model.conf"):
         self.search_shape = search_shape
         self.model = None
-        
-        # Load configuration
+
+        # Load configuration first so ref_shape can be derived from stack params
         if os.path.exists(config_path):
             self.config = load_model_config(config_path)
         else:
@@ -453,8 +500,18 @@ class TargetTrackerVer4:
                 "attention_mechanism": "depthwise_corr",
                 "decoder_type": "fpn_add",
                 "heatmap_pxl_size": 64,
-                "heatmap_loss_default": "dbsz_relu"
+                "heatmap_loss_default": "dbsz_relu",
+                "stack_layers": 16,
+                "stack_target_size": 64,
             }
+
+        # Derive ref_shape from config unless explicitly overridden by the caller
+        if ref_shape is None:
+            sz = self.config.get("stack_target_size", 64)
+            ch = self.config.get("stack_layers", 16)
+            self.ref_shape = (sz, sz, ch)
+        else:
+            self.ref_shape = ref_shape
 
     def _inverted_residual_block(self, inputs, expansion, filters, strides, name_prefix):
         x = inputs
@@ -610,6 +667,40 @@ class TargetTrackerVer4:
             x = _GroupNormalization(scale_filters(128), name="sb_final_gn")(x)
             x = layers.ReLU(6.0, name="sb_final_relu")(x)
             
+        elif bb_type == "unet":
+            # UNet-style encoder: 2 conv blocks per resolution, strided-conv for downsampling (NPU-friendly, no MaxPool)
+            # Stage 1: stride 2 -> (128, 128, C16)
+            x1 = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ue1_conv1")(inputs)
+            x1 = _GroupNormalization(scale_filters(16), name="sb_ue1_gn1")(x1)
+            x1 = layers.ReLU(6.0, name="sb_ue1_relu1")(x1)
+            x1 = layers.Conv2D(scale_filters(16), (7, 7), strides=1, padding="same", use_bias=False, name="sb_ue1_conv2")(x1)
+            x1 = _GroupNormalization(scale_filters(16), name="sb_ue1_gn2")(x1)
+            x1 = layers.ReLU(6.0, name="sb_ue1_relu2")(x1)
+            
+            # Stage 2: stride 4 -> (64, 64, C24)
+            x2 = layers.Conv2D(scale_filters(24), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ue2_conv1")(x1)
+            x2 = _GroupNormalization(scale_filters(24), name="sb_ue2_gn1")(x2)
+            x2 = layers.ReLU(6.0, name="sb_ue2_relu1")(x2)
+            x2 = layers.Conv2D(scale_filters(24), (5, 5), strides=1, padding="same", use_bias=False, name="sb_ue2_conv2")(x2)
+            x2 = _GroupNormalization(scale_filters(24), name="sb_ue2_gn2")(x2)
+            x2 = layers.ReLU(6.0, name="sb_ue2_relu2")(x2)
+            
+            # Stage 3: stride 8 -> (32, 32, C32)
+            x3 = layers.Conv2D(scale_filters(32), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ue3_conv1")(x2)
+            x3 = _GroupNormalization(scale_filters(32), name="sb_ue3_gn1")(x3)
+            x3 = layers.ReLU(6.0, name="sb_ue3_relu1")(x3)
+            x3 = layers.Conv2D(scale_filters(32), (3, 3), strides=1, padding="same", use_bias=False, name="sb_ue3_conv2")(x3)
+            x3 = _GroupNormalization(scale_filters(32), name="sb_ue3_gn2")(x3)
+            x3 = layers.ReLU(6.0, name="sb_ue3_relu2")(x3)
+            
+            # Bottleneck: stride 16 -> (16, 16, C128)
+            x = layers.Conv2D(scale_filters(64), (3, 3), strides=2, padding="same", use_bias=False, name="sb_ue4_conv1")(x3)
+            x = _GroupNormalization(scale_filters(64), name="sb_ue4_gn1")(x)
+            x = layers.ReLU(6.0, name="sb_ue4_relu1")(x)
+            x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="sb_ue4_conv2")(x)
+            x = _GroupNormalization(scale_filters(128), name="sb_ue4_gn2")(x)
+            x = layers.ReLU(6.0, name="sb_ue4_relu2")(x)
+            
         else: # custom_legacy
             # Init conv (strides=2) -> (128, 128, 16)
             x1 = layers.Conv2D(16, (3, 3), strides=2, padding="same", use_bias=False, name="sb_init_conv")(inputs)
@@ -759,6 +850,32 @@ class TargetTrackerVer4:
             x = layers.Conv2D(out_channels, (1, 1), padding="same", use_bias=False, name="ref_final_conv")(x)
             x = _GroupNormalization(out_channels, name="ref_final_gn")(x)
             x = layers.ReLU(6.0, name="ref_final_relu")(x)
+            
+        elif bb_type == "unet":
+            # UNet-style encoder: 2 conv blocks per resolution, strided-conv for downsampling (NPU-friendly, no MaxPool)
+            # Stage 1: stride 2 -> (32, 32, C16)
+            x = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="ref_ue1_conv1")(x)
+            x = _GroupNormalization(scale_filters(16), name="ref_ue1_gn1")(x)
+            x = layers.ReLU(6.0, name="ref_ue1_relu1")(x)
+            x = layers.Conv2D(scale_filters(16), (5, 5), strides=1, padding="same", use_bias=False, name="ref_ue1_conv2")(x)
+            x = _GroupNormalization(scale_filters(16), name="ref_ue1_gn2")(x)
+            x = layers.ReLU(6.0, name="ref_ue1_relu2")(x)
+            
+            # Stage 2: stride 4 -> (16, 16, C32)
+            x = layers.Conv2D(scale_filters(32), (3, 3), strides=2, padding="same", use_bias=False, name="ref_ue2_conv1")(x)
+            x = _GroupNormalization(scale_filters(32), name="ref_ue2_gn1")(x)
+            x = layers.ReLU(6.0, name="ref_ue2_relu1")(x)
+            x = layers.Conv2D(scale_filters(32), (3, 3), strides=1, padding="same", use_bias=False, name="ref_ue2_conv2")(x)
+            x = _GroupNormalization(scale_filters(32), name="ref_ue2_gn2")(x)
+            x = layers.ReLU(6.0, name="ref_ue2_relu2")(x)
+            
+            # Bottleneck: stride 8 -> (8, 8, C128)
+            x = layers.Conv2D(scale_filters(64), (3, 3), strides=2, padding="same", use_bias=False, name="ref_ue3_conv1")(x)
+            x = _GroupNormalization(scale_filters(64), name="ref_ue3_gn1")(x)
+            x = layers.ReLU(6.0, name="ref_ue3_relu1")(x)
+            x = layers.Conv2D(scale_filters(128), (1, 1), padding="same", use_bias=False, name="ref_ue3_conv2")(x)
+            x = _GroupNormalization(scale_filters(128), name="ref_ue3_gn2")(x)
+            x = layers.ReLU(6.0, name="ref_ue3_relu2")(x)
             
         else: # custom_legacy
             # Strides: 2 * 2 * 2 = 8
@@ -915,7 +1032,8 @@ class TargetTrackerVer4:
         # Final prediction heatmap
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
         output_heatmap_norm = HeatmapNormalization(name="predicted_heatmap_norm")(output_heatmap_raw)
-        thresholded = tf.nn.relu(output_heatmap_norm - 0.5) * 2.0
+        thresholded = layers.Rescaling(scale=2.0, offset=-1.0, name="heatmap_threshold_rescale")(output_heatmap_norm)
+        thresholded = layers.ReLU(name="heatmap_threshold_relu")(thresholded)
         output_heatmap = layers.DepthwiseConv2D(
             kernel_size=(5, 5),
             strides=(1, 1),
@@ -957,7 +1075,7 @@ class TargetTrackerVer4:
         self.model = models.Model(
             inputs=[ref_input, search_input],
             outputs=[output_heatmap, output_quality],
-            name="TargetTrackerVer4"
+            name="TargetTrackerVer5"
         )
         
         print("\\n" + "="*50)
@@ -1016,8 +1134,10 @@ class TargetTrackerVer4:
             else:
                 loss_heatmap = coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality)
                 
-            if train_mode in ("quality_only", "joint"):
-                pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
+            if train_mode == "heatmap_only":
+                loss_quality = tf.constant(0.0, dtype=tf.float32)
+            else:
+                pred_coords = get_peak_coords_tf(pred_heatmap)
                 # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
                 H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
                 pred_coords_scaled = pred_coords * (256.0 / H)
@@ -1026,10 +1146,7 @@ class TargetTrackerVer4:
                 dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                 target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                 target_quality = tf.stop_gradient(target_quality)
-            else:
-                target_quality = gt_quality
-
-            loss_quality = loss_fn_quality(target_quality, pred_quality)
+                loss_quality = loss_fn_quality(target_quality, pred_quality)
             
             if train_mode == "heatmap_only":
                 loss_value = loss_heatmap
@@ -1060,11 +1177,27 @@ class TargetTrackerVer4:
         epoch_hm_loss_avg = tf.keras.metrics.Mean()
         epoch_q_loss_avg = tf.keras.metrics.Mean()
         import tqdm
+        import time as _time
         progress_bar = tqdm.tqdm(dataset, desc=f"Epoch {epoch:03d}/{num_epochs:03d}", total=steps, leave=False)
-        
-        for inputs, targets in progress_bar:
+
+        # Per-epoch timing accumulators
+        t_data = 0.0  # time waiting for next batch from the dataset iterator (data loading / prefetch stall)
+        t_step = 0.0  # time inside GradientTape forward+backward + apply_gradients
+
+        _it = iter(progress_bar)
+        _t0 = _time.perf_counter()
+        while True:
+            try:
+                batch = next(_it)
+            except StopIteration:
+                break
+            t_data += _time.perf_counter() - _t0  # iterator returned → batch was ready
+
+            inputs, targets = batch
             gt_coords = targets["predicted_coords"]
             gt_quality = targets["predicted_quality"]
+
+            _t1 = _time.perf_counter()
             with tf.GradientTape() as tape:
                 predictions = self.model(inputs, training=True)
                 pred_heatmap, pred_quality = predictions
@@ -1074,8 +1207,10 @@ class TargetTrackerVer4:
                 else:
                     loss_heatmap = coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality)
                     
-                if train_mode in ("quality_only", "joint"):
-                    pred_coords = get_peak_coords_tf(pred_heatmap, threshold=0.5, filter_size=5)
+                if train_mode == "heatmap_only":
+                    loss_quality = tf.constant(0.0, dtype=tf.float32)
+                else:
+                    pred_coords = get_peak_coords_tf(pred_heatmap)
                     # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
                     H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
                     pred_coords_scaled = pred_coords * (256.0 / H)
@@ -1084,10 +1219,7 @@ class TargetTrackerVer4:
                     dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                     target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                     target_quality = tf.stop_gradient(target_quality)
-                else:
-                    target_quality = gt_quality
-                
-                loss_quality = loss_fn_quality(target_quality, pred_quality)
+                    loss_quality = loss_fn_quality(target_quality, pred_quality)
                 
                 if train_mode == "heatmap_only":
                     loss_value = loss_heatmap
@@ -1098,7 +1230,8 @@ class TargetTrackerVer4:
                 
             grads = tape.gradient(loss_value, self.model.trainable_variables)
             optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
-            
+            t_step += _time.perf_counter() - _t1
+
             epoch_loss_avg.update_state(loss_value)
             epoch_hm_loss_avg.update_state(loss_heatmap)
             epoch_q_loss_avg.update_state(loss_quality)
@@ -1108,8 +1241,9 @@ class TargetTrackerVer4:
                 hm=float(epoch_hm_loss_avg.result()),
                 q=float(epoch_q_loss_avg.result())
             )
-            
-        return float(epoch_loss_avg.result()), float(epoch_hm_loss_avg.result()), float(epoch_q_loss_avg.result())
+            _t0 = _time.perf_counter()  # restart timer for the next data-load wait
+
+        return float(epoch_loss_avg.result()), float(epoch_hm_loss_avg.result()), float(epoch_q_loss_avg.result()), t_data, t_step
 
     def train(self, train_dataset, val_dataset, lr, num_of_epochs, train_steps=None, val_steps=None, loss_quality="bce", train_mode="joint", output_path=None, best_train_loss_output=None, log_file=None):
         if loss_quality == "bce":
@@ -1156,10 +1290,17 @@ class TargetTrackerVer4:
         best_train_loss = float('inf')
         self.log(f"Initial Validation Loss: {best_val_loss:.6f} (HM: {init_val_hm:.6f}, Q: {init_val_q:.6f})", log_file)
         
+        import time as _time
+        import gc
+
         for epoch in range(1, num_of_epochs + 1):
-            epoch_loss, epoch_hm, epoch_q = self.train_epoch(train_dataset, optimizer, loss_fn_quality, epoch, num_of_epochs, train_mode=train_mode, steps=train_steps)
-            
+            _t_epoch_start = _time.perf_counter()
+            epoch_loss, epoch_hm, epoch_q, t_data, t_step = self.train_epoch(train_dataset, optimizer, loss_fn_quality, epoch, num_of_epochs, train_mode=train_mode, steps=train_steps)
+
+            # --- Save best train (timed) ---
+            t_save = 0.0
             if best_train_loss_output and epoch_loss < best_train_loss:
+                _t_s = _time.perf_counter()
                 self.log(f"   [TRAIN IMPROVEMENT] Train loss improved from {best_train_loss:.6f} to {epoch_loss:.6f}. Saving to {best_train_loss_output}", log_file)
                 best_train_loss = epoch_loss
                 if os.path.dirname(best_train_loss_output):
@@ -1168,11 +1309,18 @@ class TargetTrackerVer4:
                 if self.config.get("normalization_type", "group_norm") == "batch_norm":
                      base, ext = os.path.splitext(best_train_loss_output)
                      self.fold_and_save(f"{base}_fbn{ext}")
-            
+                t_save += _time.perf_counter() - _t_s
+
+            # --- Validation (timed) ---
+            _t_val_start = _time.perf_counter()
             val_loss, val_hm, val_q = self.evaluate(val_dataset, loss_fn_quality, train_mode=train_mode, steps=val_steps)
+            t_val = _time.perf_counter() - _t_val_start
+
             self.log(f"Epoch {epoch:03d}/{num_of_epochs:03d} | Train Loss: {epoch_loss:.6f} (HM: {epoch_hm:.6f}, Q: {epoch_q:.6f}) | Val Loss: {val_loss:.6f} (HM: {val_hm:.6f}, Q: {val_q:.6f})", log_file)
-            
+
+            # --- Save best val (timed) ---
             if val_loss < best_val_loss:
+                _t_s = _time.perf_counter()
                 self.log(f"   [VAL IMPROVEMENT] Val loss improved from {best_val_loss:.6f} to {val_loss:.6f}. Saving model...", log_file)
                 best_val_loss = val_loss
                 if output_path:
@@ -1184,185 +1332,211 @@ class TargetTrackerVer4:
                         self.fold_and_save(f"{base}_fbn{ext}")
                         dir_name = os.path.dirname(output_path)
                         self.fold_and_save(os.path.join(dir_name, "tracker_model_fbn.keras"))
-            
-            import gc
+                t_save += _time.perf_counter() - _t_s
+
+            # --- Timing breakdown → log file only ---
+            t_epoch_total = _time.perf_counter() - _t_epoch_start
+            t_overhead = max(0.0, t_epoch_total - t_step - t_data - t_val - t_save)
+            if log_file:
+                def _pct(t):
+                    return 100.0 * t / t_epoch_total if t_epoch_total > 0.0 else 0.0
+                with open(log_file, "a") as _lf:
+                    _lf.write(
+                        f"   [TIMING] Total: {t_epoch_total:.1f}s"
+                        f" | TrainStep: {t_step:.1f}s ({_pct(t_step):.1f}%)"
+                        f" | DataLoad: {t_data:.1f}s ({_pct(t_data):.1f}%)"
+                        f" | Validation: {t_val:.1f}s ({_pct(t_val):.1f}%)"
+                        f" | Save: {t_save:.1f}s ({_pct(t_save):.1f}%)"
+                        f" | Overhead: {t_overhead:.1f}s ({_pct(t_overhead):.1f}%)\n"
+                    )
+
             gc.collect()
+
+# Backward-compatible alias for existing utility scripts.
+TargetTrackerVer4 = TargetTrackerVer5
 
 # =====================================================================
 # Dataset Pipeline
 # =====================================================================
 
-def read_hdf5_sliced(dataset_obj, indices, chunk_size=10000):
-    """
-    Slices a large HDF5 dataset. If the dataset fits in less than 50% of available memory,
-    we read the entire dataset contiguously to RAM and slice it in memory, bypassing
-    h5py's extremely slow scattered index selection.
-    """
-    import numpy as np
-    import psutil
-    
-    mem = psutil.virtual_memory()
-    total_dataset_bytes = dataset_obj.shape[0] * np.prod(dataset_obj.shape[1:]) * 4
-    
-    if total_dataset_bytes < mem.available * 0.50:
-        # Contiguous block read (very fast)
-        data = dataset_obj[:]
-        return data[indices]
-        
-    # Fallback to memory-safe sorted index chunks
-    chunks = []
-    for i in range(0, len(indices), chunk_size):
-        batch_idx = indices[i:i + chunk_size]
-        sort_idx = np.argsort(batch_idx)
-        sorted_idx = batch_idx[sort_idx]
-        
-        chunk_data = dataset_obj[sorted_idx]
-        
-        unsort_idx = np.argsort(sort_idx)
-        chunks.append(chunk_data[unsort_idx])
-        
-    return np.concatenate(chunks, axis=0)
-
-def load_hdf5_dataset(h5_path, batch_size, val_split=0.1, is_val=False, train_mode="joint"):
+def load_hdf5_dataset(h5_path, batch_size, ref_shape, search_shape, val_split=0.1, is_val=False, train_mode="joint", cache_mode="cache", stream_chunk_size=1024):
     import h5py
     import psutil
     import numpy as np
     import gc
     import tensorflow as tf
-    
+
+    if cache_mode not in ("streaming", "auto", "cache"):
+        raise ValueError(f"Unknown cache_mode: {cache_mode}. Expected 'streaming', 'auto', or 'cache'.")
+
     if not os.path.exists(h5_path):
         raise FileNotFoundError(f"HDF5 dataset not found at {h5_path}")
-        
+
     with h5py.File(h5_path, 'r') as f:
         total_samples = f['reference_stack'].shape[0]
-        
-    # Generate deterministic shuffled indices
+        h5_ref_shape = f['reference_stack'].shape[1:]
+        h5_search_shape = f['search_frame'].shape[1:]
+        sample_size_bytes = (
+            np.prod(h5_ref_shape) * f['reference_stack'].dtype.itemsize +
+            np.prod(h5_search_shape) * f['search_frame'].dtype.itemsize +
+            np.prod(f['ground_truth_coords'].shape[1:]) * f['ground_truth_coords'].dtype.itemsize +
+            np.prod(f['ground_truth_quality'].shape[1:]) * f['ground_truth_quality'].dtype.itemsize
+        )
+
     indices = np.arange(total_samples)
     np.random.RandomState(42).shuffle(indices)
-    
+
     val_size = int(total_samples * val_split)
-    if is_val:
-        selected_indices = indices[:val_size]
-    else:
-        selected_indices = indices[val_size:]
-    # Make divisible by batch_size to avoid partial batch tails
-    num_selected = len(selected_indices)
-    if num_selected % batch_size != 0:
-        num_selected = (num_selected // batch_size) * batch_size
-        selected_indices = selected_indices[:num_selected]
-        
+    selected_indices = indices[:val_size] if is_val else indices[val_size:]
+    num_selected = (len(selected_indices) // batch_size) * batch_size
+    selected_indices = selected_indices[:num_selected]
+
     if len(selected_indices) == 0:
         raise ValueError(f"No samples remaining after filtering/balancing for train_mode={train_mode}, is_val={is_val}")
-        
-    # Check RAM caching capability using psutil
-    sample_size_bytes = (64 * 64 * 16 + 256 * 256 * 1) * 4 + 2 * 4 + 4
-    total_expected_bytes = len(selected_indices) * sample_size_bytes
-    
+
     mem = psutil.virtual_memory()
-    
-    # Calculate fallback chunk size for dynamic disk streaming
-    target_chunk_bytes = mem.available * 0.15
-    disk_chunk_size = int(target_chunk_bytes // sample_size_bytes)
-    disk_chunk_size = max(2000, min(8000, disk_chunk_size))
+    total_expected_bytes = len(selected_indices) * sample_size_bytes
+    disk_chunk_size = max(batch_size, int(stream_chunk_size))
     disk_chunk_size = (disk_chunk_size // batch_size) * batch_size
     if disk_chunk_size == 0:
         disk_chunk_size = batch_size
-        
-    # Cache to RAM only if it occupies less than 40% of currently available memory
-    if total_expected_bytes < mem.available * 0.40:
-        print(f"Caching dataset to RAM ({len(selected_indices)} samples, {total_expected_bytes / (1024**3):.2f} GB)...")
+
+    selected_positions = np.full(total_samples, -1, dtype=np.int64)
+    selected_positions[selected_indices] = np.arange(len(selected_indices), dtype=np.int64)
+    selected_mask = selected_positions >= 0
+
+    use_ram_cache = cache_mode == "cache" or (cache_mode == "auto" and total_expected_bytes < mem.available * 0.40)
+
+    def _batch_generator_from_arrays(ref_data, search_data, coords_data, quality_data):
+        local_indices = np.arange(len(ref_data))
+        if not is_val:
+            np.random.shuffle(local_indices)
+
+        for start_idx in range(0, len(local_indices), batch_size):
+            batch_idx = local_indices[start_idx:start_idx + batch_size]
+            if len(batch_idx) != batch_size:
+                continue
+            yield (
+                {"reference_stack": ref_data[batch_idx], "search_frame": search_data[batch_idx]},
+                {"predicted_coords": coords_data[batch_idx], "predicted_quality": quality_data[batch_idx]}
+            )
+
+    if use_ram_cache:
+        print(f"Caching dataset split to RAM via contiguous HDF5 reads ({len(selected_indices)} samples, {total_expected_bytes / (1024**3):.2f} GB)...")
+        read_block_size = max(disk_chunk_size, batch_size)
         with h5py.File(h5_path, 'r') as f:
-            ref_data = read_hdf5_sliced(f['reference_stack'], selected_indices)
-            search_data = read_hdf5_sliced(f['search_frame'], selected_indices)
-            coords_data = read_hdf5_sliced(f['ground_truth_coords'], selected_indices)
-            quality_data = read_hdf5_sliced(f['ground_truth_quality'], selected_indices)
-            
-        print("Dataset successfully cached to RAM.")
-        
-        # Generator yielding chunks from preloaded RAM arrays to prevent GPU OOM
+            ref_ds = f['reference_stack']
+            search_ds = f['search_frame']
+            coords_ds = f['ground_truth_coords']
+            quality_ds = f['ground_truth_quality']
+
+            ref_data = np.empty((len(selected_indices), *ref_ds.shape[1:]), dtype=ref_ds.dtype)
+            search_data = np.empty((len(selected_indices), *search_ds.shape[1:]), dtype=search_ds.dtype)
+            coords_data = np.empty((len(selected_indices), *coords_ds.shape[1:]), dtype=coords_ds.dtype)
+            quality_data = np.empty((len(selected_indices), *quality_ds.shape[1:]), dtype=quality_ds.dtype)
+
+            for start_idx in range(0, total_samples, read_block_size):
+                end_idx = min(start_idx + read_block_size, total_samples)
+                block_positions = selected_positions[start_idx:end_idx]
+                keep = block_positions >= 0
+                if not np.any(keep):
+                    continue
+                dst = block_positions[keep]
+                ref_data[dst] = ref_ds[start_idx:end_idx][keep]
+                search_data[dst] = search_ds[start_idx:end_idx][keep]
+                coords_data[dst] = coords_ds[start_idx:end_idx][keep]
+                quality_data[dst] = quality_ds[start_idx:end_idx][keep]
+
+        print("Dataset split successfully cached to RAM.")
+
         def chunk_generator():
-            import math
-            local_indices = np.arange(len(selected_indices))
-            if not is_val:
-                np.random.shuffle(local_indices)
-                
-            ram_chunk_size = 5000
-            num_chunks = int(math.ceil(len(local_indices) / ram_chunk_size))
-            for i in range(num_chunks):
-                chunk_idx = local_indices[i * ram_chunk_size : (i + 1) * ram_chunk_size]
-                yield (
-                    ref_data[chunk_idx],
-                    search_data[chunk_idx]
-                ), (
-                    coords_data[chunk_idx],
-                    quality_data[chunk_idx]
-                )
+            yield from _batch_generator_from_arrays(ref_data, search_data, coords_data, quality_data)
     else:
-        # Load dynamically in memory-safe chunks directly from HDF5
-        print(f"Dataset streaming from HDF5 (requires {total_expected_bytes / (1024**3):.2f} GB, available {mem.available / (1024**3):.2f} GB). Chunk size: {disk_chunk_size} samples.")
-        
+        print(f"Dataset streaming from HDF5 with contiguous reads (requires {total_expected_bytes / (1024**3):.2f} GB if cached, available {mem.available / (1024**3):.2f} GB). Chunk size: {disk_chunk_size} samples.")
+
         def chunk_generator():
-            import math
-            local_indices = selected_indices.copy()
-            if not is_val:
-                np.random.shuffle(local_indices)
-                
-            num_chunks = int(math.ceil(len(local_indices) / disk_chunk_size))
-            for i in range(num_chunks):
-                chunk_idx = local_indices[i * disk_chunk_size : (i + 1) * disk_chunk_size]
-                
-                with h5py.File(h5_path, 'r') as f:
-                    ref_chunk = read_hdf5_sliced(f['reference_stack'], chunk_idx)
-                    search_chunk = read_hdf5_sliced(f['search_frame'], chunk_idx)
-                    coords_chunk = read_hdf5_sliced(f['ground_truth_coords'], chunk_idx)
-                    quality_chunk = read_hdf5_sliced(f['ground_truth_quality'], chunk_idx)
-                    
-                yield (ref_chunk, search_chunk), (coords_chunk, quality_chunk)
-                
-                ref_chunk = None
-                search_chunk = None
-                coords_chunk = None
-                quality_chunk = None
-                gc.collect()
-                
-    # Define output signature with dynamic leading dimension
+            carry = None
+            with h5py.File(h5_path, 'r') as f:
+                ref_ds = f['reference_stack']
+                search_ds = f['search_frame']
+                coords_ds = f['ground_truth_coords']
+                quality_ds = f['ground_truth_quality']
+
+                for start_idx in range(0, total_samples, disk_chunk_size):
+                    end_idx = min(start_idx + disk_chunk_size, total_samples)
+                    keep = selected_mask[start_idx:end_idx]
+                    if not np.any(keep):
+                        continue
+
+                    ref_chunk = ref_ds[start_idx:end_idx][keep]
+                    search_chunk = search_ds[start_idx:end_idx][keep]
+                    coords_chunk = coords_ds[start_idx:end_idx][keep]
+                    quality_chunk = quality_ds[start_idx:end_idx][keep]
+
+                    if not is_val:
+                        order = np.arange(len(ref_chunk))
+                        np.random.shuffle(order)
+                        ref_chunk = ref_chunk[order]
+                        search_chunk = search_chunk[order]
+                        coords_chunk = coords_chunk[order]
+                        quality_chunk = quality_chunk[order]
+
+                    if carry is not None:
+                        ref_chunk = np.concatenate((carry[0], ref_chunk), axis=0)
+                        search_chunk = np.concatenate((carry[1], search_chunk), axis=0)
+                        coords_chunk = np.concatenate((carry[2], coords_chunk), axis=0)
+                        quality_chunk = np.concatenate((carry[3], quality_chunk), axis=0)
+                        carry = None
+
+                    full_count = (len(ref_chunk) // batch_size) * batch_size
+                    for batch_start in range(0, full_count, batch_size):
+                        batch_end = batch_start + batch_size
+                        yield (
+                            {"reference_stack": ref_chunk[batch_start:batch_end], "search_frame": search_chunk[batch_start:batch_end]},
+                            {"predicted_coords": coords_chunk[batch_start:batch_end], "predicted_quality": quality_chunk[batch_start:batch_end]}
+                        )
+
+                    if full_count < len(ref_chunk):
+                        carry = (
+                            ref_chunk[full_count:],
+                            search_chunk[full_count:],
+                            coords_chunk[full_count:],
+                            quality_chunk[full_count:]
+                        )
+
+                    ref_chunk = None
+                    search_chunk = None
+                    coords_chunk = None
+                    quality_chunk = None
+                    gc.collect()
+
     output_signature = (
-        (
-            tf.TensorSpec(shape=(None, 64, 64, 16), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, 256, 256, 1), dtype=tf.float32)
-        ),
-        (
-            tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
-        )
+        {
+            "reference_stack": tf.TensorSpec(shape=(None, *ref_shape), dtype=tf.float32),
+            "search_frame": tf.TensorSpec(shape=(None, *search_shape), dtype=tf.float32)
+        },
+        {
+            "predicted_coords": tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
+            "predicted_quality": tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+        }
     )
-        
+
     ds = tf.data.Dataset.from_generator(chunk_generator, output_signature=output_signature)
-    ds = ds.unbatch()
-        
-    # Map to format required by Keras models
-    def process_element(inputs, targets):
-        if isinstance(inputs, dict):
-            return inputs, targets
-        ref, search = inputs
-        coords, quality = targets
-        return {"reference_stack": ref, "search_frame": search}, {"predicted_coords": coords, "predicted_quality": quality}
-        
-    ds = ds.map(process_element, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.batch(batch_size)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    
+    ds = ds.prefetch(1)
+
     gc.collect()
     return ds, len(selected_indices)
 
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description="TargetTrackerVer4 Training CLI")
+    parser = argparse.ArgumentParser(description="TargetTrackerVer5 Training CLI")
     parser.add_argument("command", choices=["train"])
     parser.add_argument("--dataset_dir", nargs="+", required=True, help="One or more paths to dataset directories containing dataset.h5")
     parser.add_argument("--batch_size", type=int, default=16, help="Training batch size")
     parser.add_argument("--val_split", type=float, default=0.1, help="Validation split ratio")
+    parser.add_argument("--dataset_cache_mode", choices=["streaming", "auto", "cache"], default="cache", help="Dataset loading mode. cache preloads selected samples to RAM using contiguous reads; streaming reads contiguous HDF5 blocks per epoch; auto caches when it appears safe.")
+    parser.add_argument("--dataset_stream_chunk_size", type=int, default=1024, help="Maximum HDF5 samples to read per streaming chunk before batching. Used only when dataset_cache_mode=streaming or auto falls back to streaming.")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_of_epochs", type=int, default=10)
     parser.add_argument("--loss_quality", choices=["bce", "mse", "huber", "logcosh"], default="bce")
@@ -1388,24 +1562,25 @@ def main():
             raise FileNotFoundError(f"dataset.h5 not found in any of the specified directories: {args.dataset_dir}")
             
         print(f"Loading dataset from: {h5_path}")
-        
-        train_ds, train_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, val_split=args.val_split, is_val=False, train_mode=args.train_mode)
-        val_ds, val_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, val_split=args.val_split, is_val=True, train_mode=args.train_mode)
-        
+
+        # Create tracker first so ref_shape / search_shape are derived from model.conf
+        tracker = TargetTrackerVer5()
+        print("Building TargetTrackerVer5 model...")
+        tracker.create_model()
+
+        train_ds, train_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, ref_shape=tracker.ref_shape, search_shape=tracker.search_shape, val_split=args.val_split, is_val=False, train_mode=args.train_mode, cache_mode=args.dataset_cache_mode, stream_chunk_size=args.dataset_stream_chunk_size)
+        val_ds, val_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, ref_shape=tracker.ref_shape, search_shape=tracker.search_shape, val_split=args.val_split, is_val=True, train_mode=args.train_mode, cache_mode=args.dataset_cache_mode, stream_chunk_size=args.dataset_stream_chunk_size)
+
         train_steps = train_samples // args.batch_size
         val_steps = val_samples // args.batch_size
-        
+
         print(f"Train samples: {train_samples} ({train_steps} steps/epoch)")
         print(f"Val samples: {val_samples} ({val_steps} steps/epoch)")
-        
-        tracker = TargetTrackerVer4()
-        print("Building TargetTrackerVer4 model...")
-        tracker.create_model()
-        
+
         if args.init_keras_file and os.path.exists(args.init_keras_file):
             print(f"Resuming training: loading weights from {args.init_keras_file}...")
             tracker.model.load_weights(args.init_keras_file, by_name=True, skip_mismatch=True)
-            
+
         tracker.train(
             train_dataset=train_ds,
             val_dataset=val_ds,
@@ -1419,6 +1594,7 @@ def main():
             best_train_loss_output=args.best_train_loss_output,
             log_file=args.log_file
         )
+
 
 if __name__ == '__main__':
     main()
