@@ -45,6 +45,15 @@
 
 mkdir -p outputs
 
+# TensorFlow GPU memory policy for this training process.
+# Override per run, for example: TRACKER_GPU_MEMORY_LIMIT_MB=0 TF_FORCE_GPU_ALLOW_GROWTH=true ./run_tracker_training_heatmap.sh
+export TF_GPU_ALLOCATOR="${TF_GPU_ALLOCATOR:-cuda_malloc_async}"
+export TRACKER_GPU_MEMORY_LIMIT_MB="${TRACKER_GPU_MEMORY_LIMIT_MB:-51200}"
+export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-1}"
+
+echo "[TF ENV] TF_GPU_ALLOCATOR=${TF_GPU_ALLOCATOR}"
+echo "[TF ENV] TRACKER_GPU_MEMORY_LIMIT_MB=${TRACKER_GPU_MEMORY_LIMIT_MB}"
+
 # Note: Batch size is determined by how the dataset was batched during the 
 # create_batched_dataset.py step.
 #

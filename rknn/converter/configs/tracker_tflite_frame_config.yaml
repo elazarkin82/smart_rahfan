@@ -30,8 +30,10 @@ quantization:
   quantized_dtype: "asymmetric_quantized-8"
 
 # Input tensor details
+# input_reference_target_encoder_ref_ue3_relu2_Relu6_0
+# input_reference_target_encoder_ref_alex_relu5_Relu_0
 inputs:
   - name: "search_frame"
     shape: [256, 256, 1]
-  - name: "input_reference_target_encoder_ref_alex_relu5_Relu_0"
+  - name: "input_reference_target_encoder_ref_ue3_relu2_Relu6_0"
     shape: [8, 8, 64]

@@ -7,6 +7,44 @@ import configparser
 import h5py
 import psutil
 
+
+def configure_tensorflow_gpu_memory():
+    gpus = tf.config.list_physical_devices("GPU")
+    if not gpus:
+        return
+
+    limit_raw = os.environ.get("TRACKER_GPU_MEMORY_LIMIT_MB", "").strip()
+    if limit_raw:
+        try:
+            limit_mb = float(limit_raw)
+        except ValueError:
+            print(f"[TF CONFIG] Ignoring invalid TRACKER_GPU_MEMORY_LIMIT_MB={limit_raw!r}")
+            limit_mb = 0.0
+
+        if limit_mb > 0.0:
+            try:
+                for gpu in gpus:
+                    tf.config.set_logical_device_configuration(
+                        gpu,
+                        [tf.config.LogicalDeviceConfiguration(memory_limit=limit_mb)]
+                    )
+                print(f"[TF CONFIG] Limited each GPU logical device to {limit_mb:.0f} MB.")
+                return
+            except RuntimeError as exc:
+                print(f"[TF CONFIG] Could not set GPU memory limit after runtime initialization: {exc}")
+
+    allow_growth = os.environ.get("TF_FORCE_GPU_ALLOW_GROWTH", "").strip().lower()
+    if allow_growth in ("1", "true", "yes", "on"):
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("[TF CONFIG] Enabled GPU memory growth.")
+        except RuntimeError as exc:
+            print(f"[TF CONFIG] Could not enable GPU memory growth after runtime initialization: {exc}")
+
+
+configure_tensorflow_gpu_memory()
+
 # Global Normalization setting for dynamic layer configuration
 _NORMALIZATION_TYPE = "group_norm"
 _OVERRIDE_USE_BIAS = False
@@ -1321,166 +1359,171 @@ TargetTrackerVer4 = TargetTrackerVer5
 # Dataset Pipeline
 # =====================================================================
 
-def read_hdf5_sliced(dataset_obj, indices, chunk_size=10000):
-    """
-    Slices a large HDF5 dataset. If the dataset fits in less than 50% of available memory,
-    we read the entire dataset contiguously to RAM and slice it in memory, bypassing
-    h5py's extremely slow scattered index selection.
-    """
-    import numpy as np
-    import psutil
-    
-    mem = psutil.virtual_memory()
-    total_dataset_bytes = dataset_obj.shape[0] * np.prod(dataset_obj.shape[1:]) * 4
-    
-    if total_dataset_bytes < mem.available * 0.50:
-        # Contiguous block read (very fast)
-        data = dataset_obj[:]
-        return data[indices]
-        
-    # Fallback to memory-safe sorted index chunks
-    chunks = []
-    for i in range(0, len(indices), chunk_size):
-        batch_idx = indices[i:i + chunk_size]
-        sort_idx = np.argsort(batch_idx)
-        sorted_idx = batch_idx[sort_idx]
-        
-        chunk_data = dataset_obj[sorted_idx]
-        
-        unsort_idx = np.argsort(sort_idx)
-        chunks.append(chunk_data[unsort_idx])
-        
-    return np.concatenate(chunks, axis=0)
-
-def load_hdf5_dataset(h5_path, batch_size, ref_shape, search_shape, val_split=0.1, is_val=False, train_mode="joint"):
+def load_hdf5_dataset(h5_path, batch_size, ref_shape, search_shape, val_split=0.1, is_val=False, train_mode="joint", cache_mode="cache", stream_chunk_size=1024):
     import h5py
     import psutil
     import numpy as np
     import gc
     import tensorflow as tf
-    
+
+    if cache_mode not in ("streaming", "auto", "cache"):
+        raise ValueError(f"Unknown cache_mode: {cache_mode}. Expected 'streaming', 'auto', or 'cache'.")
+
     if not os.path.exists(h5_path):
         raise FileNotFoundError(f"HDF5 dataset not found at {h5_path}")
-        
+
     with h5py.File(h5_path, 'r') as f:
         total_samples = f['reference_stack'].shape[0]
-        
-    # Generate deterministic shuffled indices
+        h5_ref_shape = f['reference_stack'].shape[1:]
+        h5_search_shape = f['search_frame'].shape[1:]
+        sample_size_bytes = (
+            np.prod(h5_ref_shape) * f['reference_stack'].dtype.itemsize +
+            np.prod(h5_search_shape) * f['search_frame'].dtype.itemsize +
+            np.prod(f['ground_truth_coords'].shape[1:]) * f['ground_truth_coords'].dtype.itemsize +
+            np.prod(f['ground_truth_quality'].shape[1:]) * f['ground_truth_quality'].dtype.itemsize
+        )
+
     indices = np.arange(total_samples)
     np.random.RandomState(42).shuffle(indices)
-    
+
     val_size = int(total_samples * val_split)
-    if is_val:
-        selected_indices = indices[:val_size]
-    else:
-        selected_indices = indices[val_size:]
-    # Make divisible by batch_size to avoid partial batch tails
-    num_selected = len(selected_indices)
-    if num_selected % batch_size != 0:
-        num_selected = (num_selected // batch_size) * batch_size
-        selected_indices = selected_indices[:num_selected]
-        
+    selected_indices = indices[:val_size] if is_val else indices[val_size:]
+    num_selected = (len(selected_indices) // batch_size) * batch_size
+    selected_indices = selected_indices[:num_selected]
+
     if len(selected_indices) == 0:
         raise ValueError(f"No samples remaining after filtering/balancing for train_mode={train_mode}, is_val={is_val}")
-        
-    # Check RAM caching capability using psutil
-    sample_size_bytes = (ref_shape[0] * ref_shape[1] * ref_shape[2] + search_shape[0] * search_shape[1] * search_shape[2]) * 4 + 2 * 4 + 4
-    total_expected_bytes = len(selected_indices) * sample_size_bytes
-    
+
     mem = psutil.virtual_memory()
-    
-    # Calculate fallback chunk size for dynamic disk streaming
-    target_chunk_bytes = mem.available * 0.15
-    disk_chunk_size = int(target_chunk_bytes // sample_size_bytes)
-    disk_chunk_size = max(2000, min(8000, disk_chunk_size))
+    total_expected_bytes = len(selected_indices) * sample_size_bytes
+    disk_chunk_size = max(batch_size, int(stream_chunk_size))
     disk_chunk_size = (disk_chunk_size // batch_size) * batch_size
     if disk_chunk_size == 0:
         disk_chunk_size = batch_size
-        
-    # Cache to RAM only if it occupies less than 40% of currently available memory
-    if total_expected_bytes < mem.available * 0.40:
-        print(f"Caching dataset to RAM ({len(selected_indices)} samples, {total_expected_bytes / (1024**3):.2f} GB)...")
+
+    selected_positions = np.full(total_samples, -1, dtype=np.int64)
+    selected_positions[selected_indices] = np.arange(len(selected_indices), dtype=np.int64)
+    selected_mask = selected_positions >= 0
+
+    use_ram_cache = cache_mode == "cache" or (cache_mode == "auto" and total_expected_bytes < mem.available * 0.40)
+
+    def _batch_generator_from_arrays(ref_data, search_data, coords_data, quality_data):
+        local_indices = np.arange(len(ref_data))
+        if not is_val:
+            np.random.shuffle(local_indices)
+
+        for start_idx in range(0, len(local_indices), batch_size):
+            batch_idx = local_indices[start_idx:start_idx + batch_size]
+            if len(batch_idx) != batch_size:
+                continue
+            yield (
+                {"reference_stack": ref_data[batch_idx], "search_frame": search_data[batch_idx]},
+                {"predicted_coords": coords_data[batch_idx], "predicted_quality": quality_data[batch_idx]}
+            )
+
+    if use_ram_cache:
+        print(f"Caching dataset split to RAM via contiguous HDF5 reads ({len(selected_indices)} samples, {total_expected_bytes / (1024**3):.2f} GB)...")
+        read_block_size = max(disk_chunk_size, batch_size)
         with h5py.File(h5_path, 'r') as f:
-            ref_data = read_hdf5_sliced(f['reference_stack'], selected_indices)
-            search_data = read_hdf5_sliced(f['search_frame'], selected_indices)
-            coords_data = read_hdf5_sliced(f['ground_truth_coords'], selected_indices)
-            quality_data = read_hdf5_sliced(f['ground_truth_quality'], selected_indices)
-            
-        print("Dataset successfully cached to RAM.")
-        
-        # Generator yielding chunks from preloaded RAM arrays to prevent GPU OOM
+            ref_ds = f['reference_stack']
+            search_ds = f['search_frame']
+            coords_ds = f['ground_truth_coords']
+            quality_ds = f['ground_truth_quality']
+
+            ref_data = np.empty((len(selected_indices), *ref_ds.shape[1:]), dtype=ref_ds.dtype)
+            search_data = np.empty((len(selected_indices), *search_ds.shape[1:]), dtype=search_ds.dtype)
+            coords_data = np.empty((len(selected_indices), *coords_ds.shape[1:]), dtype=coords_ds.dtype)
+            quality_data = np.empty((len(selected_indices), *quality_ds.shape[1:]), dtype=quality_ds.dtype)
+
+            for start_idx in range(0, total_samples, read_block_size):
+                end_idx = min(start_idx + read_block_size, total_samples)
+                block_positions = selected_positions[start_idx:end_idx]
+                keep = block_positions >= 0
+                if not np.any(keep):
+                    continue
+                dst = block_positions[keep]
+                ref_data[dst] = ref_ds[start_idx:end_idx][keep]
+                search_data[dst] = search_ds[start_idx:end_idx][keep]
+                coords_data[dst] = coords_ds[start_idx:end_idx][keep]
+                quality_data[dst] = quality_ds[start_idx:end_idx][keep]
+
+        print("Dataset split successfully cached to RAM.")
+
         def chunk_generator():
-            import math
-            local_indices = np.arange(len(selected_indices))
-            if not is_val:
-                np.random.shuffle(local_indices)
-                
-            ram_chunk_size = 5000
-            num_chunks = int(math.ceil(len(local_indices) / ram_chunk_size))
-            for i in range(num_chunks):
-                chunk_idx = local_indices[i * ram_chunk_size : (i + 1) * ram_chunk_size]
-                yield (
-                    ref_data[chunk_idx],
-                    search_data[chunk_idx]
-                ), (
-                    coords_data[chunk_idx],
-                    quality_data[chunk_idx]
-                )
+            yield from _batch_generator_from_arrays(ref_data, search_data, coords_data, quality_data)
     else:
-        # Load dynamically in memory-safe chunks directly from HDF5
-        print(f"Dataset streaming from HDF5 (requires {total_expected_bytes / (1024**3):.2f} GB, available {mem.available / (1024**3):.2f} GB). Chunk size: {disk_chunk_size} samples.")
-        
+        print(f"Dataset streaming from HDF5 with contiguous reads (requires {total_expected_bytes / (1024**3):.2f} GB if cached, available {mem.available / (1024**3):.2f} GB). Chunk size: {disk_chunk_size} samples.")
+
         def chunk_generator():
-            import math
-            local_indices = selected_indices.copy()
-            if not is_val:
-                np.random.shuffle(local_indices)
-                
-            num_chunks = int(math.ceil(len(local_indices) / disk_chunk_size))
-            for i in range(num_chunks):
-                chunk_idx = local_indices[i * disk_chunk_size : (i + 1) * disk_chunk_size]
-                
-                with h5py.File(h5_path, 'r') as f:
-                    ref_chunk = read_hdf5_sliced(f['reference_stack'], chunk_idx)
-                    search_chunk = read_hdf5_sliced(f['search_frame'], chunk_idx)
-                    coords_chunk = read_hdf5_sliced(f['ground_truth_coords'], chunk_idx)
-                    quality_chunk = read_hdf5_sliced(f['ground_truth_quality'], chunk_idx)
-                    
-                yield (ref_chunk, search_chunk), (coords_chunk, quality_chunk)
-                
-                ref_chunk = None
-                search_chunk = None
-                coords_chunk = None
-                quality_chunk = None
-                gc.collect()
-                
-    # Define output signature with dynamic leading dimension
+            carry = None
+            with h5py.File(h5_path, 'r') as f:
+                ref_ds = f['reference_stack']
+                search_ds = f['search_frame']
+                coords_ds = f['ground_truth_coords']
+                quality_ds = f['ground_truth_quality']
+
+                for start_idx in range(0, total_samples, disk_chunk_size):
+                    end_idx = min(start_idx + disk_chunk_size, total_samples)
+                    keep = selected_mask[start_idx:end_idx]
+                    if not np.any(keep):
+                        continue
+
+                    ref_chunk = ref_ds[start_idx:end_idx][keep]
+                    search_chunk = search_ds[start_idx:end_idx][keep]
+                    coords_chunk = coords_ds[start_idx:end_idx][keep]
+                    quality_chunk = quality_ds[start_idx:end_idx][keep]
+
+                    if not is_val:
+                        order = np.arange(len(ref_chunk))
+                        np.random.shuffle(order)
+                        ref_chunk = ref_chunk[order]
+                        search_chunk = search_chunk[order]
+                        coords_chunk = coords_chunk[order]
+                        quality_chunk = quality_chunk[order]
+
+                    if carry is not None:
+                        ref_chunk = np.concatenate((carry[0], ref_chunk), axis=0)
+                        search_chunk = np.concatenate((carry[1], search_chunk), axis=0)
+                        coords_chunk = np.concatenate((carry[2], coords_chunk), axis=0)
+                        quality_chunk = np.concatenate((carry[3], quality_chunk), axis=0)
+                        carry = None
+
+                    full_count = (len(ref_chunk) // batch_size) * batch_size
+                    for batch_start in range(0, full_count, batch_size):
+                        batch_end = batch_start + batch_size
+                        yield (
+                            {"reference_stack": ref_chunk[batch_start:batch_end], "search_frame": search_chunk[batch_start:batch_end]},
+                            {"predicted_coords": coords_chunk[batch_start:batch_end], "predicted_quality": quality_chunk[batch_start:batch_end]}
+                        )
+
+                    if full_count < len(ref_chunk):
+                        carry = (
+                            ref_chunk[full_count:],
+                            search_chunk[full_count:],
+                            coords_chunk[full_count:],
+                            quality_chunk[full_count:]
+                        )
+
+                    ref_chunk = None
+                    search_chunk = None
+                    coords_chunk = None
+                    quality_chunk = None
+                    gc.collect()
+
     output_signature = (
-        (
-            tf.TensorSpec(shape=(None, *ref_shape), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, *search_shape), dtype=tf.float32)
-        ),
-        (
-            tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
-        )
+        {
+            "reference_stack": tf.TensorSpec(shape=(None, *ref_shape), dtype=tf.float32),
+            "search_frame": tf.TensorSpec(shape=(None, *search_shape), dtype=tf.float32)
+        },
+        {
+            "predicted_coords": tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
+            "predicted_quality": tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+        }
     )
-        
+
     ds = tf.data.Dataset.from_generator(chunk_generator, output_signature=output_signature)
-    ds = ds.unbatch()
-        
-    # Map to format required by Keras models
-    def process_element(inputs, targets):
-        if isinstance(inputs, dict):
-            return inputs, targets
-        ref, search = inputs
-        coords, quality = targets
-        return {"reference_stack": ref, "search_frame": search}, {"predicted_coords": coords, "predicted_quality": quality}
-        
-    ds = ds.map(process_element, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.batch(batch_size)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    
+    ds = ds.prefetch(1)
+
     gc.collect()
     return ds, len(selected_indices)
 
@@ -1492,6 +1535,8 @@ def main():
     parser.add_argument("--dataset_dir", nargs="+", required=True, help="One or more paths to dataset directories containing dataset.h5")
     parser.add_argument("--batch_size", type=int, default=16, help="Training batch size")
     parser.add_argument("--val_split", type=float, default=0.1, help="Validation split ratio")
+    parser.add_argument("--dataset_cache_mode", choices=["streaming", "auto", "cache"], default="cache", help="Dataset loading mode. cache preloads selected samples to RAM using contiguous reads; streaming reads contiguous HDF5 blocks per epoch; auto caches when it appears safe.")
+    parser.add_argument("--dataset_stream_chunk_size", type=int, default=1024, help="Maximum HDF5 samples to read per streaming chunk before batching. Used only when dataset_cache_mode=streaming or auto falls back to streaming.")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_of_epochs", type=int, default=10)
     parser.add_argument("--loss_quality", choices=["bce", "mse", "huber", "logcosh"], default="bce")
@@ -1523,8 +1568,8 @@ def main():
         print("Building TargetTrackerVer5 model...")
         tracker.create_model()
 
-        train_ds, train_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, ref_shape=tracker.ref_shape, search_shape=tracker.search_shape, val_split=args.val_split, is_val=False, train_mode=args.train_mode)
-        val_ds, val_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, ref_shape=tracker.ref_shape, search_shape=tracker.search_shape, val_split=args.val_split, is_val=True, train_mode=args.train_mode)
+        train_ds, train_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, ref_shape=tracker.ref_shape, search_shape=tracker.search_shape, val_split=args.val_split, is_val=False, train_mode=args.train_mode, cache_mode=args.dataset_cache_mode, stream_chunk_size=args.dataset_stream_chunk_size)
+        val_ds, val_samples = load_hdf5_dataset(h5_path, batch_size=args.batch_size, ref_shape=tracker.ref_shape, search_shape=tracker.search_shape, val_split=args.val_split, is_val=True, train_mode=args.train_mode, cache_mode=args.dataset_cache_mode, stream_chunk_size=args.dataset_stream_chunk_size)
 
         train_steps = train_samples // args.batch_size
         val_steps = val_samples // args.batch_size
