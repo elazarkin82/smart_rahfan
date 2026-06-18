@@ -50,6 +50,89 @@ def clear_queues(sensor_mgr):
         try: sensor_mgr.depth_queue.get_nowait()
         except queue.Empty: break
 
+def sample_range(range_values, default_value):
+    if not isinstance(range_values, (list, tuple)) or len(range_values) != 2:
+        return default_value
+    lo, hi = float(range_values[0]), float(range_values[1])
+    if lo > hi:
+        lo, hi = hi, lo
+    if lo == hi:
+        return lo
+    return random.uniform(lo, hi)
+
+def normalize_range(range_values):
+    if not isinstance(range_values, (list, tuple)) or len(range_values) != 2:
+        return None
+    lo, hi = float(range_values[0]), float(range_values[1])
+    return (min(lo, hi), max(lo, hi))
+
+def is_value_in_ranges(value, ranges):
+    if not isinstance(ranges, list):
+        return False
+    for range_values in ranges:
+        normalized = normalize_range(range_values)
+        if normalized is None:
+            continue
+        lo, hi = normalized
+        if lo <= value <= hi:
+            return True
+    return False
+
+def get_target_distance_limits(target_distance_cfg, flight_altitude):
+    allowed_range = normalize_range(target_distance_cfg.get("allowed_range_m"))
+    if allowed_range is not None:
+        return allowed_range
+    if target_distance_cfg.get("use_altitude_scaled_defaults", True):
+        return (
+            0.96 * flight_altitude + 1.0,
+            min(200.0, 6.6 * flight_altitude + 2.0)
+        )
+    return None, None
+
+def is_target_distance_allowed(distance_m, target_distance_cfg, flight_altitude):
+    min_allowed_dist, max_allowed_dist = get_target_distance_limits(target_distance_cfg, flight_altitude)
+    if min_allowed_dist is not None and distance_m < min_allowed_dist:
+        return False
+    if max_allowed_dist is not None and distance_m > max_allowed_dist:
+        return False
+    return not is_value_in_ranges(distance_m, target_distance_cfg.get("exclude_ranges_m", []))
+
+def build_lateral_dominant_indices(frames_per_flight, count):
+    if count <= 0 or frames_per_flight <= 2:
+        return set()
+    intermediate = list(range(1, frames_per_flight - 1))
+    count = min(count, len(intermediate))
+    center = (frames_per_flight - 1) / 2.0
+    return set(sorted(intermediate, key=lambda idx: abs(idx - center))[:count])
+
+def copy_transform(transform):
+    return carla.Transform(
+        carla.Location(
+            x=transform.location.x,
+            y=transform.location.y,
+            z=transform.location.z
+        ),
+        carla.Rotation(
+            pitch=transform.rotation.pitch,
+            yaw=transform.rotation.yaw,
+            roll=transform.rotation.roll
+        )
+    )
+
+def look_at_rotation(from_location_np, target_3d, pitch_offset_deg=0.0, yaw_offset_deg=0.0, roll_deg=0.0):
+    vec = target_3d - from_location_np
+    dist = np.linalg.norm(vec)
+    if dist < 1e-6:
+        return carla.Rotation(pitch=0.0, yaw=0.0, roll=roll_deg)
+    dir_vec = vec / dist
+    pitch_rad = math.asin(dir_vec[2])
+    yaw_rad = math.atan2(dir_vec[1], dir_vec[0])
+    return carla.Rotation(
+        pitch=math.degrees(pitch_rad) + pitch_offset_deg,
+        yaw=math.degrees(yaw_rad) + yaw_offset_deg,
+        roll=roll_deg
+    )
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--balance_existing", action="store_true", help="Balance generated flights across maps based on existing cache files")
@@ -103,6 +186,10 @@ def main():
     num_false_negatives = config['generation'].get('num_false_negatives', 0)
     min_texture_std = config['generation'].get('min_texture_std', 0.0)
     noise_cfg = config['generation'].get('noise_params', {})
+    target_distance_cfg = config['generation'].get('target_distance', {})
+    flight_motion_cfg = config['generation'].get('flight_motion', {})
+    lateral_motion_cfg = config['generation'].get('lateral_motion', {})
+    roll_motion_cfg = config['generation'].get('roll_motion', {})
     pos_xy_amp = noise_cfg.get('pos_xy_amp', 0.3)
     pos_z_amp = noise_cfg.get('pos_z_amp', 0.1)
     rot_pitch_amp = noise_cfg.get('rot_pitch_amp', 0.5)
@@ -199,7 +286,7 @@ def main():
             start_point.location.z += flight_altitude
             start_point.rotation.pitch = flight_pitch
             start_point.rotation.yaw += random.uniform(-180.0, 180.0)
-            start_point.rotation.roll = 0.0
+            start_point.rotation.roll = sample_range(roll_motion_cfg.get('base_roll_range_deg'), 0.0)
             
             # Sample random FOV and compute camera intrinsic matrix K
             flight_fov = random.uniform(fov_range[0], fov_range[1])
@@ -243,12 +330,8 @@ def main():
                 if target_3d is None:
                     continue # Try another pixel in this frame
                     
-                # Check distance dynamically based on flight altitude
-                min_allowed_dist = 0.96 * flight_altitude + 1.0
-                max_allowed_dist = min(200.0, 6.6 * flight_altitude + 2.0)
-                
                 dist = np.linalg.norm(target_3d - np.array([start_point.location.x, start_point.location.y, start_point.location.z]))
-                if dist < min_allowed_dist or dist > max_allowed_dist:
+                if not is_target_distance_allowed(dist, target_distance_cfg, flight_altitude):
                     continue # Try another pixel in this frame
                     
                 found_target = True
@@ -260,20 +343,39 @@ def main():
             print(f"[{flights_generated+1}/{num_flights_target}] Generating Flight... Target Dist: {dist:.1f}m")
             
             # 2. Calculate flight path
-            # Fly towards the target, getting very close
-            stop_dist = random.uniform(2.0, 5.0)
-            vec = target_3d - np.array([start_point.location.x, start_point.location.y, start_point.location.z])
+            start_loc_np = np.array([start_point.location.x, start_point.location.y, start_point.location.z])
+            vec = target_3d - start_loc_np
             dir_vec = vec / dist
-            end_loc = np.array([start_point.location.x, start_point.location.y, start_point.location.z]) + dir_vec * (dist - stop_dist)
+            
+            longitudinal_mode = flight_motion_cfg.get("longitudinal_mode", "approach_stop_distance")
+            if longitudinal_mode == "approach_stop_distance":
+                stop_dist = sample_range(flight_motion_cfg.get("stop_distance_range_m"), random.uniform(2.0, 5.0))
+                longitudinal_delta_m = max(0.0, dist - stop_dist)
+            else:
+                delta_range = normalize_range(flight_motion_cfg.get("longitudinal_delta_range_m", [-35.0, 35.0]))
+                if delta_range is None:
+                    delta_range = (-35.0, 35.0)
+                delta_min, delta_max = delta_range
+                if not flight_motion_cfg.get("allow_recede", True):
+                    delta_min = max(delta_min, 0.0)
+                if not flight_motion_cfg.get("allow_approach", True):
+                    delta_max = min(delta_max, 0.0)
+                if delta_min > delta_max:
+                    longitudinal_delta_m = 0.0
+                else:
+                    longitudinal_delta_m = random.uniform(delta_min, delta_max)
+                stop_dist = max(0.0, dist - longitudinal_delta_m)
+            
+            end_loc = start_loc_np + dir_vec * longitudinal_delta_m
             
             # Compute vectors perpendicular to the camera flight vector (up and right)
-            p_start = np.array([start_point.location.x, start_point.location.y, start_point.location.z])
+            p_start = start_loc_np
             flight_vector = end_loc - p_start
             flight_dist = np.linalg.norm(flight_vector)
             if flight_dist > 0:
                 flight_dir_unit = flight_vector / flight_dist
             else:
-                flight_dir_unit = np.array([1.0, 0.0, 0.0])
+                flight_dir_unit = dir_vec
                 
             right_vec = np.cross(flight_dir_unit, np.array([0.0, 0.0, 1.0]))
             if np.linalg.norm(right_vec) < 1e-4:
@@ -284,20 +386,33 @@ def main():
             up_vec /= np.linalg.norm(up_vec)
             
             # Sample per-flight random amplitudes and frequencies for lateral/vertical strafing
-            drift_right_amp = random.uniform(-3.0, 3.0)
-            drift_up_amp = random.uniform(-2.0, 2.0)
-            drift_right_freq = random.uniform(1.0, 3.0)
-            drift_up_freq = random.uniform(1.0, 3.0)
+            drift_right_amp = sample_range(lateral_motion_cfg.get('right_amplitude_range_m'), random.uniform(-3.0, 3.0))
+            drift_up_amp = sample_range(lateral_motion_cfg.get('up_amplitude_range_m'), random.uniform(-2.0, 2.0))
+            drift_right_freq = sample_range(lateral_motion_cfg.get('frequency_range'), random.uniform(1.0, 3.0))
+            drift_up_freq = sample_range(lateral_motion_cfg.get('frequency_range'), random.uniform(1.0, 3.0))
+            lateral_dominant_indices = build_lateral_dominant_indices(
+                frames_per_flight,
+                int(lateral_motion_cfg.get('lateral_dominant_frames_per_flight', 0))
+            )
+            lateral_dominant_longitudinal_scale = float(lateral_motion_cfg.get('lateral_dominant_longitudinal_scale', 0.15))
             
             # Look slightly off-center so the target wanders around the screen
-            pitch_rad = math.asin(dir_vec[2])
-            yaw_rad = math.atan2(dir_vec[1], dir_vec[0])
             pitch_offset = random.uniform(-15.0, 15.0) # Look slightly above or below
             yaw_offset = random.uniform(-15.0, 15.0)   # Look slightly left or right
+            roll_delta = sample_range(roll_motion_cfg.get('roll_delta_range_deg'), 0.0)
+            roll_osc_amp = sample_range(roll_motion_cfg.get('oscillation_amplitude_range_deg'), 0.0)
+            roll_osc_freq = sample_range(roll_motion_cfg.get('oscillation_frequency_range'), 1.0)
+            roll_osc_phase = random.uniform(0.0, 2.0 * math.pi)
             
             end_transform = carla.Transform(
                 carla.Location(x=end_loc[0], y=end_loc[1], z=end_loc[2]),
-                carla.Rotation(pitch=math.degrees(pitch_rad) + pitch_offset, yaw=math.degrees(yaw_rad) + yaw_offset, roll=0.0)
+                look_at_rotation(
+                    end_loc,
+                    target_3d,
+                    pitch_offset_deg=pitch_offset,
+                    yaw_offset_deg=yaw_offset,
+                    roll_deg=start_point.rotation.roll + roll_delta
+                )
             )
             
             # 3. Execute flight and record frames
@@ -325,7 +440,17 @@ def main():
                     t_noisy = t
                     
                 smooth_t = t_noisy * t_noisy * (3 - 2 * t_noisy)
-                clean_base_t = lerp_transform(start_point, end_transform, smooth_t)
+                longitudinal_t = smooth_t
+                if frame_idx in lateral_dominant_indices:
+                    longitudinal_t *= lateral_dominant_longitudinal_scale
+                clean_base_t = lerp_transform(start_point, end_transform, longitudinal_t)
+                
+                roll_envelope = math.sin(smooth_t * math.pi)
+                clean_base_t.rotation.roll += (
+                    roll_osc_amp *
+                    roll_envelope *
+                    math.sin(smooth_t * roll_osc_freq * 2.0 * math.pi + roll_osc_phase)
+                )
                 
                 # Apply lateral and vertical strafing offset (smoothly zero at t=0 and t=1)
                 drift_factor = math.sin(smooth_t * math.pi)
@@ -338,10 +463,11 @@ def main():
                 
                 frame_success = False
                 for attempt in range(10):
-                    base_t = carla.Transform(clean_base_t.location, clean_base_t.rotation)
+                    base_t = copy_transform(clean_base_t)
                     
-                    # Dynamic Noise Scaling: scale down wind/mechanical noise as the drone gets closer to the target
-                    current_dist = dist - smooth_t * (dist - stop_dist)
+                    # Dynamic Noise Scaling: works for both approach and recede paths.
+                    current_loc_np = np.array([base_t.location.x, base_t.location.y, base_t.location.z])
+                    current_dist = np.linalg.norm(target_3d - current_loc_np)
                     noise_scale = min(1.0, current_dist / 30.0)
                     
                     # Add smooth mechanical/wind noise (Pitch, Roll, X, Y)
@@ -406,7 +532,7 @@ def main():
                 # Add False Negative (Target out-of-frame) frames
                 for fn_idx in range(num_false_negatives):
                     # Start from last transform, but rotate away so target is not visible
-                    fn_t = carla.Transform(clean_base_t.location, clean_base_t.rotation)
+                    fn_t = copy_transform(clean_base_t)
                     fn_t.rotation.yaw += 45.0 + fn_idx * 10.0
                     fn_t.rotation.pitch += 15.0
                     
@@ -459,6 +585,8 @@ def main():
                 flight_data[0]["crop_max_size"] = config['compiler'].get('crop_max_size', 128)
                 flight_data[0]["crop_min_size"] = config['compiler'].get('crop_min_size', 4)
                 flight_data[0]["fov"] = flight_fov
+                flight_data[0]["longitudinal_delta_m"] = float(longitudinal_delta_m)
+                flight_data[0]["lateral_dominant_frame_indices"] = sorted(lateral_dominant_indices)
                 
                 with open(pkl_path, 'wb') as f:
                     pickle.dump(flight_data, f)

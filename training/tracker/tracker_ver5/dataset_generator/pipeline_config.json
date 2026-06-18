@@ -10,7 +10,7 @@
         "width": 800,
         "height": 600,
         "fov": 90.0,
-        "fov_range": [75.0, 125.0],
+        "fov_range": [45.0, 145.0],
         "fps": 30
     },
     "generation": {
@@ -18,8 +18,8 @@
         "cache_dir": "cache",
         "debug_dir": "debug",
         "num_flights_to_cache": 6000,
-        "frames_per_flight": 6,
-        "num_false_negatives": 2,
+        "frames_per_flight": 8,
+        "num_false_negatives": 4,
         "debug_interval": 50,
         "min_texture_std": 2.0,
         "noise_params": {
@@ -29,6 +29,31 @@
             "rot_yaw_amp": 0.5,
             "rot_roll_amp": 2.5
         },
+        "target_distance": {
+            "use_altitude_scaled_defaults": true,
+            "allowed_range_m": [30, 250],
+            "exclude_ranges_m": []
+        },
+        "flight_motion": {
+            "longitudinal_mode": "random_signed",
+            "longitudinal_delta_range_m": [-30.0, 30.0],
+            "allow_approach": true,
+            "allow_recede": true,
+            "stop_distance_range_m": [20.0, 30.0]
+        },
+        "lateral_motion": {
+            "right_amplitude_range_m": [-10.0, 10.0],
+            "up_amplitude_range_m": [-3.0, 3.0],
+            "frequency_range": [0.5, 2.5],
+            "lateral_dominant_frames_per_flight": 2,
+            "lateral_dominant_longitudinal_scale": 0.15
+        },
+        "roll_motion": {
+            "base_roll_range_deg": [-5.0, 5.0],
+            "roll_delta_range_deg": [-30.0, 30.0],
+            "oscillation_amplitude_range_deg": [0.0, 15.0],
+            "oscillation_frequency_range": [0.5, 2.0]
+        },
         "secondary_capture_delay_sec": 2.0,
         "altitude_range": [2.0, 60.0]
     },
@@ -37,7 +62,7 @@
         "stack_layers": 2,
         "stack_target_size": 64,
         "crop_max_size": 256,
-        "crop_min_size": 32,
+        "crop_min_size": 64,
         "heatmap_sigma": 10.0,
         "heatmap_relative_sigma": 0.125,
         "synthetic_negative_ratio": 0.00
