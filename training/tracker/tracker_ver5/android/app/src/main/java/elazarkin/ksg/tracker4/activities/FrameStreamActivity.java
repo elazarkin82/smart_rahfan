@@ -89,6 +89,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private int refW = 64;
     private int refH = 64;
     private int refLayers = 16;
+    private boolean refShapeIsNCHW = false;
 
     private int refInputIndex = 0;
     private int searchInputIndex = 1;
@@ -166,50 +167,57 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             refInputIndex = -1;
             searchInputIndex = -1;
             for (int i = 0; i < numInputs; i++) {
-                String name = tflite.getInputTensor(i).getName().toLowerCase();
-                if (name.contains("reference_stack") || name.contains("ref")) {
+                if (tensorNameContains(tflite.getInputTensor(i), "reference_stack") || tensorNameContains(tflite.getInputTensor(i), "ref")) {
                     refInputIndex = i;
-                } else if (name.contains("search_frame") || name.contains("search")) {
+                } else if (tensorNameContains(tflite.getInputTensor(i), "search_frame") || tensorNameContains(tflite.getInputTensor(i), "search")) {
                     searchInputIndex = i;
                 }
             }
             // Fallback by shape check if names aren't resolved
             if (refInputIndex == -1 || searchInputIndex == -1 || refInputIndex == searchInputIndex) {
-                int[] shape0 = tflite.getInputTensor(0).shape();
-                int[] shape1 = tflite.getInputTensor(1).shape();
-                if (shape0[1] < shape1[1]) {
-                    refInputIndex = 0;
-                    searchInputIndex = 1;
+                if (numInputs >= 2) {
+                    int[] shape0 = tflite.getInputTensor(0).shape();
+                    int[] shape1 = tflite.getInputTensor(1).shape();
+                    int dim0 = (shape0 != null && shape0.length > 1) ? shape0[shape0.length - 2] : 0;
+                    int dim1 = (shape1 != null && shape1.length > 1) ? shape1[shape1.length - 2] : 0;
+                    if (dim0 < dim1) {
+                        refInputIndex = 0;
+                        searchInputIndex = 1;
+                    } else {
+                        refInputIndex = 1;
+                        searchInputIndex = 0;
+                    }
                 } else {
-                    refInputIndex = 1;
+                    refInputIndex = 0;
                     searchInputIndex = 0;
                 }
             }
 
-            int[] refShape = tflite.getInputTensor(refInputIndex).shape();
-            refH = refShape[1];
-            refW = refShape[2];
-            refLayers = refShape[3];
+            ParsedShape parsedRef = parseTensorShape(tflite.getInputTensor(refInputIndex), 64, 64, 16);
+            refH = parsedRef.h;
+            refW = parsedRef.w;
+            refLayers = parsedRef.c;
+            refShapeIsNCHW = parsedRef.isNCHW;
             
-            int[] searchShape = tflite.getInputTensor(searchInputIndex).shape();
-            searchH = searchShape[1];
-            searchW = searchShape[2];
+            ParsedShape parsedSearch = parseTensorShape(tflite.getInputTensor(searchInputIndex), 256, 256, 1);
+            searchH = parsedSearch.h;
+            searchW = parsedSearch.w;
             
             int numOutputs = tflite.getOutputTensorCount();
             heatmapOutputIndex = 0;
             qualityOutputIndex = 1;
             for (int i = 0; i < numOutputs; i++) {
                 int[] shape = tflite.getOutputTensor(i).shape();
-                if (shape.length > 2 && shape[1] > 1) {
+                if (shape != null && shape.length > 2 && shape[shape.length - 2] > 1) {
                     heatmapOutputIndex = i;
                 } else {
                     qualityOutputIndex = i;
                 }
             }
             
-            int[] heatmapShape = tflite.getOutputTensor(heatmapOutputIndex).shape();
-            heatmapH = heatmapShape[1];
-            heatmapW = heatmapShape[2];
+            ParsedShape parsedHeatmap = parseTensorShape(tflite.getOutputTensor(heatmapOutputIndex), 256, 256, 1);
+            heatmapH = parsedHeatmap.h;
+            heatmapW = parsedHeatmap.w;
             
             // Allocate buffers with dynamic sizes
             refStackInputBuffer = java.nio.ByteBuffer.allocateDirect(1 * refH * refW * refLayers * 4).order(java.nio.ByteOrder.nativeOrder());
@@ -363,8 +371,13 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                     int iy = (int) Math.max(0, Math.min(height - 1, srcY));
                     
                     int pixel = yPlane[iy * stride + ix] & 0xFF;
-                    // Store in Row-Major NHWC layout: batch=0, dim=0, y, x, layer
-                    refFloatBuffer.put(y * refW * refLayers + x * refLayers + layer, pixel / 255.0f);
+                    int index;
+                    if (refShapeIsNCHW) {
+                        index = layer * refH * refW + y * refW + x;
+                    } else {
+                        index = y * refW * refLayers + x * refLayers + layer;
+                    }
+                    refFloatBuffer.put(index, pixel / 255.0f);
                 }
             }
         }
@@ -690,8 +703,13 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
         for (int y = 0; y < refH; y++) {
             for (int x = 0; x < refW; x++) {
-                // Read from NHWC Row-Major layout: batch=0, dim=0, y, x, layer
-                int val = (int)(refFloatBuffer.get(y * refW * refLayers + x * refLayers + selectedHistLayer) * 255.0f);
+                int index;
+                if (refShapeIsNCHW) {
+                    index = selectedHistLayer * refH * refW + y * refW + x;
+                } else {
+                    index = y * refW * refLayers + x * refLayers + selectedHistLayer;
+                }
+                int val = (int)(refFloatBuffer.get(index) * 255.0f);
                 histColors[y * refW + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
             }
         }
@@ -765,5 +783,81 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             cameraHelper.shutdown();
         }
         super.onDestroy();
+    }
+
+    private static class ParsedShape {
+        int h;
+        int w;
+        int c;
+        boolean isNCHW;
+
+        ParsedShape(int h, int w, int c, boolean isNCHW) {
+            this.h = h;
+            this.w = w;
+            this.c = c;
+            this.isNCHW = isNCHW;
+        }
+    }
+
+    private ParsedShape parseTensorShape(org.tensorflow.lite.Tensor tensor, int defaultH, int defaultW, int defaultC) {
+        if (tensor == null) {
+            return new ParsedShape(defaultH, defaultW, defaultC, false);
+        }
+        int[] shape = tensor.shape();
+        if (shape == null || shape.length < 3) {
+            return new ParsedShape(defaultH, defaultW, defaultC, false);
+        }
+
+        int h, w, c;
+        boolean isNCHW = false;
+
+        if (shape.length == 4) {
+            if (shape[1] == shape[2]) {
+                // NHWC: [batch, H, W, C]
+                h = shape[1];
+                w = shape[2];
+                c = shape[3];
+                isNCHW = false;
+            } else if (shape[2] == shape[3]) {
+                // NCHW: [batch, C, H, W]
+                c = shape[1];
+                h = shape[2];
+                w = shape[3];
+                isNCHW = true;
+            } else {
+                // Fallback to NHWC
+                h = shape[1];
+                w = shape[2];
+                c = shape[3];
+                isNCHW = false;
+            }
+        } else { // length == 3
+            if (shape[0] == shape[1]) {
+                // HWC: [H, W, C]
+                h = shape[0];
+                w = shape[1];
+                c = shape[2];
+                isNCHW = false;
+            } else if (shape[1] == shape[2]) {
+                // CHW: [C, H, W]
+                c = shape[0];
+                h = shape[1];
+                w = shape[2];
+                isNCHW = true;
+            } else {
+                h = shape[0];
+                w = shape[1];
+                c = shape[2];
+                isNCHW = false;
+            }
+        }
+        return new ParsedShape(h, w, c, isNCHW);
+    }
+
+    private boolean tensorNameContains(org.tensorflow.lite.Tensor tensor, String query) {
+        if (tensor == null) return false;
+        String name = tensor.name();
+        if (name == null) return false;
+        return name.toLowerCase().contains(query.toLowerCase());
     }
 }
