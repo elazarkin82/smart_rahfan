@@ -6,6 +6,7 @@ import numpy as np
 import cv2
 import tqdm
 import h5py
+import argparse
 
 def load_config(path="pipeline_config.json"):
     if not os.path.exists(path) and path == "pipeline_config.json":
@@ -90,11 +91,29 @@ def sample_crop_max_size(crop_max_cfg):
     return crop_max
 
 def main():
+    parser = argparse.ArgumentParser(description="Compile dataset from cached flight files.")
+    parser.add_argument(
+        '--cache-dirs',
+        nargs='+',
+        help="Optional list of cache directory paths containing flight_*.pkl files. Overrides config setting."
+    )
+    args = parser.parse_args()
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config = load_config()
-    cache_dir = config['generation'].get('cache_dir', 'cache')
-    if not os.path.isabs(cache_dir):
-        cache_dir = os.path.join(script_dir, cache_dir)
+    
+    # Resolve cache directories
+    if args.cache_dirs:
+        cache_dirs = []
+        for path in args.cache_dirs:
+            if not os.path.isabs(path):
+                path = os.path.join(script_dir, path)
+            cache_dirs.append(os.path.abspath(path))
+    else:
+        cache_dir = config['generation'].get('cache_dir', 'cache')
+        if not os.path.isabs(cache_dir):
+            cache_dir = os.path.join(script_dir, cache_dir)
+        cache_dirs = [os.path.abspath(cache_dir)]
         
     compiler_cfg = config['compiler']
     dataset_dir = compiler_cfg['dataset_dir']
@@ -103,10 +122,15 @@ def main():
         
     os.makedirs(dataset_dir, exist_ok=True)
     
-    cache_files = sorted(glob.glob(os.path.join(cache_dir, "flight_*.pkl")))
+    # Gather flight files from all cache directories
+    cache_files = []
+    for d in cache_dirs:
+        cache_files.extend(glob.glob(os.path.join(d, "flight_*.pkl")))
+    cache_files = sorted(cache_files)
     
     if not cache_files:
-        print(f"No cache files found in '{cache_dir}'. Run dataset_generator.py first.")
+        dirs_str = ", ".join(f"'{d}'" for d in cache_dirs)
+        print(f"No cache files found in {dirs_str}. Run dataset_generator.py first.")
         return
         
     print(f"Found {len(cache_files)} cached flights. Starting compilation to HDF5...")
