@@ -21,6 +21,16 @@ class ModelInferenceVisualizer:
         
         self.threshold = threshold
         self.model_path = model_path
+        
+        # Instance variables to cache current frame prediction and metadata
+        self.curr_ref_stack = None
+        self.curr_search_raw = None
+        self.curr_gt_coords = None
+        self.curr_gt_quality = None
+        self.curr_meta = None
+        self.curr_pred_heatmap = None
+        self.curr_pred_quality = None
+        self.curr_search_256 = None
         self.is_tflite = model_path.endswith('.tflite')
         
         if self.is_tflite:
@@ -182,6 +192,30 @@ class ModelInferenceVisualizer:
         header = tk.Label(self.root, text=f"TargetTrackerVer4 Visualizer ({backend_name} Backend)", font=("Outfit", 15, "bold"), bg="#121212", fg="#ffffff")
         header.pack(pady=15)
         
+        # Control panel for algorithm selection
+        self.control_frame = tk.Frame(self.root, bg="#121212")
+        self.control_frame.pack(pady=5)
+        
+        tk.Label(self.control_frame, text="Centroid Algorithm:", font=("Inter", 10, "bold"), bg="#121212", fg="#ffffff").pack(side="left", padx=5)
+        
+        self.algo_var = tk.StringVar(value="Argmax (Discrete)")
+        self.algo_options = [
+            "Argmax (Discrete)",
+            "Sub-pixel (Otsu)",
+            "Sub-pixel (Triangle)",
+            "Sub-pixel (Energy 75%)",
+            "Sub-pixel (Mean + 1.5*Std)"
+        ]
+        self.algo_dropdown = tk.OptionMenu(
+            self.control_frame, 
+            self.algo_var, 
+            *self.algo_options,
+            command=self.on_algo_changed
+        )
+        self.algo_dropdown.config(bg="#1a1a1a", fg="#ffffff", activebackground="#333333", activeforeground="#ffffff", highlightthickness=0, bd=1)
+        self.algo_dropdown["menu"].config(bg="#1a1a1a", fg="#ffffff")
+        self.algo_dropdown.pack(side="left", padx=5)
+        
         self.frames_frame = tk.Frame(self.root, bg="#121212")
         self.frames_frame.pack(pady=10)
         
@@ -191,6 +225,13 @@ class ModelInferenceVisualizer:
         
         self.status_bar = tk.Label(self.root, text="Press [Space] for Next Sample", font=("Inter", 10), bg="#1c1c1c", fg="#aaaaaa", anchor="w", padx=15, pady=8)
         self.status_bar.pack(side="bottom", fill="x")
+        
+    def on_algo_changed(self, value):
+        if self.curr_pred_heatmap is not None:
+            try:
+                self.update_visualization()
+            except Exception as e:
+                self.status_bar.config(text=f"Error updating: {e}")
         
     def load_next_sample(self):
         try:
@@ -234,33 +275,12 @@ class ModelInferenceVisualizer:
                 meta = sample["metadata"]
                 gt_quality = meta.get("quality", 1.0)
             
-            # Prepare Target Label
-            # Scale target_2d to normalized coordinates
-            h_raw, w_raw = search_raw.shape[:2]
-            if gt_quality > 0.5:
-                # gt_coords is [y, x] in normalized [0, 1] space
-                norm_x = gt_coords[1]
-                norm_y = gt_coords[0]
-                norm_coords = [norm_x, norm_y]
-                curr_lbl_text = f"GT: [{norm_x:.2f}, {norm_y:.2f}]"
-                curr_lbl_fg = "#00e6ff"
-            else:
-                norm_coords = None
-                curr_lbl_text = "GT: None (Negative)"
-                curr_lbl_fg = "#ff3366"
-            
-            # Show the largest reference crop (layer 0) scaled up
-            if ref_stack.ndim == 3:
-                ref_layer_0 = ref_stack[:, :, 0]
-            elif ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
-                ref_layer_0 = ref_stack[0, :, :, 0]
-            else:
-                ref_layer_0 = ref_stack[0, :, :, 0]
-                
-            if ref_layer_0.dtype != np.uint8:
-                ref_layer_0 = (ref_layer_0 * 255.0).astype(np.uint8)
-            ref_vis = cv2.resize(ref_layer_0, (256, 256), interpolation=cv2.INTER_NEAREST)
-            self.tk_img_ref = ImageTk.PhotoImage(Image.fromarray(ref_vis))
+            # Save raw values to instance variables
+            self.curr_ref_stack = ref_stack
+            self.curr_search_raw = search_raw
+            self.curr_gt_coords = gt_coords
+            self.curr_gt_quality = gt_quality
+            self.curr_meta = meta
             
             # Prepare inputs for model
             if ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
@@ -301,57 +321,256 @@ class ModelInferenceVisualizer:
                     pred_heatmap = pred.numpy()[0]
                     pred_quality = 1.0
             
-            # Find peak
-            heatmap = pred_heatmap[:, :, 0]
-            flat_idx = np.argmax(heatmap)
-            y_max, x_max = np.unravel_index(flat_idx, heatmap.shape)
-            pred_norm = [x_max / heatmap.shape[1], y_max / heatmap.shape[0]]
-
- 
-            search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
-            search_vis = (search_rgb.copy()*255).astype(np.uint8)
+            self.curr_pred_heatmap = pred_heatmap
+            self.curr_pred_quality = pred_quality
+            self.curr_search_256 = search_256
             
-            # Draw Expected target (cyan circle)
-            if norm_coords is not None:
-                cx = int(norm_coords[0] * 256.0)
-                cy = int(norm_coords[1] * 256.0)
-                cv2.circle(search_vis, (cx, cy), 6, (0, 230, 255), 2)
-                cv2.circle(search_vis, (cx, cy), 2, (0, 230, 255), -1)
-                
-            # Draw Predicted target (green circle)
-            pcx = int(pred_norm[0] * 256.0)
-            pcy = int(pred_norm[1] * 256.0)
-            cv2.circle(search_vis, (pcx, pcy), 6, (51, 255, 51), 2)
-            cv2.circle(search_vis, (pcx, pcy), 2, (51, 255, 51), -1)
-            
-            self.tk_img_search = ImageTk.PhotoImage(Image.fromarray(search_vis))
-            
-            # Prepare predicted heatmap color map
-            heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
-            heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-            self.tk_img_predicted = ImageTk.PhotoImage(Image.fromarray(heatmap_color_rgb))
-            
-            self.ref_panel.config(image=self.tk_img_ref)
-            self.search_panel.config(image=self.tk_img_search)
-            self.predicted_heatmap_panel.config(image=self.tk_img_predicted)
-            
-            self.ref_lbl.config(text="Target Features")
-            self.search_lbl.config(text=curr_lbl_text, fg=curr_lbl_fg)
-            
-            if norm_coords is not None:
-                error = np.sqrt((pred_norm[0] - norm_coords[0])**2 + (pred_norm[1] - norm_coords[1])**2) * 256.0
-                error_str = f"Error: {error:.1f}px"
-            else:
-                error_str = "Error: N/A"
-            
-            self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {pred_quality:.2f}", fg="#33ff33")
-            
-            self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
+            self.update_visualization()
             
         except Exception as e:
             self.status_bar.config(text=f"Error: {e}")
             import traceback
             traceback.print_exc()
+
+    def compute_otsu_threshold(self, window):
+        flat = window.ravel()
+        if len(flat) == 0:
+            return 0.0
+        vmin, vmax = np.min(flat), np.max(flat)
+        if vmin == vmax:
+            return vmin
+        hist, bin_edges = np.histogram(flat, bins=256, range=(vmin, vmax))
+        bin_mids = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        total = len(flat)
+        sum_total = np.sum(bin_mids * hist)
+        sum_b = 0.0
+        w_b = 0.0
+        max_variance = 0.0
+        threshold = vmin
+        for i in range(256):
+            w_b += hist[i]
+            if w_b == 0:
+                continue
+            w_f = total - w_b
+            if w_f == 0:
+                break
+            sum_b += bin_mids[i] * hist[i]
+            m_b = sum_b / w_b
+            m_f = (sum_total - sum_b) / w_f
+            variance = w_b * w_f * (m_b - m_f) ** 2
+            if variance > max_variance:
+                max_variance = variance
+                threshold = bin_mids[i]
+        return threshold
+
+    def compute_triangle_threshold(self, window):
+        flat = window.ravel()
+        if len(flat) == 0:
+            return 0.0
+        vmin, vmax = np.min(flat), np.max(flat)
+        if vmin == vmax:
+            return vmin
+        hist, bin_edges = np.histogram(flat, bins=256, range=(vmin, vmax))
+        bin_mids = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        hist_peak_idx = np.argmax(hist)
+        if hist_peak_idx < 128:
+            start_idx = hist_peak_idx
+            end_idx = 255
+            step = 1
+        else:
+            start_idx = hist_peak_idx
+            end_idx = 0
+            step = -1
+        p1 = np.array([start_idx, hist[start_idx]])
+        p2 = np.array([end_idx, hist[end_idx]])
+        line_vec = p2 - p1
+        line_len = np.linalg.norm(line_vec)
+        if line_len == 0:
+            return bin_mids[hist_peak_idx]
+        max_dist = -1.0
+        best_idx = start_idx
+        for i in range(start_idx, end_idx + step, step):
+            p = np.array([i, hist[i]])
+            dist = np.abs(np.cross(p2 - p1, p1 - p)) / line_len
+            if dist > max_dist:
+                max_dist = dist
+                best_idx = i
+        return bin_mids[best_idx]
+
+    def compute_subpixel_position(self, heatmap, y_max, x_max, method):
+        h_h, w_h = heatmap.shape
+        window_size = 15
+        half = window_size // 2
+        y_start = max(0, y_max - half)
+        y_end = min(h_h, y_max + half + 1)
+        x_start = max(0, x_max - half)
+        x_end = min(w_h, x_max + half + 1)
+        
+        window = heatmap[y_start:y_end, x_start:x_end]
+        
+        if method == "Sub-pixel (Otsu)":
+            thresh = self.compute_otsu_threshold(window)
+        elif method == "Sub-pixel (Triangle)":
+            thresh = self.compute_triangle_threshold(window)
+        elif method == "Sub-pixel (Mean + 1.5*Std)":
+            mean_val = np.mean(window)
+            std_val = np.std(window)
+            thresh = mean_val + 1.5 * std_val
+        elif method == "Sub-pixel (Energy 75%)":
+            h_w, w_w = window.shape
+            coords_with_val = []
+            for r in range(h_w):
+                for c in range(w_w):
+                    coords_with_val.append((r + y_start, c + x_start, float(window[r, c])))
+            coords_with_val.sort(key=lambda item: item[2], reverse=True)
+            total_sum = sum(item[2] for item in coords_with_val)
+            if total_sum == 0:
+                return float(y_max), float(x_max)
+            
+            accum = 0.0
+            selected_pixels = []
+            for cy, cx, val in coords_with_val:
+                selected_pixels.append((cy, cx))
+                accum += val
+                if accum >= 0.75 * total_sum:
+                    break
+            
+            sum_w = 0.0
+            sum_wy = 0.0
+            sum_wx = 0.0
+            for cy, cx in selected_pixels:
+                w = float(heatmap[cy, cx])
+                sum_w += w
+                sum_wy += cy * w
+                sum_wx += cx * w
+            if sum_w > 0:
+                return sum_wy / sum_w, sum_wx / sum_w
+            return float(y_max), float(x_max)
+        else:
+            return float(y_max), float(x_max)
+            
+        local_y = y_max - y_start
+        local_x = x_max - x_start
+        
+        visited = np.zeros_like(window, dtype=bool)
+        queue = [(int(local_y), int(local_x))]
+        visited[local_y, local_x] = True
+        
+        blob_pixels = []
+        head = 0
+        h_w, w_w = window.shape
+        while head < len(queue):
+            cy, cx = queue[head]
+            head += 1
+            blob_pixels.append((cy, cx))
+            
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < h_w and 0 <= nx < w_w:
+                        if not visited[ny, nx] and window[ny, nx] > thresh:
+                            visited[ny, nx] = True
+                            queue.append((ny, nx))
+                            
+        sum_w = 0.0
+        sum_wy = 0.0
+        sum_wx = 0.0
+        for cy, cx in blob_pixels:
+            global_y = cy + y_start
+            global_x = cx + x_start
+            w = float(heatmap[global_y, global_x])
+            sum_w += w
+            sum_wy += global_y * w
+            sum_wx += global_x * w
+            
+        if sum_w > 0:
+            return sum_wy / sum_w, sum_wx / sum_w
+        return float(y_max), float(x_max)
+
+    def update_visualization(self):
+        ref_stack = self.curr_ref_stack
+        search_raw = self.curr_search_raw
+        gt_coords = self.curr_gt_coords
+        gt_quality = self.curr_gt_quality
+        meta = self.curr_meta
+        pred_heatmap = self.curr_pred_heatmap
+        pred_quality = self.curr_pred_quality
+        search_256 = self.curr_search_256
+        
+        method = self.algo_var.get()
+        
+        if gt_quality > 0.5:
+            norm_x = gt_coords[1]
+            norm_y = gt_coords[0]
+            norm_coords = [norm_x, norm_y]
+            curr_lbl_text = f"GT: [{norm_x:.2f}, {norm_y:.2f}]"
+            curr_lbl_fg = "#00e6ff"
+        else:
+            norm_coords = None
+            curr_lbl_text = "GT: None (Negative)"
+            curr_lbl_fg = "#ff3366"
+            
+        if ref_stack.ndim == 3:
+            ref_layer_0 = ref_stack[:, :, 0]
+        elif ref_stack.ndim == 4 and ref_stack.shape[0] == 1:
+            ref_layer_0 = ref_stack[0, :, :, 0]
+        else:
+            ref_layer_0 = ref_stack[0, :, :, 0]
+            
+        if ref_layer_0.dtype != np.uint8:
+            ref_layer_0 = (ref_layer_0 * 255.0).astype(np.uint8)
+        ref_vis = cv2.resize(ref_layer_0, (256, 256), interpolation=cv2.INTER_NEAREST)
+        self.tk_img_ref = ImageTk.PhotoImage(Image.fromarray(ref_vis))
+        
+        heatmap = pred_heatmap[:, :, 0]
+        flat_idx = np.argmax(heatmap)
+        y_max, x_max = np.unravel_index(flat_idx, heatmap.shape)
+        
+        if method == "Argmax (Discrete)":
+            y_pred, x_pred = float(y_max), float(x_max)
+        else:
+            y_pred, x_pred = self.compute_subpixel_position(heatmap, y_max, x_max, method)
+            
+        pred_norm = [x_pred / heatmap.shape[1], y_pred / heatmap.shape[0]]
+        
+        search_rgb = cv2.cvtColor(search_256, cv2.COLOR_GRAY2RGB)
+        search_vis = (search_rgb.copy()*255).astype(np.uint8)
+        
+        if norm_coords is not None:
+            cx = int(norm_coords[0] * 256.0)
+            cy = int(norm_coords[1] * 256.0)
+            cv2.circle(search_vis, (cx, cy), 6, (0, 230, 255), 2)
+            cv2.circle(search_vis, (cx, cy), 2, (0, 230, 255), -1)
+            
+        pcx = int(pred_norm[0] * 256.0)
+        pcy = int(pred_norm[1] * 256.0)
+        cv2.circle(search_vis, (pcx, pcy), 6, (51, 255, 51), 2)
+        cv2.circle(search_vis, (pcx, pcy), 2, (51, 255, 51), -1)
+        
+        self.tk_img_search = ImageTk.PhotoImage(Image.fromarray(search_vis))
+        
+        heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+        self.tk_img_predicted = ImageTk.PhotoImage(Image.fromarray(heatmap_color_rgb))
+        
+        self.ref_panel.config(image=self.tk_img_ref)
+        self.search_panel.config(image=self.tk_img_search)
+        self.predicted_heatmap_panel.config(image=self.tk_img_predicted)
+        
+        self.ref_lbl.config(text="Target Features")
+        self.search_lbl.config(text=curr_lbl_text, fg=curr_lbl_fg)
+        
+        if norm_coords is not None:
+            error = np.sqrt((pred_norm[0] - norm_coords[0])**2 + (pred_norm[1] - norm_coords[1])**2) * 256.0
+            error_str = f"Error: {error:.1f}px"
+        else:
+            error_str = "Error: N/A"
+            
+        self.predicted_heatmap_lbl.config(text=f"Pred: [{pred_norm[0]:.2f}, {pred_norm[1]:.2f}]\n{error_str}\nQuality: {pred_quality:.2f}", fg="#33ff33")
+        
+        self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
 
     def on_close(self):
         self.root.destroy()

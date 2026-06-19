@@ -153,7 +153,7 @@ Java_elazarkin_ksg_tracker4_MainActivity_calculateLocalRefinedArgmaxCentroid(
     jfloat* hm = env->GetFloatArrayElements(heatmap, nullptr);
     if (!hm) return nullptr;
     
-    // 1. Find absolute global peak (argmax)
+    // 1. Find discrete peak (argmax)
     float max_val = -1.0f;
     int max_x = hmW / 2;
     int max_y = hmH / 2;
@@ -169,32 +169,80 @@ Java_elazarkin_ksg_tracker4_MainActivity_calculateLocalRefinedArgmaxCentroid(
         }
     }
     
-    // 2. Compute Center of Mass strictly within a local 5x5 window
-    double sum_x = 0.0;
-    double sum_y = 0.0;
-    double total_mass = 0.0;
+    // 2. Define 15x15 local window centered at peak
+    int y_start = std::max(0, max_y - 7);
+    int y_end = std::min((int)hmH, max_y + 8);
+    int x_start = std::max(0, max_x - 7);
+    int x_end = std::min((int)hmW, max_x + 8);
     
-    for (int dy = -2; dy <= 2; ++dy) {
-        int sy = max_y + dy;
-        if (sy < 0 || sy >= hmH) continue;
-        
-        for (int dx = -2; dx <= 2; ++dx) {
-            int sx = max_x + dx;
-            if (sx < 0 || sx >= hmW) continue;
-            
-            float val = hm[sy * hmW + sx];
-            sum_x += sx * val;
-            sum_y += sy * val;
-            total_mass += val;
+    // 3. Compute Mean & StdDev in this window
+    double sum = 0.0;
+    double sq_sum = 0.0;
+    int count = 0;
+    for (int y = y_start; y < y_end; ++y) {
+        for (int x = x_start; x < x_end; ++x) {
+            float val = hm[y * hmW + x];
+            sum += val;
+            sq_sum += val * val;
+            count++;
         }
     }
     
+    double mean = (count > 0) ? (sum / count) : 0.0;
+    double variance = (count > 0) ? (sq_sum / count - mean * mean) : 0.0;
+    double std_dev = std::sqrt(std::max(0.0, variance));
+    float threshold = (float)(mean + 1.5 * std_dev);
+    
+    // 4. Non-recursive BFS to extract connected blob above threshold
+    std::vector<bool> visited(hmW * hmH, false);
+    std::vector<std::pair<int, int>> queue;
+    
+    queue.push_back({max_y, max_x});
+    visited[max_y * hmW + max_x] = true;
+    
+    size_t head = 0;
+    while (head < queue.size()) {
+        auto curr = queue[head++];
+        int cy = curr.first;
+        int cx = curr.second;
+        
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dy == 0 && dx == 0) continue;
+                int ny = cy + dy;
+                int nx = cx + dx;
+                
+                // Keep BFS search strictly within the local 15x15 window
+                if (ny >= y_start && ny < y_end && nx >= x_start && nx < x_end) {
+                    int idx = ny * hmW + nx;
+                    if (!visited[idx] && hm[idx] > threshold) {
+                        visited[idx] = true;
+                        queue.push_back({ny, nx});
+                    }
+                }
+            }
+        }
+    }
+    
+    // 5. Compute Weighted Centroid of all pixels in the blob
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    double total_mass = 0.0;
+    for (const auto& p : queue) {
+        int cy = p.first;
+        int cx = p.second;
+        float val = hm[cy * hmW + cx];
+        sum_x += cx * val;
+        sum_y += cy * val;
+        total_mass += val;
+    }
+    
     LOGD("JNI Argmax search: max_val=%f, max_x=%d, max_y=%d", max_val, max_x, max_y);
-    LOGD("JNI Centroid window: sum_x=%f, sum_y=%f, total_mass=%f", sum_x, sum_y, total_mass);
+    LOGD("JNI Centroid window: sum_x=%f, sum_y=%f, total_mass=%f, count=%zu, threshold=%f", sum_x, sum_y, total_mass, queue.size(), threshold);
     
-    env->ReleaseFloatArrayElements(heatmap, hm, 0); // write-back modifications
+    env->ReleaseFloatArrayElements(heatmap, hm, JNI_ABORT);
     
-    // 3. Construct and return result array
+    // 6. Return coordinates normalized to [0.0, 1.0]
     jfloatArray result = env->NewFloatArray(2);
     if (!result) return nullptr;
     

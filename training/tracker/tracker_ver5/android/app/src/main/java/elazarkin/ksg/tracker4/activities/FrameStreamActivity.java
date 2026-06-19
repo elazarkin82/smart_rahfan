@@ -90,6 +90,11 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private int refH = 64;
     private int refLayers = 16;
 
+    private int refInputIndex = 0;
+    private int searchInputIndex = 1;
+    private int heatmapOutputIndex = 0;
+    private int qualityOutputIndex = 1;
+
     private java.nio.ByteBuffer refStackInputBuffer = null;
     private java.nio.ByteBuffer searchBuffer = null;
     private java.nio.ByteBuffer outputHeatmapBuffer = null;
@@ -157,16 +162,52 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             tflite = new Interpreter(loadModelFile(), options);
             
             // Dynamically infer dimensions from model tensors
-            int[] refShape = tflite.getInputTensor(0).shape(); // [1, 64, 64, 16] or similar
+            int numInputs = tflite.getInputTensorCount();
+            refInputIndex = -1;
+            searchInputIndex = -1;
+            for (int i = 0; i < numInputs; i++) {
+                String name = tflite.getInputTensor(i).getName().toLowerCase();
+                if (name.contains("reference_stack") || name.contains("ref")) {
+                    refInputIndex = i;
+                } else if (name.contains("search_frame") || name.contains("search")) {
+                    searchInputIndex = i;
+                }
+            }
+            // Fallback by shape check if names aren't resolved
+            if (refInputIndex == -1 || searchInputIndex == -1 || refInputIndex == searchInputIndex) {
+                int[] shape0 = tflite.getInputTensor(0).shape();
+                int[] shape1 = tflite.getInputTensor(1).shape();
+                if (shape0[1] < shape1[1]) {
+                    refInputIndex = 0;
+                    searchInputIndex = 1;
+                } else {
+                    refInputIndex = 1;
+                    searchInputIndex = 0;
+                }
+            }
+
+            int[] refShape = tflite.getInputTensor(refInputIndex).shape();
             refH = refShape[1];
             refW = refShape[2];
             refLayers = refShape[3];
             
-            int[] searchShape = tflite.getInputTensor(1).shape(); // [1, 256, 256, 1] or similar
+            int[] searchShape = tflite.getInputTensor(searchInputIndex).shape();
             searchH = searchShape[1];
             searchW = searchShape[2];
             
-            int[] heatmapShape = tflite.getOutputTensor(0).shape(); // [1, 256, 256, 1] or similar
+            int numOutputs = tflite.getOutputTensorCount();
+            heatmapOutputIndex = 0;
+            qualityOutputIndex = 1;
+            for (int i = 0; i < numOutputs; i++) {
+                int[] shape = tflite.getOutputTensor(i).shape();
+                if (shape.length > 2 && shape[1] > 1) {
+                    heatmapOutputIndex = i;
+                } else {
+                    qualityOutputIndex = i;
+                }
+            }
+            
+            int[] heatmapShape = tflite.getOutputTensor(heatmapOutputIndex).shape();
             heatmapH = heatmapShape[1];
             heatmapW = heatmapShape[2];
             
@@ -175,6 +216,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             searchBuffer = java.nio.ByteBuffer.allocateDirect(searchH * searchW * 4).order(java.nio.ByteOrder.nativeOrder());
             outputHeatmapBuffer = java.nio.ByteBuffer.allocateDirect(heatmapH * heatmapW * 4).order(java.nio.ByteOrder.nativeOrder());
             outputQualityBuffer = java.nio.ByteBuffer.allocateDirect(4).order(java.nio.ByteOrder.nativeOrder());
+
+            seekBarHistLayer.setMax(refLayers - 1);
 
             lblStatus.setText(String.format("Status: Engine loaded [%dx%d -> %dx%d]", searchW, searchH, heatmapW, heatmapH));
         } catch (Exception e) {
@@ -429,15 +472,18 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         
         outputHeatmapBuffer.rewind();
         
-        Object[] inputs = new Object[]{ refStackInputBuffer, searchBuffer };
+        Object[] inputs = new Object[2];
+        inputs[refInputIndex] = refStackInputBuffer;
+        inputs[searchInputIndex] = searchBuffer;
+
         Map<Integer, Object> outputs = new HashMap<>();
-        outputs.put(0, outputHeatmapBuffer);
+        outputs.put(heatmapOutputIndex, outputHeatmapBuffer);
         
         // Check if model has a second output for quality
         boolean hasQualityOutput = (tflite != null && tflite.getOutputTensorCount() > 1);
         if (hasQualityOutput) {
             outputQualityBuffer.rewind();
-            outputs.put(1, outputQualityBuffer);
+            outputs.put(qualityOutputIndex, outputQualityBuffer);
         }
 
         long infStart = SystemClock.elapsedRealtime();
