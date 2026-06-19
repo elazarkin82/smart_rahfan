@@ -27,8 +27,8 @@ echo "============================================================"
 # Create outputs directory
 mkdir -p outputs
 
-KERAS_IN=outputs/tracker_coords_qat.keras
-#KERAS_IN=outputs/tracker_coords_fbn.keras
+#KERAS_IN=outputs/tracker_coords_qat.keras
+KERAS_IN=outputs/tracker_coords_fbn.keras
 
 # 1. Export Part 1: Template Encoder Graph
 # Input: reference_stack (1, 64, 64, 16)

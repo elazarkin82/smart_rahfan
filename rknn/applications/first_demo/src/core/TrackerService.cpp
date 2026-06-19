@@ -5,6 +5,10 @@
 #include <string.h>
 #include <chrono>
 #include <math.h>
+#include <algorithm>
+#include <cmath>
+#include <vector>
+#include <utility>
 
 #if defined(USE_RGA)
 #include <RgaApi.h>
@@ -223,12 +227,10 @@ TrackerService::TrackerService(const char* template_path, const char* frame_path
     m_is_model_loaded = true;
     StatusObject::instance()->update("tracker_model_status", "Loaded & Ready");
 
-    // Allocate runtime internal buffers
-    m_ref_stack_buf = (uchar*)malloc(m_in_width_ref * m_in_height_ref * m_in_channels_ref);
-    memset(m_ref_stack_buf, 0, m_in_width_ref * m_in_height_ref * m_in_channels_ref);
-
-    m_search_buf = (uchar*)malloc(m_in_width_search * m_in_height_search * m_in_channels_search);
-    m_heatmap_buf = (float*)malloc(m_out_width_hm * m_out_height_hm * sizeof(float));
+    // Initialize pre-allocated buffers (static sizing)
+    memset(m_ref_stack_buf, 0, sizeof(m_ref_stack_buf));
+    memset(m_search_buf, 0, sizeof(m_search_buf));
+    memset(m_heatmap_buf, 0, sizeof(m_heatmap_buf));
 
     m_template_features_buf = malloc(m_template_features_size);
     memset(m_template_features_buf, 0, m_template_features_size);
@@ -240,9 +242,6 @@ TrackerService::~TrackerService()
     {
         rknn_destroy(m_ctx_template);
         rknn_destroy(m_ctx_frame);
-        free(m_ref_stack_buf);
-        free(m_search_buf);
-        free(m_heatmap_buf);
         free(m_template_features_buf);
 #if defined(USE_RGA)
         release_rga_buffers();
@@ -824,6 +823,7 @@ void TrackerService::resize_bilinear_omp(const uchar* src, int src_w, int src_h,
 
 void TrackerService::decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y)
 {
+    // 1. Find discrete peak (argmax)
     int max_flat_idx = 0;
     float max_val = raw_heatmap[0];
     for (int i = 1; i < m_out_width_hm * m_out_height_hm; ++i)
@@ -835,6 +835,107 @@ void TrackerService::decode_heatmap(const float* raw_heatmap, int* out_x, int* o
         }
     }
 
-    *out_y = max_flat_idx / m_out_width_hm;
-    *out_x = max_flat_idx % m_out_width_hm;
+    int max_y = max_flat_idx / m_out_width_hm;
+    int max_x = max_flat_idx % m_out_width_hm;
+
+    // 2. Define 15x15 local window centered at peak
+    int y_start = std::max(0, max_y - 7);
+    int y_end = std::min(m_out_height_hm, max_y + 8);
+    int x_start = std::max(0, max_x - 7);
+    int x_end = std::min(m_out_width_hm, max_x + 8);
+
+    // 3. Compute Mean & StdDev in this window
+    double sum = 0.0;
+    double sq_sum = 0.0;
+    int count = 0;
+    for (int y = y_start; y < y_end; ++y)
+    {
+        for (int x = x_start; x < x_end; ++x)
+        {
+            float val = raw_heatmap[y * m_out_width_hm + x];
+            sum += val;
+            sq_sum += val * val;
+            count++;
+        }
+    }
+
+    double mean = (count > 0) ? (sum / count) : 0.0;
+    double variance = (count > 0) ? (sq_sum / count - mean * mean) : 0.0;
+    double std_dev = std::sqrt(std::max(0.0, variance));
+    float threshold = (float)(mean + 1.5 * std_dev);
+
+    // 4. Non-recursive local BFS to extract connected blob above threshold
+    // Using fixed stack arrays of size 225 (15x15) to guarantee no runtime allocation
+    bool visited[15][15];
+    memset(visited, 0, sizeof(visited));
+
+    std::pair<int, int> queue[225];
+    int head = 0;
+    int tail = 0;
+
+    int local_peak_y = max_y - y_start;
+    int local_peak_x = max_x - x_start;
+
+    queue[tail++] = {local_peak_y, local_peak_x};
+    visited[local_peak_y][local_peak_x] = true;
+
+    while (head < tail)
+    {
+        auto curr = queue[head++];
+        int cy = curr.first;
+        int cx = curr.second;
+
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                if (dy == 0 && dx == 0) continue;
+                int ny = cy + dy;
+                int nx = cx + dx;
+
+                int win_h = y_end - y_start;
+                int win_w = x_end - x_start;
+
+                if (ny >= 0 && ny < win_h && nx >= 0 && nx < win_w)
+                {
+                    if (!visited[ny][nx])
+                    {
+                        float val = raw_heatmap[(y_start + ny) * m_out_width_hm + (x_start + nx)];
+                        if (val > threshold)
+                        {
+                            visited[ny][nx] = true;
+                            queue[tail++] = {ny, nx};
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Compute Weighted Centroid of the extracted blob
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    double total_mass = 0.0;
+    for (int i = 0; i < tail; ++i)
+    {
+        int cy = queue[i].first;
+        int cx = queue[i].second;
+        int global_y = y_start + cy;
+        int global_x = x_start + cx;
+        float val = raw_heatmap[global_y * m_out_width_hm + global_x];
+        sum_x += global_x * val;
+        sum_y += global_y * val;
+        total_mass += val;
+    }
+
+    if (total_mass > 1e-6)
+    {
+        *out_x = (int)std::round(sum_x / total_mass);
+        *out_y = (int)std::round(sum_y / total_mass);
+    }
+    else
+    {
+        *out_x = max_x;
+        *out_y = max_y;
+    }
 }

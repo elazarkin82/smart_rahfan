@@ -50,10 +50,10 @@ private:
     float m_max_crop;
     bool m_quality_enabled;
 
-    // Pre-allocated buffers to prevent runtime heap allocation
-    uchar* m_ref_stack_buf;
-    uchar* m_search_buf;
-    float* m_heatmap_buf;
+    // Pre-allocated buffers to prevent runtime heap allocation (MISRA-compliant fixed-size arrays)
+    uchar m_ref_stack_buf[MAX_STACK_TARGET_SIZE * MAX_STACK_TARGET_SIZE * MAX_STACK_LAYERS];
+    uchar m_search_buf[MAX_STACK_TARGET_SIZE * MAX_STACK_TARGET_SIZE];
+    float m_heatmap_buf[MAX_HEATMAP_PXL_SIZE * MAX_HEATMAP_PXL_SIZE];
     void* m_template_features_buf;
     int m_template_features_size;
     rknn_tensor_type m_template_features_type;

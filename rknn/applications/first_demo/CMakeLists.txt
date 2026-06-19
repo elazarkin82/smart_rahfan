@@ -72,6 +72,11 @@ else()
     message(STATUS "[CMake] Using simple CPU single-threaded resizing")
 endif()
 
+# Max limits definitions for MISRA-compliant static buffer allocation
+set(MAX_HEATMAP_PXL_SIZE 256 CACHE STRING "Maximum heatmap width and height for pre-allocation")
+set(MAX_STACK_LAYERS 64 CACHE STRING "Maximum reference stack layers for pre-allocation")
+set(MAX_STACK_TARGET_SIZE 256 CACHE STRING "Maximum reference stack width and height for pre-allocation")
+
 # Define target tracking demo executable
 add_executable(first_demo
     src/main.cpp
@@ -79,6 +84,12 @@ add_executable(first_demo
     src/core/CameraCapture.cpp
     src/core/TrackerService.cpp
     src/core/WebServer.cpp
+)
+
+target_compile_definitions(first_demo PRIVATE
+    MAX_HEATMAP_PXL_SIZE=${MAX_HEATMAP_PXL_SIZE}
+    MAX_STACK_LAYERS=${MAX_STACK_LAYERS}
+    MAX_STACK_TARGET_SIZE=${MAX_STACK_TARGET_SIZE}
 )
 
 # Apply compile definitions based on selected Resize Mode
