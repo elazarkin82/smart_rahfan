@@ -8,6 +8,10 @@
 
 typedef unsigned char uchar;
 
+#ifndef MAX_STACK_LAYERS
+#define MAX_STACK_LAYERS 64
+#endif
+
 class WebServer
 {
 public:
@@ -55,8 +59,8 @@ private:
     unsigned long m_jpeg_size;
 
     // Stack layer JPEGs cache
-    uchar* m_stack_jpeg_bufs[16];
-    unsigned long m_stack_jpeg_sizes[16];
+    uchar* m_stack_jpeg_bufs[MAX_STACK_LAYERS];
+    unsigned long m_stack_jpeg_sizes[MAX_STACK_LAYERS];
 
     // Helper compression functions
     void compress_gray_to_jpeg(const uchar* gray_buf, int w, int h, uchar* dest_buf, unsigned long* dest_size);

@@ -217,7 +217,15 @@ const char* INDEX_HTML =
 "    coordsInfo.innerText = `Selected target coordinates: X=${x.toFixed(3)}, Y=${y.toFixed(3)}`;\n"
 "    \n"
 "    fetch(`/command?cmd=CHOOSE_TARGET&val=${x.toFixed(3)},${y.toFixed(3)}`)\n"
-"        .then(res => console.log('Command sent:', res.status));\n"
+"        .then(res => {\n"
+"            console.log('Command sent:', res.status);\n"
+"            currentStackIdx = 0;\n"
+"            const slider = document.getElementById('stackSlider');\n"
+"            if (slider) {\n"
+"                slider.value = 0;\n"
+"            }\n"
+"            setTimeout(updateStackView, 200);\n"
+"        });\n"
 "});\n"
 "\n"
 "function updateConfig() {\n"
@@ -240,13 +248,17 @@ const char* INDEX_HTML =
 "let cameraW = 640;\n"
 "let cameraH = 480;\n"
 "let currentStackIdx = 0;\n"
+"let stackLayersCount = 16;\n"
 "\n"
 "function resetTarget() {\n"
 "    fetch('/command?cmd=RESET_TARGET')\n"
 "        .then(res => {\n"
 "            coordsInfo.innerText = 'Click to initialize tracker';\n"
 "            currentStackIdx = 0;\n"
-"            document.getElementById('stackSlider').value = 0;\n"
+"            const slider = document.getElementById('stackSlider');\n"
+"            if (slider) {\n"
+"                slider.value = 0;\n"
+"            }\n"
 "            updateStackView();\n"
 "            alert('Target cleared!');\n"
 "        });\n"
@@ -260,12 +272,15 @@ const char* INDEX_HTML =
 "function stepStack(dir) {\n"
 "    currentStackIdx += dir;\n"
 "    if (currentStackIdx < 0) {\n"
-"        currentStackIdx = 15;\n"
+"        currentStackIdx = stackLayersCount - 1;\n"
 "    }\n"
-"    if (currentStackIdx > 15) {\n"
+"    if (currentStackIdx >= stackLayersCount) {\n"
 "        currentStackIdx = 0;\n"
 "    }\n"
-"    document.getElementById('stackSlider').value = currentStackIdx;\n"
+"    const slider = document.getElementById('stackSlider');\n"
+"    if (slider) {\n"
+"        slider.value = currentStackIdx;\n"
+"    }\n"
 "    updateStackView();\n"
 "}\n"
 "\n"
@@ -278,7 +293,8 @@ const char* INDEX_HTML =
 "function updateStackLabel() {\n"
 "    const max_sz = Math.min(cameraW, cameraH);\n"
 "    const min_sz = 16;\n"
-"    const sz = Math.round(max_sz - (currentStackIdx * (max_sz - min_sz) / 15));\n"
+"    const denom = Math.max(1, stackLayersCount - 1);\n"
+"    const sz = Math.round(max_sz - (currentStackIdx * (max_sz - min_sz) / denom));\n"
 "    document.getElementById('stackInfo').innerText = `Layer ${currentStackIdx} (Crop: ${sz}x${sz})`;\n"
 "}\n"
 "\n"
@@ -296,12 +312,29 @@ const char* INDEX_HTML =
 "    }\n"
 "}\n"
 "\n"
+"function parseStackLayersFromStatus(statusText) {\n"
+"    const lines = statusText.split('\\n');\n"
+"    for (let i = 0; i < lines.length; i++) {\n"
+"        if (lines[i].startsWith('stack_layers=')) {\n"
+"            const val = parseInt(lines[i].split('=')[1]);\n"
+"            if (!isNaN(val) && val > 0) {\n"
+"                stackLayersCount = val;\n"
+"                const slider = document.getElementById('stackSlider');\n"
+"                if (slider) {\n"
+"                    slider.max = stackLayersCount - 1;\n"
+"                }\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"}\n"
+"\n"
 "function fetchStatus() {\n"
 "    fetch('/status')\n"
 "        .then(res => res.text())\n"
 "        .then(text => {\n"
 "            document.getElementById('statusPre').innerText = text;\n"
 "            parseResolutionFromStatus(text);\n"
+"            parseStackLayersFromStatus(text);\n"
 "            updateStackLabel();\n"
 "        });\n"
 "}\n"
@@ -585,7 +618,7 @@ public:
             }
         }
 
-        if (idx < 0 || idx >= 16)
+        if (idx < 0 || idx >= MAX_STACK_LAYERS)
         {
             idx = 0;
         }
@@ -641,13 +674,13 @@ WebServer::WebServer(int port)
     m_heatmap_jpeg_size = 0;
     memset(m_heatmap_rgb_buf, 0, 256 * 256 * 3);
 
-    for (i = 0; i < 16; ++i)
+    for (i = 0; i < MAX_STACK_LAYERS; ++i)
     {
         m_stack_jpeg_bufs[i] = (uchar*)malloc(16384);
         m_stack_jpeg_sizes[i] = 0;
     }
 
-    update_stack(NULL, 64, 64, 16);
+    update_stack(NULL, 64, 64, MAX_STACK_LAYERS);
 
     snprintf(port_str, sizeof(port_str), "%d", port);
 
@@ -681,7 +714,7 @@ WebServer::~WebServer()
     free(m_heatmap_rgb_buf);
     free(m_heatmap_jpeg_buf);
 
-    for (i = 0; i < 16; ++i)
+    for (i = 0; i < MAX_STACK_LAYERS; ++i)
     {
         free(m_stack_jpeg_bufs[i]);
     }
@@ -973,10 +1006,12 @@ void WebServer::update_stack(const uchar* stack, int w, int h, int c)
 
     std::lock_guard<std::mutex> lock(m_mutex);
 
+    int layers = std::min(c, (int)MAX_STACK_LAYERS);
+
     if (stack != NULL)
     {
         temp_planar = (uchar*)malloc(w * h);
-        for (i = 0; i < c; ++i)
+        for (i = 0; i < layers; ++i)
         {
             for (y = 0; y < h; ++y)
             {
@@ -988,22 +1023,31 @@ void WebServer::update_stack(const uchar* stack, int w, int h, int c)
             compress_gray_to_jpeg(temp_planar, w, h, m_stack_jpeg_bufs[i], &m_stack_jpeg_sizes[i]);
         }
         free(temp_planar);
+
+        for (i = layers; i < MAX_STACK_LAYERS; ++i)
+        {
+            m_stack_jpeg_sizes[i] = 0;
+        }
     }
     else
     {
         temp_black = (uchar*)calloc(w * h, 1);
-        for (i = 0; i < 16; ++i)
+        for (i = 0; i < MAX_STACK_LAYERS; ++i)
         {
             compress_gray_to_jpeg(temp_black, w, h, m_stack_jpeg_bufs[i], &m_stack_jpeg_sizes[i]);
         }
         free(temp_black);
     }
+
+    char layers_str[16];
+    snprintf(layers_str, sizeof(layers_str), "%d", layers);
+    StatusObject::instance()->update("stack_layers", layers_str);
 }
 
 void WebServer::get_stack_layer(int idx, const uchar** jpeg_dest, unsigned long* jpeg_len)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (idx >= 0 && idx < 16)
+    if (idx >= 0 && idx < MAX_STACK_LAYERS)
     {
         *jpeg_dest = m_stack_jpeg_bufs[idx];
         *jpeg_len = m_stack_jpeg_sizes[idx];
