@@ -6,4 +6,4 @@ EXTRA_USERS_PARAMS = "\
     userdel radxa; \
 "
 
-IMAGE_INSTALL:append = " rknpu2"
+IMAGE_INSTALL:append = " rknpu2 rockchip-librga libgomp"

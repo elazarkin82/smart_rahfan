@@ -122,3 +122,26 @@ target_link_libraries(first_demo PRIVATE
 if(RESIZE_MODE STREQUAL "OMP" AND OpenMP_CXX_FOUND)
     target_link_libraries(first_demo PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+# Standalone Subgraph RKNN Tester target
+add_executable(rknn_tester
+    src/tester/rknn_tester.cpp
+)
+
+target_compile_definitions(rknn_tester PRIVATE
+    MAX_HEATMAP_PXL_SIZE=${MAX_HEATMAP_PXL_SIZE}
+    MAX_STACK_LAYERS=${MAX_STACK_LAYERS}
+    MAX_STACK_TARGET_SIZE=${MAX_STACK_TARGET_SIZE}
+)
+
+target_include_directories(rknn_tester PRIVATE
+    include
+    ${JPEG_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../docker/rknn-toolkit2/rknpu2/runtime/Linux/librknn_api/include
+)
+
+target_link_libraries(rknn_tester PRIVATE
+    ${RKNNRT_LIB}
+    Threads::Threads
+    dl
+)

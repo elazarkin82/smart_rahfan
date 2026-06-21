@@ -76,11 +76,15 @@ def main():
                 spec_shape = [1] + list(inp["shape"])
                 input_specs.append(tf.TensorSpec(spec_shape, tf.float32, name=inp["name"]))
                 
-            input_names = [inp["name"] for inp in config["inputs"]]
+            nchw_input_names = [inp["name"] for inp in config["inputs"] if inp.get("nchw", True)]
+            nchw_output_names = []
+            if "outputs" in config:
+                nchw_output_names = [out["name"] for out in config["outputs"] if out.get("nchw", True)]
             tf2onnx.convert.from_keras(
                 keras_model,
                 input_signature=tuple(input_specs),
-                inputs_as_nchw=input_names,
+                inputs_as_nchw=nchw_input_names,
+                outputs_as_nchw=nchw_output_names,
                 opset=13,
                 output_path=temp_onnx_path
             )
@@ -106,15 +110,22 @@ def main():
         temp_onnx_path = "./temp_tflite_model.onnx"
         try:
             import subprocess
-            input_names = [inp["name"] for inp in config["inputs"]]
-            inputs_as_nchw_str = ",".join(input_names)
+            nchw_input_names = [inp["name"] for inp in config["inputs"] if inp.get("nchw", True)]
+            inputs_as_nchw_str = ",".join(nchw_input_names)
+            nchw_output_names = []
+            if "outputs" in config:
+                nchw_output_names = [out["name"] for out in config["outputs"] if out.get("nchw", True)]
+            outputs_as_nchw_str = ",".join(nchw_output_names)
             cmd = [
                 sys.executable, "-m", "tf2onnx.convert",
                 "--tflite", tflite_path,
                 "--output", temp_onnx_path,
-                "--inputs-as-nchw", inputs_as_nchw_str,
                 "--opset", "13"
             ]
+            if nchw_input_names:
+                cmd.extend(["--inputs-as-nchw", inputs_as_nchw_str])
+            if nchw_output_names:
+                cmd.extend(["--outputs-as-nchw", outputs_as_nchw_str])
             print(f"Running command: {' '.join(cmd)}")
             subprocess.run(cmd, check=True)
             print("[SUCCESS] TFLite model successfully converted to ONNX.")
@@ -203,7 +214,10 @@ def main():
     expanded_std_values = []
     for i, inp in enumerate(config["inputs"]):
         name = inp["name"]
-        chan_size = onnx_input_channels.get(name, config_input_channels.get(name, 1))
+        if not inp.get("nchw", True):
+            chan_size = inp["shape"][-1]
+        else:
+            chan_size = onnx_input_channels.get(name, config_input_channels.get(name, 1))
         m_list = mean_vals[i] if i < len(mean_vals) else mean_vals[0]
         s_list = std_vals[i] if i < len(std_vals) else std_vals[0]
         
@@ -238,7 +252,7 @@ def main():
             print(f"--> [Shape Adjust] Prepending batch dimension 1 to input '{name}' (shape: {shape} -> {[1] + shape}) to match ONNX rank {expected_rank}")
             shape = [1] + shape
         # Transpose NHWC [1, H, W, C] to NCHW [1, C, H, W] for ONNX model to match NCHW layout
-        if onnx_path and len(shape) == 4:
+        if onnx_path and len(shape) == 4 and inp.get("nchw", True):
             print(f"--> [Shape Transpose] Transposing shape for ONNX NCHW layout: {shape} -> {[shape[0], shape[3], shape[1], shape[2]]}")
             shape = [shape[0], shape[3], shape[1], shape[2]]
         input_shapes.append(shape)

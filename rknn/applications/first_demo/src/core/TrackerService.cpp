@@ -202,17 +202,46 @@ TrackerService::TrackerService(const char* template_path, const char* frame_path
         rknn_query(m_ctx_frame, RKNN_QUERY_OUTPUT_ATTR, &frame_out_attrs[1], sizeof(rknn_tensor_attr));
     }
 
-    // Keep shapes
-    m_in_height_ref = template_in_attrs[0].dims[1];
-    m_in_width_ref = template_in_attrs[0].dims[2];
-    m_in_channels_ref = template_in_attrs[0].dims[3];
+    // Keep shapes (handle NCHW vs NHWC layouts dynamically based on channel position)
+    // Reference stack input has 2 channels
+    if (template_in_attrs[0].dims[1] == 2)
+    {
+        m_in_height_ref = template_in_attrs[0].dims[2];
+        m_in_width_ref = template_in_attrs[0].dims[3];
+        m_in_channels_ref = template_in_attrs[0].dims[1];
+    }
+    else
+    {
+        m_in_height_ref = template_in_attrs[0].dims[1];
+        m_in_width_ref = template_in_attrs[0].dims[2];
+        m_in_channels_ref = template_in_attrs[0].dims[3];
+    }
 
-    m_in_height_search = frame_in_attrs[0].dims[1];
-    m_in_width_search = frame_in_attrs[0].dims[2];
-    m_in_channels_search = frame_in_attrs[0].dims[3];
+    // Search frame input has 1 channel
+    if (frame_in_attrs[0].dims[1] == 1)
+    {
+        m_in_height_search = frame_in_attrs[0].dims[2];
+        m_in_width_search = frame_in_attrs[0].dims[3];
+        m_in_channels_search = frame_in_attrs[0].dims[1];
+    }
+    else
+    {
+        m_in_height_search = frame_in_attrs[0].dims[1];
+        m_in_width_search = frame_in_attrs[0].dims[2];
+        m_in_channels_search = frame_in_attrs[0].dims[3];
+    }
 
-    m_out_height_hm = frame_out_attrs[0].dims[1];
-    m_out_width_hm = frame_out_attrs[0].dims[2];
+    // Heatmap output has 1 channel
+    if (frame_out_attrs[0].dims[1] == 1)
+    {
+        m_out_height_hm = frame_out_attrs[0].dims[2];
+        m_out_width_hm = frame_out_attrs[0].dims[3];
+    }
+    else
+    {
+        m_out_height_hm = frame_out_attrs[0].dims[1];
+        m_out_width_hm = frame_out_attrs[0].dims[2];
+    }
 
     m_template_features_size = template_out_attrs[0].size;
     m_template_features_type = frame_in_attrs[1].type;

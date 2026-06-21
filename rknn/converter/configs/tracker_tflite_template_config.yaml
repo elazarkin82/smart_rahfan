@@ -33,3 +33,7 @@ quantization:
 inputs:
   - name: "reference_stack"
     shape: [128, 128, 2]
+
+outputs:
+  - name: "Identity"
+    nchw: true

@@ -17,3 +17,10 @@ PACKAGE_ARCH = "${MACHINE_ARCH}"
 inherit meson pkgconfig
 
 EXTRA_OEMESON = "-Dlibdrm=true"
+
+# Ensure that the unversioned .so symlink is packaged in the main package
+# instead of the -dev package, resolving runtime dynamic loading / linking issues.
+FILES_SOLIBSDEV = ""
+FILES:${PN} += "${libdir}/librga.so"
+INSANE_SKIP:${PN} += "dev-so"
+
