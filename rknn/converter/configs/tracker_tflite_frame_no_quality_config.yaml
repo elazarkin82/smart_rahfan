@@ -33,8 +33,9 @@ quantization:
 # input_reference_target_encoder_ref_ue3_relu2_Relu6_0
 # input_reference_target_encoder_ref_alex_relu5_Relu_0
 # input_reference_target_encoder_ref_final_relu_Relu6_0
+# input_reference_target_encoder_ref_downscale1_relu_Relu6_0
 inputs:
   - name: "search_frame"
     shape: [256, 256, 1]
-  - name: "input_reference_target_encoder_ref_final_relu_Relu6_0"
-    shape: [16, 16, 64]
+  - name: "input_reference_target_encoder_ref_downscale1_relu_Relu6_0"
+    shape: [8, 8, 64]
