@@ -45,17 +45,17 @@ echo "[TF ENV] TRACKER_GPU_MEMORY_LIMIT_MB=${TRACKER_GPU_MEMORY_LIMIT_MB}"
 # --train_mode joint: Trains both the backbone (via Soft-Argmax coordinate loss) and the quality head.
 # --loss_quality bce: Uses Binary Crossentropy for the quality branch.
 # --batch_size 32: Sets batch size for training.
-python3 tracker_model.py train \
-    --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 20 \
-    --lr 1e-3 \
-    --loss_quality bce \
-    --output outputs/tracker_coords.keras \
-    --init_keras_file outputs/tracker_coords.keras \
-    --best_train_loss_output outputs/tracker_coords_best_train_loss.keras \
-    --log_file outputs/train_coords.log \
-    --train_mode heatmap_only \
-    --batch_size 32
+#python3 tracker_model.py train \
+#    --dataset_dir dataset_generator/compiled \
+#    --num_of_epochs 20 \
+#    --lr 1e-3 \
+#    --loss_quality bce \
+#    --output outputs/tracker_coords.keras \
+#    --init_keras_file outputs/tracker_coords.keras \
+#    --best_train_loss_output outputs/tracker_coords_best_train_loss.keras \
+#    --log_file outputs/train_coords.log \
+#    --train_mode heatmap_only \
+#    --batch_size 32
     
 #    --dataset_cache_mode streaming
 
@@ -64,7 +64,7 @@ python3 tracker_model.py train \
     --num_of_epochs 10 \
     --lr 1e-4 \
     --loss_quality bce \
-    --output outputs/tracker_coords.keras \
+    --output outputs/tracker_coords_best_train_loss.keras \
     --init_keras_file outputs/tracker_coords.keras \
     --best_train_loss_output outputs/tracker_coords_best_train_loss.keras \
     --log_file outputs/train_coords.log \

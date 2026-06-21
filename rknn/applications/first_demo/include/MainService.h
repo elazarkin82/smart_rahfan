@@ -21,8 +21,8 @@ public:
         int width;
         int height;
         char rknn_template_model_path[256];
-        char rknn_frame_model_path[256];
-        char rknn_frame_no_quality_model_path[256];
+        char rknn_search_backbone_model_path[256];
+        char rknn_decoder_model_path[256];
         char quality_mode[64];
         float min_crop;
         float max_crop;

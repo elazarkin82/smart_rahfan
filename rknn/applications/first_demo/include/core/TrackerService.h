@@ -27,7 +27,8 @@ public:
 
 private:
     rknn_context m_ctx_template;
-    rknn_context m_ctx_frame;
+    rknn_context m_ctx_search_backbone;
+    rknn_context m_ctx_decoder;
     bool m_is_model_loaded;
     bool m_is_target_defined;
     TrackerCallback* m_callback;
@@ -50,14 +51,28 @@ private:
     float m_max_crop;
     bool m_quality_enabled;
 
+    // Resolved tensor indices
+    int m_idx_skip3;
+    int m_idx_search_features;
+    int m_idx_dec_corr;
+    int m_idx_dec_skip3;
+    int m_backbone_out_num;
+
+    // Resolved tensor formats
+    rknn_tensor_format m_fmt_skip3;
+    rknn_tensor_format m_fmt_search_features;
+    rknn_tensor_format m_fmt_template;
+
     // Pre-allocated buffers to prevent runtime heap allocation (MISRA-compliant fixed-size arrays)
     uchar m_ref_stack_buf[MAX_STACK_TARGET_SIZE * MAX_STACK_TARGET_SIZE * MAX_STACK_LAYERS];
     uchar m_search_buf[MAX_STACK_TARGET_SIZE * MAX_STACK_TARGET_SIZE];
     float m_heatmap_buf[MAX_HEATMAP_PXL_SIZE * MAX_HEATMAP_PXL_SIZE];
-    void* m_template_features_buf;
-    int m_template_features_size;
-    rknn_tensor_type m_template_features_type;
-    rknn_tensor_format m_template_features_fmt;
+    float m_template_features[64 * 8 * 8];
+    float m_template_features_nchw[64 * 8 * 8];
+    float m_search_features_nchw[64 * 16 * 16];
+    float m_corr_out_buf[64 * 16 * 16];
+    float m_corr_out_nhwc[64 * 16 * 16];
+    float m_skip3_nhwc[32 * 32 * 32];
 
     // Resizing helpers
     void resize_bilinear_gray(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
@@ -87,7 +102,7 @@ private:
     void decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y);
 
 public:
-    TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop, bool quality_enabled);
+    TrackerService(const char* template_path, const char* search_backbone_path, const char* decoder_path, float min_crop, float max_crop, bool quality_enabled);
     ~TrackerService();
 
     bool is_model_loaded() const;

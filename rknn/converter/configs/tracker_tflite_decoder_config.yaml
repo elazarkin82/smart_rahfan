@@ -1,0 +1,41 @@
+# RKNN Model Conversion Configuration (TFLite - Decoder Subgraph)
+
+model:
+  name: "tracker_decoder_tflite"
+  tflite_model_path: "../../training/tracker/tracker_ver5/outputs/tracker_decoder.tflite"
+  output_rknn_path: "./outputs/tracker_decoder.rknn"
+
+rknn_config:
+  # Target platform for Radxa Zero 3 (RK3566)
+  target_platform: "rk3566"
+  
+  # Optimization level (0, 1, 2, 3). 3 is the highest optimization level.
+  optimization_level: 3
+  
+  # Normalization parameters (mean and std values) for inputs.
+  mean_values: [[0], [0]]
+  std_values: [[1], [1]]
+
+quantization:
+  # Enable INT8 quantization. If false, model compiles in FP16.
+  do_quantization: false
+  
+  # Path to the calibration dataset descriptor file
+  dataset_path: "./configs/dataset_frame.txt"
+  
+  # Quantization algorithm: 'normal' or 'mmse' (MMSE can provide better accuracy for some models)
+  quantized_algorithm: "normal"
+  
+  # Quantized dtype: 'asymmetric_quantized-8' (INT8)
+  quantized_dtype: "w8a8"
+
+# Input tensor details
+inputs:
+  - name: "corr_features"
+    shape: [16, 16, 64]
+  - name: "skip3"
+    shape: [32, 32, 32]
+
+outputs:
+  - name: "Identity"
+    nchw: false
