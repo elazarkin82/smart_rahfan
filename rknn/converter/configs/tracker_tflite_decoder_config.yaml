@@ -31,9 +31,9 @@ quantization:
 
 # Input tensor details
 inputs:
-  - name: "corr_features"
+  - name: "input_depthwise_correlation_fusion_transpose_2_0"
     shape: [16, 16, 64]
-  - name: "skip3"
+  - name: "input_search_feature_extractor_sb_dense3_relu_Relu_0"
     shape: [32, 32, 32]
 
 outputs:
