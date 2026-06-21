@@ -6,6 +6,7 @@ import numpy as np
 import configparser
 import h5py
 import psutil
+import json
 
 
 def configure_tensorflow_gpu_memory():
@@ -219,13 +220,17 @@ def load_model_config(config_path="model.conf"):
     
     dec_type = config.get("Decoder", "type", fallback="fpn_add")
     heatmap_pxl_size = config.getint("Decoder", "heatmap_pxl_size", fallback=64)
+    heatmap_output_source = config.get("Decoder", "heatmap_output_source", fallback="pre_threshold")
     
     hm_loss_default = config.get("Loss", "heatmap_loss_default", fallback="dbsz_relu")
+    soft_argmax_beta = config.getfloat("Loss", "soft_argmax_beta", fallback=15.0)
     
     norm_type = config.get("Normalization", "type", fallback="group_norm")
 
     stack_layers      = config.getint("Stack", "stack_layers",      fallback=16)
     stack_target_size = config.getint("Stack", "stack_target_size", fallback=64)
+    reference_feature_size = config.getint("Stack", "reference_feature_size", fallback=8)
+    reference_downscale = config.get("Stack", "reference_downscale", fallback="auto")
 
     return {
         "reference_backbone": ref_backbone,
@@ -234,10 +239,14 @@ def load_model_config(config_path="model.conf"):
         "attention_mechanism": attn_mech,
         "decoder_type": dec_type,
         "heatmap_pxl_size": heatmap_pxl_size,
+        "heatmap_output_source": heatmap_output_source,
         "heatmap_loss_default": hm_loss_default,
+        "soft_argmax_beta": soft_argmax_beta,
         "normalization_type": norm_type,
         "stack_layers": stack_layers,
         "stack_target_size": stack_target_size,
+        "reference_feature_size": reference_feature_size,
+        "reference_downscale": reference_downscale,
     }
 
 def check_and_create_default_config(config_path="model.conf"):
@@ -249,6 +258,7 @@ def check_and_create_default_config(config_path="model.conf"):
 [Backbone]
 # Reference Stack Backbone
 # Options:
+#   - alex_dense      : AlexNet-like dense Conv stem with larger early receptive fields.
 #   - mini_mnv2       : (Recommended) Compact MobileNetV2 with low channel widths (max 64), customized for 32x32 inputs.
 #   - mnv1            : Standard MobileNetV1 backbone.
 #   - mnv2            : Full MobileNetV2 backbone.
@@ -259,6 +269,7 @@ reference_backbone = mini_mnv2
 
 # Search Frame Backbone
 # Options:
+#   - alex_dense      : AlexNet-like dense Conv stem with larger early receptive fields.
 #   - mnv2_nano       : (Recommended) Highly optimized MobileNetV2 with capped channel widths (max 64) for low latency.
 #   - mnv1            : Standard MobileNetV1 backbone.
 #   - mnv2            : Full MobileNetV2 backbone.
@@ -291,10 +302,18 @@ type = fpn_add
 # Target resolution of the output heatmap (e.g. 16, 32, 64, 128, 256)
 heatmap_pxl_size = 64
 
+# Main model heatmap output used by training loss.
+# Options: raw, norm, pre_threshold, processed
+# processed keeps the legacy threshold+blur output; pre_threshold trains before ReLU+blur.
+heatmap_output_source = pre_threshold
+
 [Loss]
 # Default loss function for heatmap regression
 # Options: dbsz_relu, dbsz_soft, dbsz_hard, centernet_dice, focal_dice, adaptive_wing, mse
 heatmap_loss_default = dbsz_relu
+
+# Soft-argmax temperature for coordinate loss. Lower values give smoother gradients early in training.
+soft_argmax_beta = 15.0
 
 [Normalization]
 # Normalization Type
@@ -309,6 +328,13 @@ stack_layers = 16
 # Spatial size (px) of each reference stack frame.
 # Must match compiler.stack_target_size in dataset_generator/pipeline_config.json.
 stack_target_size = 64
+
+# Spatial size of reference encoder features used as depthwise-correlation weights.
+# Keep smaller than the search feature map, usually 8 when search bottleneck is 16.
+reference_feature_size = 8
+
+# Options: auto, conv, depthwise, avg_pool, max_pool
+reference_downscale = auto
 """
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(default_content)
@@ -364,9 +390,9 @@ def soft_argmax_2d(heatmap, beta=30.0):
     
     return tf.concat([pred_y, pred_x], axis=-1) # shape (B, 2)
 
-def coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality, c_bg=3.0):
+def coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality, c_bg=3.0, beta=15.0):
     # 1. Differentiable Soft-Argmax to extract coordinates from predicted heatmap
-    pred_coords_soft = soft_argmax_2d(pred_heatmap, beta=30.0)
+    pred_coords_soft = soft_argmax_2d(pred_heatmap, beta=beta)
     
     # 2. Scale both predicted and ground-truth coordinates to 256.0 space to compute Huber loss in pixel units
     huber = tf.keras.losses.Huber(delta=1.0, reduction=tf.keras.losses.Reduction.NONE)
@@ -500,9 +526,13 @@ class TargetTrackerVer5:
                 "attention_mechanism": "depthwise_corr",
                 "decoder_type": "fpn_add",
                 "heatmap_pxl_size": 64,
+                "heatmap_output_source": "pre_threshold",
                 "heatmap_loss_default": "dbsz_relu",
+                "soft_argmax_beta": 15.0,
                 "stack_layers": 16,
                 "stack_target_size": 64,
+                "reference_feature_size": 8,
+                "reference_downscale": "auto",
             }
 
         # Derive ref_shape from config unless explicitly overridden by the caller
@@ -535,6 +565,63 @@ class TargetTrackerVer5:
         if strides == 1 and in_channels == filters:
             x = layers.Add(name=f"{name_prefix}_add")([inputs, x])
             
+        return x
+
+    def _conv_norm_relu(self, inputs, filters, kernel_size, strides, name_prefix, relu6=False):
+        x = layers.Conv2D(filters, kernel_size, strides=strides, padding="same", use_bias=False, name=f"{name_prefix}_conv")(inputs)
+        x = _GroupNormalization(filters, name=f"{name_prefix}_gn")(x)
+        if relu6:
+            return layers.ReLU(6.0, name=f"{name_prefix}_relu")(x)
+        return layers.ReLU(name=f"{name_prefix}_relu")(x)
+
+    def _downscale_reference_features(self, x, bb_type):
+        target_size = int(self.config.get("reference_feature_size", 8))
+        if target_size <= 0:
+            return x
+
+        h = x.shape[1]
+        w = x.shape[2]
+        if h is None or w is None or int(h) != int(w):
+            raise ValueError("Reference feature map must have a known square spatial shape for configured downscale.")
+
+        curr_size = int(h)
+        if curr_size < target_size:
+            raise ValueError(f"reference_feature_size={target_size} is larger than current reference feature size {curr_size}.")
+
+        mode = self.config.get("reference_downscale", "auto")
+        if mode == "auto":
+            mode = "depthwise" if bb_type in ("mini_mnv2", "mnv1", "mnv2") else "conv"
+
+        stage = 1
+        while curr_size > target_size:
+            next_size = curr_size // 2
+            if curr_size % 2 != 0 or next_size < target_size:
+                raise ValueError(
+                    f"reference_feature_size={target_size} is not reachable from {curr_size} "
+                    "using repeated stride-2 downscale."
+                )
+
+            filters = int(x.shape[-1])
+            prefix = f"ref_downscale{stage}"
+            if mode == "avg_pool":
+                x = layers.AveragePooling2D(pool_size=2, strides=2, name=f"{prefix}_avg_pool")(x)
+            elif mode == "max_pool":
+                x = layers.MaxPooling2D(pool_size=2, strides=2, name=f"{prefix}_max_pool")(x)
+            elif mode == "depthwise":
+                x = layers.DepthwiseConv2D((3, 3), strides=2, padding="same", use_bias=False, name=f"{prefix}_dw")(x)
+                x = _GroupNormalization(filters, name=f"{prefix}_dw_gn")(x)
+                x = layers.ReLU(6.0, name=f"{prefix}_dw_relu")(x)
+                x = layers.Conv2D(filters, (1, 1), padding="same", use_bias=False, name=f"{prefix}_pw")(x)
+                x = _GroupNormalization(filters, name=f"{prefix}_pw_gn")(x)
+                x = layers.ReLU(6.0, name=f"{prefix}_pw_relu")(x)
+            elif mode == "conv":
+                x = self._conv_norm_relu(x, filters, (3, 3), 2, prefix, relu6=True)
+            else:
+                raise ValueError(f"Unknown reference_downscale mode: {mode}")
+
+            curr_size = next_size
+            stage += 1
+
         return x
 
     def _create_search_backbone(self):
@@ -589,6 +676,13 @@ class TargetTrackerVer5:
             x = layers.Conv2D(scale_filters(128), (3, 3), strides=1, padding="same", use_bias=False, name="sb_alex_conv5")(x4)
             x = _GroupNormalization(scale_filters(128), name="sb_alex_gn5")(x)
             x = layers.ReLU(name="sb_alex_relu5")(x)
+
+        elif bb_type == "alex_dense":
+            x1 = self._conv_norm_relu(inputs, scale_filters(16), (7, 7), 2, "sb_dense1")
+            x2 = self._conv_norm_relu(x1, scale_filters(32), (5, 5), 2, "sb_dense2")
+            x3 = self._conv_norm_relu(x2, scale_filters(64), (3, 3), 2, "sb_dense3")
+            x4 = self._conv_norm_relu(x3, scale_filters(128), (3, 3), 2, "sb_dense4")
+            x = self._conv_norm_relu(x4, scale_filters(128), (3, 3), 1, "sb_dense5")
 
         elif bb_type == "mnv1":
             # MobileNetV1 style with skip connections
@@ -770,6 +864,14 @@ class TargetTrackerVer5:
             x = _GroupNormalization(out_channels, name="ref_alex_gn5")(x)
             x = layers.ReLU(name="ref_alex_relu5")(x)
             
+        elif bb_type == "alex_dense":
+            x = self._conv_norm_relu(x, scale_filters(16), (7, 7), 2, "ref_dense1")
+            x = self._conv_norm_relu(x, scale_filters(32), (5, 5), 2, "ref_dense2")
+            x = self._conv_norm_relu(x, scale_filters(64), (3, 3), 2, "ref_dense3")
+            out_channels = scale_filters(128)
+            x = self._conv_norm_relu(x, out_channels, (3, 3), 1, "ref_dense4")
+            x = self._conv_norm_relu(x, out_channels, (3, 3), 1, "ref_dense5")
+            
         elif bb_type == "mini_mnv2":
             # For 64x64 input, stride=2 on init conv to get 8x8 output (strides 2 * 2 * 2 = 8)
             x = layers.Conv2D(scale_filters(16), (3, 3), strides=2, padding="same", use_bias=False, name="ref_init_conv")(x)
@@ -888,6 +990,7 @@ class TargetTrackerVer5:
             x = _GroupNormalization(128, name="ref_final_gn")(x)
             x = layers.ReLU(6.0, name="ref_final_relu")(x)
             
+        x = self._downscale_reference_features(x, bb_type)
         return models.Model(inputs, x, name="reference_target_encoder")
 
     def create_model(self):
@@ -1032,9 +1135,9 @@ class TargetTrackerVer5:
         # Final prediction heatmap
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
         output_heatmap_norm = HeatmapNormalization(name="predicted_heatmap_norm")(output_heatmap_raw)
-        thresholded = layers.Rescaling(scale=2.0, offset=-1.0, name="heatmap_threshold_rescale")(output_heatmap_norm)
-        thresholded = layers.ReLU(name="heatmap_threshold_relu")(thresholded)
-        output_heatmap = layers.DepthwiseConv2D(
+        output_heatmap_pre_threshold = layers.Rescaling(scale=2.0, offset=-1.0, name="heatmap_threshold_rescale")(output_heatmap_norm)
+        thresholded = layers.ReLU(name="heatmap_threshold_relu")(output_heatmap_pre_threshold)
+        output_heatmap_processed = layers.DepthwiseConv2D(
             kernel_size=(5, 5),
             strides=(1, 1),
             padding="same",
@@ -1042,20 +1145,34 @@ class TargetTrackerVer5:
             use_bias=False,
             depthwise_initializer=tf.keras.initializers.Constant(1.0 / 25.0),
             trainable=False,
-            name="predicted_heatmap"
+            name="predicted_heatmap_processed"
         )(thresholded)
+
+        heatmap_output_source = self.config.get("heatmap_output_source", "pre_threshold")
+        if heatmap_output_source == "raw":
+            heatmap_for_loss = output_heatmap_raw
+        elif heatmap_output_source == "norm":
+            heatmap_for_loss = output_heatmap_norm
+        elif heatmap_output_source == "pre_threshold":
+            heatmap_for_loss = output_heatmap_pre_threshold
+        elif heatmap_output_source == "processed":
+            heatmap_for_loss = output_heatmap_processed
+        else:
+            raise ValueError(f"Unknown heatmap_output_source: {heatmap_output_source}")
+
+        output_heatmap = layers.Activation("linear", name="predicted_heatmap")(heatmap_for_loss)
         
         # 4. Heatmap-Guided Classification Branch
         ds_factor = heatmap_pxl_size // 16
         if ds_factor >= 2:
-            hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap)
+            hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap_processed)
             pool_size = ds_factor // 2
             if pool_size > 1:
                 hm_pool = layers.AveragePooling2D(pool_size=pool_size, name="quality_hm_pool")(hm_feat)
             else:
                 hm_pool = hm_feat
         else:
-            hm_feat = layers.Conv2D(8, (3, 3), strides=1, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap)
+            hm_feat = layers.Conv2D(8, (3, 3), strides=1, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap_processed)
             hm_pool = hm_feat
             
         q_fused = layers.Concatenate(axis=-1, name="quality_fusion")([fused_features, hm_pool])
@@ -1106,6 +1223,64 @@ class TargetTrackerVer5:
         folded_model.save(folded_output_path)
         print(f"Saved folded model to {folded_output_path}")
 
+    @staticmethod
+    def _shape_to_list(shape):
+        if hasattr(shape, "as_list"):
+            shape = shape.as_list()
+        return [None if dim is None else int(dim) for dim in shape]
+
+    def get_runtime_config(self, pipeline_config_path="dataset_generator/pipeline_config.json"):
+        if self.model is None:
+            raise ValueError("Model is not built yet.")
+
+        compiler_cfg = {}
+        if pipeline_config_path and os.path.exists(pipeline_config_path):
+            with open(pipeline_config_path, "r", encoding="utf-8") as f:
+                compiler_cfg = json.load(f).get("compiler", {})
+
+        ref_encoder = self.model.get_layer("reference_target_encoder")
+        processed_hm_layer = self.model.get_layer("predicted_heatmap_processed")
+
+        return {
+            "runtime_config_version": 1,
+            "model_name": self.model.name,
+            "model_config": dict(self.config),
+            "model_input": {
+                "reference_stack_shape": list(self.ref_shape),
+                "search_frame_shape": list(self.search_shape),
+                "heatmap_output_shape": self._shape_to_list(self.model.outputs[0].shape[1:]),
+                "processed_heatmap_shape": self._shape_to_list(processed_hm_layer.output.shape[1:]),
+                "reference_feature_shape": self._shape_to_list(ref_encoder.output_shape[1:]),
+            },
+            "preprocessing": {
+                "search_crop_mode": "center_square",
+                "search_crop_ratio": 1.0,
+                "search_resize": "bilinear",
+                "reference_resize": "bilinear",
+                "input_range": "0_1_training_uint8_rknn",
+            },
+            "reference_stack": {
+                "stack_layers": self.config.get("stack_layers"),
+                "stack_target_size": self.config.get("stack_target_size"),
+                "crop_min_size": compiler_cfg.get("crop_min_size"),
+                "crop_max_size": compiler_cfg.get("crop_max_size"),
+            },
+            "postprocessing": {
+                "model_heatmap_output": self.config.get("heatmap_output_source", "pre_threshold"),
+                "processed_heatmap_tensor": "predicted_heatmap_processed",
+                "decode": "argmax_or_local_centroid",
+                "coordinate_scale": 256,
+            },
+        }
+
+    def save_runtime_config(self, output_path, pipeline_config_path="dataset_generator/pipeline_config.json"):
+        if os.path.dirname(output_path):
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(self.get_runtime_config(pipeline_config_path), f, indent=2)
+            f.write("\n")
+        print(f"Saved runtime config to {output_path}")
+
     def log(self, message, log_file=None):
         import tqdm
         tqdm.tqdm.write(message)
@@ -1132,7 +1307,12 @@ class TargetTrackerVer5:
             if train_mode == "quality_only":
                 loss_heatmap = tf.constant(0.0, dtype=tf.float32)
             else:
-                loss_heatmap = coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality)
+                loss_heatmap = coordinate_distance_loss(
+                    gt_coords,
+                    pred_heatmap,
+                    gt_quality,
+                    beta=self.config.get("soft_argmax_beta", 15.0)
+                )
                 
             if train_mode == "heatmap_only":
                 loss_quality = tf.constant(0.0, dtype=tf.float32)
@@ -1205,7 +1385,12 @@ class TargetTrackerVer5:
                 if train_mode == "quality_only":
                     loss_heatmap = tf.constant(0.0, dtype=tf.float32)
                 else:
-                    loss_heatmap = coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality)
+                    loss_heatmap = coordinate_distance_loss(
+                        gt_coords,
+                        pred_heatmap,
+                        gt_quality,
+                        beta=self.config.get("soft_argmax_beta", 15.0)
+                    )
                     
                 if train_mode == "heatmap_only":
                     loss_quality = tf.constant(0.0, dtype=tf.float32)
@@ -1545,6 +1730,7 @@ def main():
     parser.add_argument("--best_train_loss_output", type=str, default="outputs/tracker_best_train.keras")
     parser.add_argument("--init_keras_file", type=str, default=None, help="Path to initial model to resume from")
     parser.add_argument("--log_file", type=str, default="outputs/train.log")
+    parser.add_argument("--runtime_config_output", type=str, default="outputs/tracker_runtime_config.json", help="Path to write runtime preprocessing/shapes config JSON")
     
     args = parser.parse_args()
     
@@ -1594,6 +1780,9 @@ def main():
             best_train_loss_output=args.best_train_loss_output,
             log_file=args.log_file
         )
+
+        if args.runtime_config_output:
+            tracker.save_runtime_config(args.runtime_config_output)
 
 
 if __name__ == '__main__':

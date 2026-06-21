@@ -405,15 +405,9 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     t_start = std::chrono::steady_clock::now();
 
-    // 1. Resize incoming frame to search window size (conditional compile-time flags)
+    // 1. Crop the centered square search region, then resize to model input size.
     t_resize_start = std::chrono::steady_clock::now();
-#if defined(USE_RGA)
-    resize_rga(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
-#elif defined(USE_OMP)
-    resize_bilinear_omp(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
-#else
-    resize_bilinear_gray(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
-#endif
+    resize_center_square_bilinear_gray(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
     t_resize_end = std::chrono::steady_clock::now();
 
     // 2. Setup inputs
@@ -576,6 +570,75 @@ void TrackerService::resize_bilinear_gray(const uchar* src, int src_w, int src_h
             b = src[y_l * src_w + x_h];
             c = src[y_h * src_w + x_l];
             d = src[y_h * src_w + x_h];
+
+            dst[y * dst_w + x] = (uchar)(
+                a * (1.0f - x_weight) * (1.0f - y_weight) +
+                b * x_weight * (1.0f - y_weight) +
+                c * (1.0f - x_weight) * y_weight +
+                d * x_weight * y_weight
+            );
+        }
+    }
+}
+
+void TrackerService::resize_center_square_bilinear_gray(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h)
+{
+    int crop_size;
+    int x0, y0;
+    int x, y;
+    float x_ratio;
+    float y_ratio;
+    int x_l, y_l, x_h, y_h;
+    int sx_l, sx_h, sy_l, sy_h;
+    float x_weight, y_weight;
+    uchar a, b, c, d;
+
+    crop_size = std::min(src_w, src_h);
+    if (crop_size <= 0)
+    {
+        memset(dst, 0, (size_t)(dst_w * dst_h));
+        return;
+    }
+
+    x0 = (src_w - crop_size) / 2;
+    y0 = (src_h - crop_size) / 2;
+
+    x_ratio = ((float)(crop_size - 1)) / dst_w;
+    y_ratio = ((float)(crop_size - 1)) / dst_h;
+
+#if defined(USE_OMP)
+    #pragma omp parallel for schedule(dynamic)
+#endif
+    for (y = 0; y < dst_h; ++y)
+    {
+        for (x = 0; x < dst_w; ++x)
+        {
+            x_l = (int)(x_ratio * x);
+            y_l = (int)(y_ratio * y);
+            x_h = x_l + 1;
+            y_h = y_l + 1;
+
+            if (x_h >= crop_size)
+            {
+                x_h = crop_size - 1;
+            }
+            if (y_h >= crop_size)
+            {
+                y_h = crop_size - 1;
+            }
+
+            x_weight = (x_ratio * x) - x_l;
+            y_weight = (y_ratio * y) - y_l;
+
+            sx_l = x0 + x_l;
+            sx_h = x0 + x_h;
+            sy_l = y0 + y_l;
+            sy_h = y0 + y_h;
+
+            a = src[sy_l * src_w + sx_l];
+            b = src[sy_l * src_w + sx_h];
+            c = src[sy_h * src_w + sx_l];
+            d = src[sy_h * src_w + sx_h];
 
             dst[y * dst_w + x] = (uchar)(
                 a * (1.0f - x_weight) * (1.0f - y_weight) +

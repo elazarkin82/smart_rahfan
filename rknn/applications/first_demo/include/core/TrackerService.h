@@ -61,6 +61,7 @@ private:
 
     // Resizing helpers
     void resize_bilinear_gray(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
+    void resize_center_square_bilinear_gray(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
     void resize_nearest_gray(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
 #if defined(USE_RGA)
     void resize_rga(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
