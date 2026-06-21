@@ -56,6 +56,8 @@ python3 tracker_model.py train \
     --log_file outputs/train_coords.log \
     --train_mode heatmap_only \
     --batch_size 32
+    
+#    --dataset_cache_mode streaming
 
 python3 tracker_model.py train \
     --dataset_dir dataset_generator/compiled \

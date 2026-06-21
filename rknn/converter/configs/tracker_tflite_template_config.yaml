@@ -32,4 +32,4 @@ quantization:
 # Input tensor details
 inputs:
   - name: "reference_stack"
-    shape: [64, 64, 2]
+    shape: [128, 128, 2]

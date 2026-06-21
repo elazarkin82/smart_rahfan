@@ -2,7 +2,7 @@
 
 model:
   name: "tracker_ver4_tflite"
-  tflite_model_path: "../../training/tracker/tracker_ver4/outputs/tracker_coords_3.tflite"
+  tflite_model_path: "../../training/tracker/tracker_ver4/outputs/tracker_coords_fbn.tflite"
   output_rknn_path: "./outputs/tracker_tflite.rknn"
 
 rknn_config:
@@ -32,6 +32,6 @@ quantization:
 # Input tensor details
 inputs:
   - name: "reference_stack"
-    shape: [64, 64, 2]
+    shape: [128, 128, 2]
   - name: "search_frame"
     shape: [256, 256, 1]

@@ -35,7 +35,7 @@ KERAS_IN=outputs/tracker_coords_fbn.keras
 # Output: reference_target_encoder (1, 8, 8, 64)
 echo "[*] Exporting Part 1: Template Stack Subgraph..."
 python3 utils/convert_to_tflite_static.py \
-    --keras_in outputs/tracker_model_fbn.keras \
+    --keras_in ${KERAS_IN} \
     --tflite_out outputs/tracker_template.tflite \
     --input_tensors reference_stack \
     --output_tensors reference_target_encoder \
@@ -66,7 +66,17 @@ python3 utils/convert_to_tflite_static.py \
     --quant "$QUANT" \
     --qat
 
-# 3. Export Full Model Graph
+# 3. Export Full Model Graph QAT
+# Inputs: reference_stack (1, 64, 64, 16), search_frame (1, 256, 256, 1)
+# Outputs: predicted_heatmap, predicted_quality
+echo "[*] Exporting Full Model Graph..."
+python3 utils/convert_to_tflite_static.py \
+    --keras_in ${KERAS_IN} \
+    --tflite_out outputs/tracker_full_qat.tflite \
+    --quant "$QUANT" \
+    --qat
+    
+# 4. Export Full Model Graph
 # Inputs: reference_stack (1, 64, 64, 16), search_frame (1, 256, 256, 1)
 # Outputs: predicted_heatmap, predicted_quality
 echo "[*] Exporting Full Model Graph..."

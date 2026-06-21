@@ -64,7 +64,8 @@ class ModelInferenceVisualizer:
             self.quality_output_idx = None
             for detail in self.output_details:
                 shape = list(detail['shape'])
-                if 256 in shape:
+                # Map based on shape: heatmap has 4 dimensions [1, H, W, 1] with H, W > 1
+                if len(shape) == 4 and shape[1] > 1 and shape[2] > 1:
                     self.heatmap_output_idx = detail['index']
                 else:
                     self.quality_output_idx = detail['index']
