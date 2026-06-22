@@ -122,6 +122,18 @@
                 app:thumbTint="#00e6ff"
                 app:trackTint="#555555" />
 
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switch_experimental_prev_reference"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Experimental Prev-Frame Reference"
+                android:textColor="#ffffff"
+                android:textSize="12sp"
+                android:checked="false"
+                app:thumbTint="#00e6ff"
+                app:trackTint="#555555" />
+
             <!-- Results Section (Heatmap & Telemetry) -->
             <LinearLayout
                 android:id="@+id/results_panel"

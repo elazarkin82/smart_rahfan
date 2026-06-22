@@ -55,6 +55,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private TextView lblStatus;
     private Button btnBack;
     private androidx.appcompat.widget.SwitchCompat switchBypassQuality;
+    private androidx.appcompat.widget.SwitchCompat switchExperimentalPrevReference;
 
     private LinearLayout resultsPanel;
     private ImageView heatmapImageView;
@@ -101,6 +102,12 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private java.nio.ByteBuffer outputHeatmapBuffer = null;
     private java.nio.ByteBuffer outputQualityBuffer = null;
 
+    private float[] initialReferenceStackLayers = null;
+    private float[] initialSmallestReferenceLayer = null;
+    private volatile float[] previousFrameReferenceStackLayers = null;
+    private int smallestReferenceLayerIndex = 0;
+    private volatile boolean experimentalPrevReferenceMode = false;
+
     private Interpreter tflite;
 
     // Asynchronous Producer-Consumer Threading & Locking Fields
@@ -132,6 +139,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         lblStatus = findViewById(R.id.lbl_status);
         btnBack = findViewById(R.id.btn_back);
         switchBypassQuality = findViewById(R.id.switch_bypass_quality);
+        switchExperimentalPrevReference = findViewById(R.id.switch_experimental_prev_reference);
 
         resultsPanel = findViewById(R.id.results_panel);
         heatmapImageView = findViewById(R.id.heatmapImageView);
@@ -234,6 +242,10 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
 
         btnBack.setOnClickListener(v -> finish());
+        switchExperimentalPrevReference.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            experimentalPrevReferenceMode = isChecked;
+            previousFrameReferenceStackLayers = null;
+        });
         
         capturedImageView.setOnTouchListener((v, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
@@ -336,6 +348,106 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
     }
 
+    private int canonicalReferenceIndex(int layer, int y, int x) {
+        return layer * refH * refW + y * refW + x;
+    }
+
+    private int modelReferenceIndex(int layer, int y, int x) {
+        if (refShapeIsNCHW) {
+            return layer * refH * refW + y * refW + x;
+        }
+        return y * refW * refLayers + x * refLayers + layer;
+    }
+
+    private float getReferenceCropSizeForLayer(int layer, int frameHeight) {
+        float maxCropSize = (480.0f / 640.0f) * frameHeight;
+        float minCropSize = (128.0f / 640.0f) * frameHeight;
+        if (refLayers <= 1) {
+            return minCropSize;
+        }
+        return maxCropSize - layer * ((maxCropSize - minCropSize) / (float)(refLayers - 1));
+    }
+
+    private float[] buildReferenceStackLayers(byte[] yPlane, int width, int height, int stride, float cx, float cy) {
+        float[] stack = new float[refLayers * refH * refW];
+        for (int layer = 0; layer < refLayers; layer++) {
+            float size = getReferenceCropSizeForLayer(layer, height);
+            float half = size / 2.0f;
+
+            for (int y = 0; y < refH; y++) {
+                for (int x = 0; x < refW; x++) {
+                    float srcX = cx - half + (x / (float)(refW - 1)) * size;
+                    float srcY = cy - half + (y / (float)(refH - 1)) * size;
+
+                    int ix = (int) Math.max(0, Math.min(width - 1, srcX));
+                    int iy = (int) Math.max(0, Math.min(height - 1, srcY));
+
+                    int pixel = yPlane[iy * stride + ix] & 0xFF;
+                    stack[canonicalReferenceIndex(layer, y, x)] = pixel / 255.0f;
+                }
+            }
+        }
+        return stack;
+    }
+
+    private void writeReferenceStackToInputBuffer(float[] stackLayers) {
+        if (stackLayers == null || refStackInputBuffer == null) return;
+
+        refStackInputBuffer.rewind();
+        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
+        for (int layer = 0; layer < refLayers; layer++) {
+            for (int y = 0; y < refH; y++) {
+                for (int x = 0; x < refW; x++) {
+                    refFloatBuffer.put(
+                            modelReferenceIndex(layer, y, x),
+                            stackLayers[canonicalReferenceIndex(layer, y, x)]
+                    );
+                }
+            }
+        }
+        refStackInputBuffer.rewind();
+    }
+
+    private void writeExperimentalReferenceStackToInputBuffer(float[] previousStackLayers) {
+        if (previousStackLayers == null || initialSmallestReferenceLayer == null || refStackInputBuffer == null) {
+            writeReferenceStackToInputBuffer(initialReferenceStackLayers);
+            return;
+        }
+
+        refStackInputBuffer.rewind();
+        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
+        for (int layer = 0; layer < refLayers; layer++) {
+            for (int y = 0; y < refH; y++) {
+                for (int x = 0; x < refW; x++) {
+                    float value;
+                    if (layer == smallestReferenceLayerIndex) {
+                        value = initialSmallestReferenceLayer[y * refW + x];
+                    } else {
+                        value = previousStackLayers[canonicalReferenceIndex(layer, y, x)];
+                    }
+                    refFloatBuffer.put(modelReferenceIndex(layer, y, x), value);
+                }
+            }
+        }
+        refStackInputBuffer.rewind();
+    }
+
+    private void prepareReferenceInputForCurrentFrame() {
+        if (experimentalPrevReferenceMode && previousFrameReferenceStackLayers != null) {
+            writeExperimentalReferenceStackToInputBuffer(previousFrameReferenceStackLayers);
+        } else {
+            writeReferenceStackToInputBuffer(initialReferenceStackLayers);
+        }
+    }
+
+    private void cacheInitialSmallestReferenceLayer() {
+        if (initialReferenceStackLayers == null || refLayers <= 0) return;
+        smallestReferenceLayerIndex = refLayers - 1;
+        initialSmallestReferenceLayer = new float[refH * refW];
+        int srcOffset = smallestReferenceLayerIndex * refH * refW;
+        System.arraycopy(initialReferenceStackLayers, srcOffset, initialSmallestReferenceLayer, 0, refH * refW);
+    }
+
     private void gatherReferenceFrame(byte[] yPlane, int width, int height) {
         float[] normCoords = MainActivity.mapAlignedScreenCoordsToFrame(targetX, targetY, viewFinder.getWidth(), viewFinder.getHeight(), width, height);
         if (normCoords == null) {
@@ -350,37 +462,12 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         lastTrackedX = cx;
         lastTrackedY = cy;
         
-        // Zoom range matches pipeline_config.json: from size 512 down to 16 pixels (scaled dynamically by camera height relative to 600px training size)
-        float maxCropSize = (512.0f / 600.0f) * height;
-        float minCropSize = (16.0f / 600.0f) * height;
-        
         int stride = width; // rotated frame stride is width
-        
-        refStackInputBuffer.rewind();
-        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
-        for (int layer = 0; layer < refLayers; layer++) {
-            float size = maxCropSize - layer * ((maxCropSize - minCropSize) / (float)(refLayers - 1));
-            float half = size / 2.0f;
-            
-            for (int y = 0; y < refH; y++) {
-                for (int x = 0; x < refW; x++) {
-                    float srcX = cx - half + (x / (float)(refW - 1)) * size;
-                    float srcY = cy - half + (y / (float)(refH - 1)) * size;
-                    
-                    int ix = (int) Math.max(0, Math.min(width - 1, srcX));
-                    int iy = (int) Math.max(0, Math.min(height - 1, srcY));
-                    
-                    int pixel = yPlane[iy * stride + ix] & 0xFF;
-                    int index;
-                    if (refShapeIsNCHW) {
-                        index = layer * refH * refW + y * refW + x;
-                    } else {
-                        index = y * refW * refLayers + x * refLayers + layer;
-                    }
-                    refFloatBuffer.put(index, pixel / 255.0f);
-                }
-            }
-        }
+
+        initialReferenceStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, cx, cy);
+        cacheInitialSmallestReferenceLayer();
+        previousFrameReferenceStackLayers = null;
+        writeReferenceStackToInputBuffer(initialReferenceStackLayers);
         
         currentUiState = STATE_TRACKING;
         
@@ -482,6 +569,9 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         searchBuffer.rewind();
         searchBuffer.asFloatBuffer().put(currBuffer);
+        searchBuffer.rewind();
+        
+        prepareReferenceInputForCurrentFrame();
         
         outputHeatmapBuffer.rewind();
         
@@ -540,6 +630,10 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         // Save for next frame centering
         lastTrackedX = x_global;
         lastTrackedY = y_global;
+
+        if (experimentalPrevReferenceMode) {
+            previousFrameReferenceStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, x_global, y_global);
+        }
 
         long totalDuration = SystemClock.elapsedRealtime() - startTime;
 
@@ -734,6 +828,9 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private void resetTrackerToIdle() {
         currentUiState = STATE_IDLE;
         resultsPanel.setVisibility(View.GONE);
+        initialReferenceStackLayers = null;
+        initialSmallestReferenceLayer = null;
+        previousFrameReferenceStackLayers = null;
         
         tutorialHud.setText("Tap screen to lock on target");
         tutorialHud.setTextColor(Color.parseColor("#00e6ff"));
