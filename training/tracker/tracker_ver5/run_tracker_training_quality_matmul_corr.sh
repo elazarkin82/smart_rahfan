@@ -62,31 +62,31 @@ echo "[TF ENV] TRACKER_GPU_MEMORY_LIMIT_MB=${TRACKER_GPU_MEMORY_LIMIT_MB}"
 # --dataset_dir: Can receive multiple space-separated directories (e.g. carla + real data)
 # --loss_heatmap dbsz_relu: (Default) Uses the Relu-based DBSZ loss for flat background suppression.
 
-#python3 tracker_model.py train \
-#    --dataset_dir dataset_generator/compiled \
-#    --num_of_epochs 20 \
-#    --lr 1e-3 \
-#    --loss_quality bce \
-#    --output tracker_matmul_corr_with_quality.keras \
-#    --init_keras_file tracker_matmul_corr_best_train_loss_fbn.keras \
-#    --best_train_loss_output outputs/tracker_best_train_loss_with_quality.keras \
-#    --log_file outputs/train.log \
-#    --train_mode quality_only \
-#    --batch_size 32
+python3 tracker_model_matmul_corr.py train \
+    --dataset_dir dataset_generator/compiled \
+    --num_of_epochs 20 \
+    --lr 1e-3 \
+    --loss_quality bce \
+    --output outputs/tracker_matmul_corr_with_quality.keras \
+    --init_keras_file outputs/tracker_matmul_corr.keras \
+    --best_train_loss_output outputs/tracker_best_train_loss_with_quality.keras \
+    --log_file outputs/train.log \
+    --train_mode quality_only \
+    --batch_size 32
     
-python3 tracker_model.py train \
+python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
     --num_of_epochs 10 \
     --lr 1e-4 \
     --loss_quality bce \
     --output outputs/tracker_matmul_corr_with_quality.keras \
-    --init_keras_file tracker_matmul_corr_with_quality.keras \
+    --init_keras_file outputs/tracker_matmul_corr_with_quality.keras \
     --best_train_loss_output outputs/tracker_best_train_loss_with_quality.keras \
     --log_file outputs/train.log \
     --train_mode quality_only \
     --batch_size 32
 
-python3 tracker_model.py train \
+python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
     --num_of_epochs 10 \
     --lr 1e-5 \
