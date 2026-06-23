@@ -404,6 +404,8 @@ void TrackerService::set_drone_callback(IControlerCallback* cb)
 }
 
 
+
+
 void TrackerService::refresh_target(const uchar* frame, int w, int h, int target_x, int target_y)
 {
     int c;
@@ -748,12 +750,12 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
         }
         if (m_drone_cb != NULL)
         {
-            int16_t roll = 1000;
+            int16_t yaw = 1000;
             int16_t pitch = 1000;
             int dx = out_x - 128;
             int dy = out_y - 128;
-            DroneControlerHal::calculate_tracking_commands(dx, dy, roll, pitch);
-            m_drone_cb->send_command(roll, pitch, 1000, 1000);
+            DroneControlerHal::calculate_tracking_commands(dx, dy, yaw, pitch);
+            m_drone_cb->send_command(1000, pitch, yaw, 1000);
         }
     }
 }

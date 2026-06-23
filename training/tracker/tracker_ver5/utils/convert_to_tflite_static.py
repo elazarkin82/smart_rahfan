@@ -400,7 +400,6 @@ def main():
         custom_objects = {
             "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
             "DepthToSpace": tracker_model.DepthToSpace,
-            "HeatmapNormalization": tracker_model.HeatmapNormalization,
         }
         if args.qat or "qat" in os.path.basename(args.keras_in).lower():
             import tensorflow_model_optimization as tfmot

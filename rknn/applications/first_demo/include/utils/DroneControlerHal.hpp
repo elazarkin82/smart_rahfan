@@ -150,21 +150,21 @@ public:
         return true;
     }
 
-    static void calculate_tracking_commands(int dx, int dy, int16_t& out_roll, int16_t& out_pitch)
+    static void calculate_tracking_commands(int dx, int dy, int16_t& out_yaw, int16_t& out_pitch)
     {
         const int16_t MID_VALUE = 1000;
         const float Kp = 2.5f; // Proportional feedback gain
 
         // Compute offsets (dx, dy are target offset from center in 256x256 space, range -128 to 128)
-        float roll_offset = (float)dx * Kp;
+        float yaw_offset = (float)dx * Kp;
         float pitch_offset = (float)dy * Kp;
 
         // Apply control commands around MID_VALUE (1000)
-        int16_t r_val = MID_VALUE + (int16_t)roll_offset;
+        int16_t y_val = MID_VALUE + (int16_t)yaw_offset;
         int16_t p_val = MID_VALUE - (int16_t)pitch_offset; // Invert pitch to match drone standards
 
         // Constrain values to AXES_RANGE (0 to 2000)
-        out_roll = std::max((int16_t)0, std::min((int16_t)2000, r_val));
+        out_yaw = std::max((int16_t)0, std::min((int16_t)2000, y_val));
         out_pitch = std::max((int16_t)0, std::min((int16_t)2000, p_val));
     }
 };

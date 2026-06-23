@@ -17,7 +17,6 @@ print(f"Loading QAT Keras model from {model_path}...")
 custom_objects = {
     "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
     "DepthToSpace": tracker_model.DepthToSpace,
-    "HeatmapNormalization": tracker_model.HeatmapNormalization,
     "CustomLayerQuantizeConfig": CustomLayerQuantizeConfig,
 }
 

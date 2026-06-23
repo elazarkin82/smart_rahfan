@@ -395,7 +395,6 @@ def main():
     custom_objects = {
         "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
         "DepthToSpace":               tracker_model.DepthToSpace,
-        "HeatmapNormalization":       tracker_model.HeatmapNormalization,
         "CustomLayerQuantizeConfig":  CustomLayerQuantizeConfig,
     }
 
@@ -434,7 +433,7 @@ def main():
                 if layer.__class__.__name__ in ("Conv2D", "DepthwiseConv2D", "Dense"):
                     return tfmot.quantization.keras.quantize_annotate_layer(layer)
                 if layer.__class__.__name__ in (
-                    "DepthwiseCorrelationFusion", "DepthToSpace", "HeatmapNormalization",
+                    "DepthwiseCorrelationFusion", "DepthToSpace",
                     "UpSampling2D", "AveragePooling2D", "MaxPooling2D", "Concatenate", "Add",
                 ):
                     return tfmot.quantization.keras.quantize_annotate_layer(
@@ -467,7 +466,7 @@ def main():
                 if layer.__class__.__name__ in ("Conv2D", "DepthwiseConv2D", "Dense"):
                     return tfmot.quantization.keras.quantize_annotate_layer(layer)
                 if layer.__class__.__name__ in (
-                    "DepthwiseCorrelationFusion", "DepthToSpace", "HeatmapNormalization",
+                    "DepthwiseCorrelationFusion", "DepthToSpace",
                     "UpSampling2D", "AveragePooling2D", "MaxPooling2D", "Concatenate", "Add",
                 ):
                     return tfmot.quantization.keras.quantize_annotate_layer(

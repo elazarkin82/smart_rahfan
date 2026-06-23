@@ -54,6 +54,7 @@ MainService::MainService(const char* params_path)
     StatusObject::instance()->update("web_time_jpeg", "N/A");
     StatusObject::instance()->update("tracking_status", "Target Not Selected");
     StatusObject::instance()->update("target_position", "N/A");
+    StatusObject::instance()->update("flight_mode", "Manual");
     snprintf(res_buf, sizeof(res_buf), "%dx%d", m_params.width, m_params.height);
     StatusObject::instance()->update("camera_resolution", res_buf);
 }
@@ -414,14 +415,17 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
             {
                 m_web_server->update_heatmap(NULL, 256, 256);
                 m_web_server->update_stack(NULL, 64, 64, 16);
+                m_web_server->set_drone_callback(m_drone);
             }
+            m_tracker->set_drone_callback(NULL);
             m_target_x = -1;
             m_target_y = -1;
             StatusObject::instance()->update("tracking_status", "Target Not Selected");
             StatusObject::instance()->update("target_position", "N/A");
+            StatusObject::instance()->update("flight_mode", "Manual");
             if (m_drone != NULL)
             {
-                m_drone->update_channels(1000, 1000, 1000, 1000);
+                m_drone->send_command(1000, 1000, 1000, 1000);
             }
             break;
 
@@ -450,11 +454,13 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
                 {
                     m_web_server->set_drone_callback(NULL);
                     m_tracker->set_drone_callback(m_drone);
+                    StatusObject::instance()->update("flight_mode", "Autonomous");
                 }
                 else
                 {
                     m_web_server->set_drone_callback(m_drone);
                     m_tracker->set_drone_callback(NULL);
+                    StatusObject::instance()->update("flight_mode", "Manual");
                 }
                 // Send neutral commands to the drone upon switching modes for safety
                 if (m_drone != NULL)

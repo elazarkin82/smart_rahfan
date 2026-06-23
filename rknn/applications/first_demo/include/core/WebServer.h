@@ -24,7 +24,8 @@ public:
         CMD_CHOOSE_TARGET = 3,
         CMD_RESET_TARGET = 4,
         CMD_DRONE_MANUAL = 5,
-        CMD_SET_AUTONOMOUS = 6
+        CMD_SET_AUTONOMOUS = 6,
+        CMD_SET_APPROACH = 7
     };
 
     class CommandCallback

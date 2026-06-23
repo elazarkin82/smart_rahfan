@@ -200,15 +200,11 @@ class DepthToSpace(layers.Layer):
         config.update({"block_size": self.block_size})
         return config
 
-@tf.keras.utils.register_keras_serializable(package="Custom")
-class HeatmapNormalization(layers.Layer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        
-    def call(self, inputs):
-        return inputs / (tf.reduce_max(inputs, axis=[1, 2], keepdims=True) + 1e-7)
-
 def load_model_config(config_path="model.conf"):
+    if not os.path.isabs(config_path) and not os.path.exists(config_path):
+        alt_path = os.path.join(os.path.dirname(__file__), config_path)
+        if os.path.exists(alt_path):
+            config_path = alt_path
     config = configparser.ConfigParser()
     config.read(config_path)
     
@@ -250,6 +246,12 @@ def load_model_config(config_path="model.conf"):
     }
 
 def check_and_create_default_config(config_path="model.conf"):
+    if not os.path.isabs(config_path) and not os.path.exists(config_path):
+        alt_path = os.path.join(os.path.dirname(__file__), config_path)
+        if os.path.exists(alt_path):
+            config_path = alt_path
+        else:
+            config_path = alt_path
     if not os.path.exists(config_path):
         default_content = """# TargetTrackerVer5 Model Configuration File
 # This file configures the backbones, attention mechanism, and decoder of the tracking network.
@@ -516,8 +518,14 @@ class TargetTrackerVer5:
         self.model = None
 
         # Load configuration first so ref_shape can be derived from stack params
-        if os.path.exists(config_path):
-            self.config = load_model_config(config_path)
+        resolved_config_path = config_path
+        if resolved_config_path and not os.path.isabs(resolved_config_path) and not os.path.exists(resolved_config_path):
+            alt_path = os.path.join(os.path.dirname(__file__), resolved_config_path)
+            if os.path.exists(alt_path):
+                resolved_config_path = alt_path
+
+        if resolved_config_path and os.path.exists(resolved_config_path):
+            self.config = load_model_config(resolved_config_path)
         else:
             self.config = {
                 "reference_backbone": "mini_mnv2",
@@ -1134,7 +1142,7 @@ class TargetTrackerVer5:
             
         # Final prediction heatmap
         output_heatmap_raw = layers.Conv2D(1, (3, 3), padding="same", activation="relu", name="predicted_heatmap_raw")(x)
-        output_heatmap_norm = HeatmapNormalization(name="predicted_heatmap_norm")(output_heatmap_raw)
+        output_heatmap_norm = layers.BatchNormalization(name="predicted_heatmap_norm")(output_heatmap_raw)
         output_heatmap_pre_threshold = layers.Rescaling(scale=2.0, offset=-1.0, name="heatmap_threshold_rescale")(output_heatmap_norm)
         thresholded = layers.ReLU(name="heatmap_threshold_relu")(output_heatmap_pre_threshold)
         output_heatmap_processed = layers.DepthwiseConv2D(
