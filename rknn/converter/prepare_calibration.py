@@ -83,7 +83,6 @@ def main():
             "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
             "Conv2DCorrelationFusion": tracker_model.Conv2DCorrelationFusion,
             "DepthToSpace": tracker_model.DepthToSpace,
-            "HeatmapNormalization": tracker_model.HeatmapNormalization,
         }
         
         keras_model = tf.keras.models.load_model(args.keras_path, compile=False, custom_objects=custom_objects, safe_mode=False)

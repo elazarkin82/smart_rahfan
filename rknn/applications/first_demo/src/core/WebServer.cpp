@@ -180,6 +180,47 @@ const char* INDEX_HTML =
 "            <button class=\"btn\" style=\"width: 40px; padding: 5px;\" onclick=\"stepStack(1)\">&gt;</button>\n"
 "        </div>\n"
 "    </div>\n"
+"    <div class=\"card\" style=\"width: 250px;\">\n"
+"        <h2>Drone Control</h2>\n"
+"        <div style=\"display: flex; flex-direction: column; gap: 10px; align-items: center;\">\n"
+"            <div style=\"display: flex; gap: 5px;\">\n"
+"                <button class=\"btn\" style=\"width: 80px;\" onmousedown=\"sendManualControl(0, 700, 0, 0)\" onmouseup=\"resetManualControl()\">Pitch +</button>\n"
+"            </div>\n"
+"            <div style=\"display: flex; gap: 5px;\">\n"
+"                <button class=\"btn\" style=\"width: 80px;\" onmousedown=\"sendManualControl(-700, 0, 0, 0)\" onmouseup=\"resetManualControl()\">Roll -</button>\n"
+"                <button class=\"btn\" style=\"width: 80px; background: #4b5563;\" onclick=\"resetManualControl()\">Hover</button>\n"
+"                <button class=\"btn\" style=\"width: 80px;\" onmousedown=\"sendManualControl(700, 0, 0, 0)\" onmouseup=\"resetManualControl()\">Roll +</button>\n"
+"            </div>\n"
+"            <div style=\"display: flex; gap: 5px;\">\n"
+"                <button class=\"btn\" style=\"width: 80px;\" onmousedown=\"sendManualControl(0, -700, 0, 0)\" onmouseup=\"resetManualControl()\">Pitch -</button>\n"
+"            </div>\n"
+"            <div style=\"width: 100%; border-top: 1px solid #1f2937; margin: 10px 0;\"></div>\n"
+"            <div style=\"display: flex; gap: 10px; width: 100%;\">\n"
+"                <div style=\"flex-grow: 1;\">\n"
+"                    <label>Yaw</label>\n"
+"                    <div style=\"display: flex; gap: 5px; margin-top: 5px;\">\n"
+"                        <button class=\"btn\" style=\"padding: 5px;\" onmousedown=\"sendManualControl(0, 0, -700, 0)\" onmouseup=\"resetManualControl()\">L</button>\n"
+"                        <button class=\"btn\" style=\"padding: 5px;\" onmousedown=\"sendManualControl(0, 0, 700, 0)\" onmouseup=\"resetManualControl()\">R</button>\n"
+"                    </div>\n"
+"                </div>\n"
+"                <div style=\"flex-grow: 1;\">\n"
+"                    <label>Throttle</label>\n"
+"                    <div style=\"display: flex; gap: 5px; margin-top: 5px;\">\n"
+"                        <button class=\"btn\" style=\"padding: 5px;\" onmousedown=\"sendManualControl(0, 0, 0, 700)\" onmouseup=\"resetManualControl()\">U</button>\n"
+"                        <button class=\"btn\" style=\"padding: 5px;\" onmousedown=\"sendManualControl(0, 0, 0, -700)\" onmouseup=\"resetManualControl()\">D</button>\n"
+"                    </div>\n"
+"                </div>\n"
+"            </div>\n"
+"            <div style=\"width: 100%; border-top: 1px solid #1f2937; margin: 10px 0;\"></div>\n"
+"            <div class=\"form-group\" style=\"width: 100%;\">\n"
+"                <label>Flight Mode</label>\n"
+"                <div style=\"display: flex; align-items: center; justify-content: space-between; margin-top: 5px; background: #030712; padding: 10px; border-radius: 6px; border: 1px solid #374151;\">\n"
+"                    <span id=\"autonomousLabel\" style=\"font-size: 14px; font-weight: 600; color: #4b5563;\">AUTONOMOUS LOCKED</span>\n"
+"                    <input type=\"checkbox\" id=\"autonomousMode\" disabled style=\"width: 20px; height: 20px; cursor: not-allowed;\" onchange=\"toggleAutonomous(this.checked)\">\n"
+"                </div>\n"
+"            </div>\n"
+"        </div>\n"
+"    </div>\n"
 "    <div class=\"status-card\">\n"
 "        <div class=\"card\">\n"
 "            <h2>Telemetry Status</h2>\n"
@@ -328,6 +369,61 @@ const char* INDEX_HTML =
 "    }\n"
 "}\n"
 "\n"
+"function toggleAutonomous(checked) {\n"
+"    const val = checked ? '1' : '0';\n"
+"    fetch(`/command?cmd=SET_AUTONOMOUS&val=${val}`)\n"
+"        .then(res => {\n"
+"            console.log('Autonomous mode toggled:', checked);\n"
+"            const label = document.getElementById('autonomousLabel');\n"
+"            if (checked) {\n"
+"                label.innerText = 'AUTONOMOUS ACTIVE';\n"
+"                label.style.color = '#10b981';\n"
+"            } else {\n"
+"                label.innerText = 'AUTONOMOUS READY';\n"
+"                label.style.color = '#38bdf8';\n"
+"            }\n"
+"        });\n"
+"}\n"
+"\n"
+"function updateAutonomousUI(statusText) {\n"
+"    const lines = statusText.split('\\n');\n"
+"    let trackingStatus = '';\n"
+"    let flightMode = 'Manual';\n"
+"    for (let i = 0; i < lines.length; i++) {\n"
+"        if (lines[i].startsWith('tracking_status=')) {\n"
+"            trackingStatus = lines[i].split('=')[1].trim();\n"
+"        }\n"
+"        if (lines[i].startsWith('flight_mode=')) {\n"
+"            flightMode = lines[i].split('=')[1].trim();\n"
+"        }\n"
+"    }\n"
+"\n"
+"    const checkbox = document.getElementById('autonomousMode');\n"
+"    const label = document.getElementById('autonomousLabel');\n"
+"    if (!checkbox || !label) return;\n"
+"\n"
+"    if (flightMode === 'Autonomous') {\n"
+"        checkbox.checked = true;\n"
+"        checkbox.disabled = false;\n"
+"        checkbox.style.cursor = 'pointer';\n"
+"        label.innerText = 'AUTONOMOUS ACTIVE';\n"
+"        label.style.color = '#10b981';\n"
+"    } else {\n"
+"        checkbox.checked = false;\n"
+"        if (trackingStatus === 'Target Acquired') {\n"
+"            checkbox.disabled = false;\n"
+"            checkbox.style.cursor = 'pointer';\n"
+"            label.innerText = 'AUTONOMOUS READY';\n"
+"            label.style.color = '#38bdf8';\n"
+"        } else {\n"
+"            checkbox.disabled = true;\n"
+"            checkbox.style.cursor = 'not-allowed';\n"
+"            label.innerText = 'AUTONOMOUS LOCKED';\n"
+"            label.style.color = '#4b5563';\n"
+"        }\n"
+"    }\n"
+"}\n"
+"\n"
 "function fetchStatus() {\n"
 "    fetch('/status')\n"
 "        .then(res => res.text())\n"
@@ -335,12 +431,94 @@ const char* INDEX_HTML =
 "            document.getElementById('statusPre').innerText = text;\n"
 "            parseResolutionFromStatus(text);\n"
 "            parseStackLayersFromStatus(text);\n"
+"            updateAutonomousUI(text);\n"
 "            updateStackLabel();\n"
 "        });\n"
 "}\n"
 "\n"
 "setInterval(fetchStatus, 1000);\n"
 "fetchStatus();\n"
+"\n"
+"let rollVal = 1000;\n"
+"let pitchVal = 1000;\n"
+"let yawVal = 1000;\n"
+"let throttleVal = 1000;\n"
+"let activeKeys = {};\n"
+"\n"
+"function sendManualControl(r_off, p_off, y_off, t_off) {\n"
+"    rollVal = 1000 + r_off;\n"
+"    pitchVal = 1000 + p_off;\n"
+"    yawVal = 1000 + y_off;\n"
+"    throttleVal = 1000 + t_off;\n"
+"    \n"
+"    rollVal = Math.max(0, Math.min(2000, rollVal));\n"
+"    pitchVal = Math.max(0, Math.min(2000, pitchVal));\n"
+"    yawVal = Math.max(0, Math.min(2000, yawVal));\n"
+"    throttleVal = Math.max(0, Math.min(2000, throttleVal));\n"
+"    \n"
+"    fetch(`/command?cmd=DRONE_MANUAL&val=${rollVal},${pitchVal},${yawVal},${throttleVal}`);\n"
+"}\n"
+"\n"
+"function resetManualControl() {\n"
+"    rollVal = 1000;\n"
+"    pitchVal = 1000;\n"
+"    yawVal = 1000;\n"
+"    throttleVal = 1000;\n"
+"    fetch(`/command?cmd=DRONE_MANUAL&val=1000,1000,1000,1000`);\n"
+"}\n"
+"\n"
+"document.addEventListener('keydown', function(e) {\n"
+"    activeKeys['Ctrl'] = e.ctrlKey;\n"
+"    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].indexOf(e.code) > -1) {\n"
+"        e.preventDefault();\n"
+"    }\n"
+"    \n"
+"    if (activeKeys[e.code]) return;\n"
+"    activeKeys[e.code] = true;\n"
+"    \n"
+"    updateKeyboardControl();\n"
+"});\n"
+"\n"
+"document.addEventListener('keyup', function(e) {\n"
+"    activeKeys['Ctrl'] = e.ctrlKey;\n"
+"    delete activeKeys[e.code];\n"
+"    updateKeyboardControl();\n"
+"});\n"
+"\n"
+"function updateKeyboardControl() {\n"
+"    let r = 0, p = 0, y = 0, t = 0;\n"
+"    let active = false;\n"
+"    \n"
+"    const isCtrl = activeKeys['Ctrl'];\n"
+"    \n"
+"    if (activeKeys['KeyW']) { p = 700; active = true; }\n"
+"    if (activeKeys['KeyS']) { p = -700; active = true; }\n"
+"    if (activeKeys['KeyA']) { r = -700; active = true; }\n"
+"    if (activeKeys['KeyD']) { r = 700; active = true; }\n"
+"    \n"
+"    if (isCtrl) {\n"
+"        if (activeKeys['ArrowUp']) { t = 700; active = true; }\n"
+"        if (activeKeys['ArrowDown']) { t = -700; active = true; }\n"
+"        if (activeKeys['ArrowLeft']) { y = -700; active = true; }\n"
+"        if (activeKeys['ArrowRight']) { y = 700; active = true; }\n"
+"    } else {\n"
+"        if (activeKeys['ArrowUp']) { p = 700; active = true; }\n"
+"        if (activeKeys['ArrowDown']) { p = -700; active = true; }\n"
+"        if (activeKeys['ArrowLeft']) { r = -700; active = true; }\n"
+"        if (activeKeys['ArrowRight']) { r = 700; active = true; }\n"
+"    }\n"
+"    \n"
+"    if (activeKeys['KeyQ']) { y = -700; active = true; }\n"
+"    if (activeKeys['KeyE']) { y = 700; active = true; }\n"
+"    if (activeKeys['Space']) { t = 700; active = true; }\n"
+"    if (activeKeys['ShiftLeft'] || activeKeys['ShiftRight']) { t = -700; active = true; }\n"
+"    \n"
+"    if (active) {\n"
+"        sendManualControl(r, p, y, t);\n"
+"    } else {\n"
+"        resetManualControl();\n"
+"    }\n"
+"}\n"
 "</script>\n"
 "</body>\n"
 "</html>\n";
@@ -420,6 +598,18 @@ public:
         else if (strcmp(cmd_buf, "RESET_TARGET") == 0)
         {
             cmd_key = WebServer::CMD_RESET_TARGET;
+        }
+        else if (strcmp(cmd_buf, "DRONE_MANUAL") == 0)
+        {
+            cmd_key = WebServer::CMD_DRONE_MANUAL;
+        }
+        else if (strcmp(cmd_buf, "SET_AUTONOMOUS") == 0)
+        {
+            cmd_key = WebServer::CMD_SET_AUTONOMOUS;
+        }
+        else if (strcmp(cmd_buf, "SET_APPROACH") == 0)
+        {
+            cmd_key = WebServer::CMD_SET_APPROACH;
         }
 
         if (cmd_key != 0)
@@ -654,6 +844,7 @@ WebServer::WebServer(int port)
     int i;
 
     m_cmd_callback = NULL;
+    m_drone_cb = NULL;
     m_is_streaming = false;
     m_has_new_frame = false;
 
@@ -665,7 +856,7 @@ WebServer::WebServer(int port)
     m_has_new_heatmap = false;
     m_is_heatmap_streaming = false;
 
-    m_frame_buf = (uchar*)malloc(1920 * 1280);
+    m_frame_buf = (uchar*)malloc(1920 * 1280 * 3);
     m_jpeg_buf = (uchar*)malloc(1920 * 1280);
     m_jpeg_size = 0;
 
@@ -726,6 +917,13 @@ void WebServer::set_command_callback(CommandCallback* cb)
     m_cmd_callback = cb;
 }
 
+void WebServer::set_drone_callback(IControlerCallback* cb)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_drone_cb = cb;
+}
+
+
 void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
 {
     int x_cam, y_cam;
@@ -739,8 +937,13 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
 
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    // Copy raw grayscale frame internally
-    memcpy(m_frame_buf, frame, w * h);
+    // Convert raw grayscale frame to RGB internally
+    for (int i = 0; i < w * h; ++i)
+    {
+        m_frame_buf[i * 3 + 0] = frame[i]; // R
+        m_frame_buf[i * 3 + 1] = frame[i]; // G
+        m_frame_buf[i * 3 + 2] = frame[i]; // B
+    }
     m_frame_w = w;
     m_frame_h = h;
     m_target_x = target_x;
@@ -749,9 +952,12 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
     // Draw the tracking bounding box borders if target coordinates are valid
     if (m_target_x >= 0 && m_target_y >= 0)
     {
-        // Scale coordinate system from 256x256 to camera frame space
-        x_cam = (m_target_x * w) / 256;
-        y_cam = (m_target_y * h) / 256;
+        // Scale coordinate system from 256x256 search crop frame space back to camera frame space
+        int crop_size = std::min(w, h);
+        int x0 = (w - crop_size) / 2;
+        int y0 = (h - crop_size) / 2;
+        x_cam = x0 + (m_target_x * crop_size) / 256;
+        y_cam = y0 + (m_target_y * crop_size) / 256;
 
         box_size = 30;
         half = box_size / 2;
@@ -761,42 +967,50 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
         y_start = y_cam - half;
         y_end = y_cam + half;
 
-        // Draw horizontal boundaries (white = 255)
+        // Draw horizontal boundaries (green: R=0, G=255, B=0)
         for (cx = x_start; cx <= x_end; ++cx)
         {
             if (cx >= 0 && cx < w)
             {
                 if (y_start >= 0 && y_start < h)
                 {
-                    m_frame_buf[y_start * w + cx] = 255;
+                    m_frame_buf[(y_start * w + cx) * 3 + 0] = 0;   // R
+                    m_frame_buf[(y_start * w + cx) * 3 + 1] = 255; // G
+                    m_frame_buf[(y_start * w + cx) * 3 + 2] = 0;   // B
                 }
                 if (y_end >= 0 && y_end < h)
                 {
-                    m_frame_buf[y_end * w + cx] = 255;
+                    m_frame_buf[(y_end * w + cx) * 3 + 0] = 0;   // R
+                    m_frame_buf[(y_end * w + cx) * 3 + 1] = 255; // G
+                    m_frame_buf[(y_end * w + cx) * 3 + 2] = 0;   // B
                 }
             }
         }
 
-        // Draw vertical boundaries
+        // Draw vertical boundaries (green: R=0, G=255, B=0)
         for (cy = y_start; cy <= y_end; ++cy)
         {
             if (cy >= 0 && cy < h)
             {
                 if (x_start >= 0 && x_start < w)
                 {
-                    m_frame_buf[cy * w + x_start] = 255;
+                    m_frame_buf[(cy * w + x_start) * 3 + 0] = 0;   // R
+                    m_frame_buf[(cy * w + x_start) * 3 + 1] = 255; // G
+                    m_frame_buf[(cy * w + x_start) * 3 + 2] = 0;   // B
                 }
                 if (x_end >= 0 && x_end < w)
                 {
-                    m_frame_buf[cy * w + x_end] = 255;
+                    m_frame_buf[(cy * w + x_end) * 3 + 0] = 0;   // R
+                    m_frame_buf[(cy * w + x_end) * 3 + 1] = 255; // G
+                    m_frame_buf[(cy * w + x_end) * 3 + 2] = 0;   // B
                 }
             }
         }
     }
 
-    // Perform the grayscale JPEG compression inside Web context thread trigger
+    // Perform the RGB JPEG compression inside Web context thread trigger
     t_comp_start = std::chrono::steady_clock::now();
-    compress_gray_to_jpeg(m_frame_buf, m_frame_w, m_frame_h, m_jpeg_buf, &m_jpeg_size);
+    compress_rgb_to_jpeg(m_frame_buf, m_frame_w, m_frame_h, m_jpeg_buf, &m_jpeg_size);
     t_comp_end = std::chrono::steady_clock::now();
 
     comp_ms = std::chrono::duration<float, std::milli>(t_comp_end - t_comp_start).count();
@@ -810,6 +1024,14 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
 void WebServer::trigger_command(Command key, const char* values)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (key == CMD_DRONE_MANUAL && m_drone_cb != NULL)
+    {
+        int r = 1000, p = 1000, y = 1000, t = 1000;
+        if (sscanf(values, "%d,%d,%d,%d", &r, &p, &y, &t) == 4)
+        {
+            m_drone_cb->send_command((int16_t)r, (int16_t)p, (int16_t)y, (int16_t)t);
+        }
+    }
     if (m_cmd_callback != NULL)
     {
         m_cmd_callback->onCommand(key, values, (int)strlen(values));
@@ -939,7 +1161,8 @@ void WebServer::compress_rgb_to_jpeg(const uchar* rgb_buf, int w, int h, uchar* 
 
     jpeg_finish_compress(&cinfo);
 
-    if (outsize < 256 * 256 * 3)
+    unsigned long max_size = (w == 256 && h == 256) ? (256 * 256 * 3) : (1920 * 1280);
+    if (outsize < max_size)
     {
         memcpy(dest_buf, outbuffer, outsize);
         *dest_size = outsize;

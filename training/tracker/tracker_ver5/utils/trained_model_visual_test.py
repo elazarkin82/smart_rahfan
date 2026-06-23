@@ -77,7 +77,6 @@ class ModelInferenceVisualizer:
                 "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
                 "Conv2DCorrelationFusion": tracker_model.Conv2DCorrelationFusion,
                 "DepthToSpace": tracker_model.DepthToSpace,
-                "HeatmapNormalization": tracker_model.HeatmapNormalization,
             }
             is_qat = "qat" in os.path.basename(model_path).lower()
             if is_qat:

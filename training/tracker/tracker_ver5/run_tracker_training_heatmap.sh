@@ -65,7 +65,7 @@ python3 tracker_model.py train \
     --lr 1e-4 \
     --loss_quality bce \
     --output outputs/tracker_coords.keras \
-    --init_keras_file outputs/tracker_coords.keras \
+    --init_keras_file outputs/tracker_coords_best_train_loss.keras \
     --best_train_loss_output outputs/tracker_coords_best_train_loss.keras \
     --log_file outputs/train_coords.log \
     --train_mode heatmap_only \
@@ -77,7 +77,7 @@ python3 tracker_model.py train \
     --lr 1e-5 \
     --loss_quality bce \
     --output outputs/tracker_coords.keras \
-    --init_keras_file outputs/tracker_coords.keras \
+    --init_keras_file outputs/tracker_coords_best_train_loss.keras \
     --best_train_loss_output outputs/tracker_coords_best_train_loss.keras \
     --log_file outputs/train_coords.log \
     --train_mode heatmap_only \
@@ -89,7 +89,7 @@ python3 tracker_model.py train \
     --lr 1e-6 \
     --loss_quality bce \
     --output outputs/tracker_coords.keras \
-    --init_keras_file outputs/tracker_coords.keras \
+    --init_keras_file outputs/tracker_coords_best_train_loss.keras \
     --best_train_loss_output outputs/tracker_coords_best_train_loss.keras \
     --log_file outputs/train_coords.log \
     --train_mode heatmap_only \

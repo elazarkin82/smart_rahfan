@@ -29,6 +29,13 @@ def transpose_preserves_memory_layout(shape, perm):
     return permuted_non_singleton == non_singleton_indices
 
 def find_tensor_by_name(model, name):
+    tensor_index = 0
+    if ":" in name:
+        try:
+            tensor_index = int(name.split(":")[-1])
+        except ValueError:
+            pass
+            
     base_name = name.split(":")[0]
     parts = base_name.split("/")
     
@@ -54,6 +61,8 @@ def find_tensor_by_name(model, name):
                         for out in node_outputs:
                             if name in out.name or out.name.endswith(name):
                                 return out
+                    if tensor_index < len(node_outputs):
+                        return node_outputs[tensor_index]
                     return node_outputs[0]
                 return node_outputs
         except Exception:
@@ -64,6 +73,8 @@ def find_tensor_by_name(model, name):
                     for out in target_layer.output:
                         if name in out.name or out.name.endswith(name):
                             return out
+                if tensor_index < len(target_layer.output):
+                    return target_layer.output[tensor_index]
                 return target_layer.output[0]
             return target_layer.output
         except Exception:
@@ -389,7 +400,6 @@ def main():
         custom_objects = {
             "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
             "DepthToSpace": tracker_model.DepthToSpace,
-            "HeatmapNormalization": tracker_model.HeatmapNormalization,
         }
         if args.qat or "qat" in os.path.basename(args.keras_in).lower():
             import tensorflow_model_optimization as tfmot

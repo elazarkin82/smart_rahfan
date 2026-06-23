@@ -15,7 +15,6 @@ print(f"Loading teacher model from {model_path}...")
 custom_objects = {
     "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
     "DepthToSpace": tracker_model.DepthToSpace,
-    "HeatmapNormalization": tracker_model.HeatmapNormalization,
 }
 
 model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False, custom_objects=custom_objects)

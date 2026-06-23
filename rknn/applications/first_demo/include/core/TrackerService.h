@@ -7,6 +7,8 @@
 #include <RgaApi.h>
 #include <im2d.h>
 #endif
+#include "utils/DroneControlerHal.hpp"
+
 
 typedef unsigned char uchar;
 
@@ -26,12 +28,13 @@ public:
 
 
 private:
-    rknn_context m_ctx_template;
-    rknn_context m_ctx_frame;
+    rknn_context m_ctx_model;
     bool m_is_model_loaded;
     bool m_is_target_defined;
     TrackerCallback* m_callback;
+    IControlerCallback* m_drone_cb;
     std::mutex m_mutex;
+
 
     // Model tensor attributes
     int m_in_width_ref;
@@ -49,15 +52,18 @@ private:
     float m_min_crop;
     float m_max_crop;
     bool m_quality_enabled;
+    bool m_use_argmax_only;
+
+    // Resolved tensor indices
+    int m_idx_ref_stack;
+    int m_idx_search_frame;
+    int m_idx_heatmap;
+    int m_idx_quality;
 
     // Pre-allocated buffers to prevent runtime heap allocation (MISRA-compliant fixed-size arrays)
     uchar m_ref_stack_buf[MAX_STACK_TARGET_SIZE * MAX_STACK_TARGET_SIZE * MAX_STACK_LAYERS];
     uchar m_search_buf[MAX_STACK_TARGET_SIZE * MAX_STACK_TARGET_SIZE];
     float m_heatmap_buf[MAX_HEATMAP_PXL_SIZE * MAX_HEATMAP_PXL_SIZE];
-    void* m_template_features_buf;
-    int m_template_features_size;
-    rknn_tensor_type m_template_features_type;
-    rknn_tensor_format m_template_features_fmt;
 
     // Resizing helpers
     void resize_bilinear_gray(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
@@ -87,7 +93,7 @@ private:
     void decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y);
 
 public:
-    TrackerService(const char* template_path, const char* frame_path, float min_crop, float max_crop, bool quality_enabled);
+    TrackerService(const char* model_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only = false);
     ~TrackerService();
 
     bool is_model_loaded() const;
@@ -95,6 +101,7 @@ public:
     void refresh_target(const uchar* frame, int w, int h, int target_x, int target_y);
     void clear_target();
     void set_tracker_callback(TrackerCallback* cb);
+    void set_drone_callback(IControlerCallback* cb);
     void update_frame(uchar* frame, int w, int h);
 };
 

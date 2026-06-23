@@ -62,9 +62,10 @@
         "stack_layers": 2,
         "stack_target_size": 128,
         "crop_max_size": [256, 512],
-        "crop_min_size": 128,
+        "crop_min_size": [64, 128],
         "heatmap_sigma": 10.0,
         "heatmap_relative_sigma": 0.125,
-        "synthetic_negative_ratio": 0.00
+        "synthetic_negative_ratio": 0.00,
+        "stack_jitter_ratio": 0.0
     }
 }

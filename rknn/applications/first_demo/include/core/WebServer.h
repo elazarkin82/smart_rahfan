@@ -5,6 +5,8 @@
 #include <mutex>
 #include <condition_variable>
 #include "CivetServer.h"
+#include "utils/DroneControlerHal.hpp"
+
 
 typedef unsigned char uchar;
 
@@ -20,7 +22,10 @@ public:
         CMD_UPDATE_CAMERA_PARAMS = 1,
         CMD_SAVE_PARAMS = 2,
         CMD_CHOOSE_TARGET = 3,
-        CMD_RESET_TARGET = 4
+        CMD_RESET_TARGET = 4,
+        CMD_DRONE_MANUAL = 5,
+        CMD_SET_AUTONOMOUS = 6,
+        CMD_SET_APPROACH = 7
     };
 
     class CommandCallback
@@ -35,6 +40,7 @@ public:
 private:
     CivetServer* m_server;
     CommandCallback* m_cmd_callback;
+    IControlerCallback* m_drone_cb;
     std::mutex m_mutex;
     std::condition_variable m_condvar;
 
@@ -71,6 +77,7 @@ public:
     ~WebServer();
 
     void set_command_callback(CommandCallback* cb);
+    void set_drone_callback(IControlerCallback* cb);
     void update(uchar* frame, int w, int h, int target_x, int target_y);
     void update_heatmap(const float* heatmap, int w, int h);
     void update_stack(const uchar* stack, int w, int h, int c);

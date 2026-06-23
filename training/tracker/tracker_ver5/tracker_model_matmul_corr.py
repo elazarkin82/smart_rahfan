@@ -1029,64 +1029,42 @@ class TargetTrackerVer5:
         def scale_filters(f):
             return max(8, int(f * width_mult))
             
-        attn_mech = self.config["attention_mechanism"]
+        # 2. Attention Fusion (Ignored in matmul_corr model, always uses custom direct Matmul correlation)
+        c_ref = ref_features.shape[-1]
+        c_search = search_features.shape[-1]
         
-        # 2. Attention Fusion
-        if attn_mech == "depthwise_corr":
-            fused_features = DepthwiseCorrelationFusion(name="depthwise_correlation_fusion")([search_features, ref_features])
-            c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
+        # Pool reference features to (8, 8) if not already
+        if ref_features.shape[1] == 8 and ref_features.shape[2] == 8:
+            ref_pooled = ref_features
+        else:
+            ref_pooled = layers.Resizing(8, 8, interpolation="bilinear", name="ref_features_resize")(ref_features)
             
-        elif attn_mech == "conv2d_corr":
-            c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
-            fused_features = Conv2DCorrelationFusion(channels=c_v, name="conv2d_correlation_fusion")([search_features, ref_features])
+        # Pool search features to (16, 16) if not already
+        if search_features.shape[1] == 16 and search_features.shape[2] == 16:
+            search_pooled = search_features
+        else:
+            search_pooled = layers.Resizing(16, 16, interpolation="bilinear", name="search_features_resize")(search_features)
             
-        elif attn_mech == "linear_cross":
-            c_qk = scale_filters(64) if bb_type != "custom_legacy" else 64
-            c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
+        # Reshape to flatten spatial dimensions: (Batch, 64, C) and (Batch, 256, C)
+        ref_flat = layers.Reshape((64, c_ref), name="ref_features_flat")(ref_pooled)
+        search_flat = layers.Reshape((256, c_search), name="search_features_flat")(search_pooled)
+        
+        # Ensure channel dimensions match. If not, project ref_flat to match search_flat
+        if c_ref != c_search:
+            ref_flat = layers.Dense(c_search, use_bias=False, name="ref_channel_proj")(ref_flat)
             
-            q_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="q_proj")(search_features)
-            k_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="k_proj")(ref_features)
-            v_proj = layers.Conv2D(c_v, (1, 1), use_bias=False, name="v_proj")(ref_features)
-            
-            q_flat = layers.Reshape((256, c_qk), name="q_flat")(q_proj)
-            k_flat = layers.Reshape((64, c_qk), name="k_flat")(k_proj)
-            v_flat = layers.Reshape((64, c_v), name="v_flat")(v_proj)
-            
-            q_soft = layers.Softmax(axis=-1, name="q_softmax")(q_flat)
-            k_soft = layers.Softmax(axis=1, name="k_softmax")(k_flat)
-            
-            k_trans = layers.Permute((2, 1), name="k_trans")(k_soft)
-            kv = layers.Dot(axes=(2, 1), name="kv_dot")([k_trans, v_flat])
-            fused_flat = layers.Dot(axes=(2, 1), name="linear_attention_dot")([q_soft, kv])
-            fused_features = layers.Reshape((16, 16, c_v), name="fused_features_reshape")(fused_flat)
-            
-        elif attn_mech == "multi_head_cross":
-            c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
-            q_flat = layers.Reshape((256, c_v), name="q_flat")(search_features)
-            kv_flat = layers.Reshape((64, c_v), name="kv_flat")(ref_features)
-            
-            mha = layers.MultiHeadAttention(num_heads=4, key_dim=c_v // 4, name="mha_fusion")
-            fused_flat = mha(query=q_flat, value=kv_flat, key=kv_flat)
-            fused_features = layers.Reshape((16, 16, c_v), name="fused_features_reshape")(fused_flat)
-            
-        else: # dot_cross
-            c_qk = scale_filters(64) if bb_type != "custom_legacy" else 64
-            c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
-            
-            q_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="q_proj")(search_features)
-            k_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="k_proj")(ref_features)
-            v_proj = layers.Conv2D(c_v, (1, 1), use_bias=False, name="v_proj")(ref_features)
-            
-            q_flat = layers.Reshape((256, c_qk), name="q_flat")(q_proj)
-            k_flat = layers.Reshape((64, c_qk), name="k_flat")(k_proj)
-            v_flat = layers.Reshape((64, c_v), name="v_flat")(v_proj)
-            
-            attn_weights = layers.Dot(axes=(2, 2), name="attention_dot")([q_flat, k_flat])
-            attn_weights = layers.Rescaling(scale=1.0 / np.sqrt(c_qk), name="attention_scale")(attn_weights)
-            attn_weights = layers.Softmax(axis=-1, name="attention_softmax")(attn_weights)
-            
-            fused_flat = layers.Dot(axes=(2, 1), name="attention_value_dot")([attn_weights, v_flat])
-            fused_features = layers.Reshape((16, 16, c_v), name="fused_features_reshape")(fused_flat)
+        # Perform batched matrix multiplication: B * A^T
+        # B shape: (Batch, 256, C), A^T shape: (Batch, C, 64) -> Output shape: (Batch, 256, 64)
+        fused_flat = layers.Dot(axes=(2, 2), name="matmul_correlation_dot")([search_flat, ref_flat])
+        
+        # Reshape the spatial relation map to 4D: (Batch, 16, 16, 64)
+        fused_spatial = layers.Reshape((16, 16, 64), name="fused_matmul_reshape")(fused_flat)
+        
+        # Project 64 channels to expected decoder input channels
+        c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
+        fused_features = layers.Conv2D(c_v, (1, 1), padding="same", use_bias=False, name="matmul_fusion_proj")(fused_spatial)
+        fused_features = _GroupNormalization(c_v, name="matmul_fusion_gn")(fused_features)
+        fused_features = layers.ReLU(6.0, name="matmul_fusion_relu")(fused_features)
             
         # 3. Decoder for Output 1: Heatmap
         dec_type = self.config["decoder_type"]

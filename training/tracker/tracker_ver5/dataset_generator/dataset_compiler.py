@@ -55,7 +55,7 @@ def get_crop(image, center_x, center_y, size):
         
     return crop
 
-def build_reference_stack(image, center, num_layers, max_size, min_size, target_size):
+def build_reference_stack(image, center, num_layers, max_size, min_size, target_size, jitter_ratio=0.0):
     """
     Builds the Multi-Scale Reference Stack.
     Creates 'num_layers' crops ranging from 'max_size' down to 'min_size'.
@@ -64,8 +64,20 @@ def build_reference_stack(image, center, num_layers, max_size, min_size, target_
     sizes = np.linspace(max_size, min_size, num_layers)
     stack_layers = []
     
-    for sz in sizes:
-        crop = get_crop(image, center[0], center[1], sz)
+    apply_jitter = jitter_ratio > 0.0 and np.random.uniform(0, 1) < jitter_ratio
+    
+    for idx, sz in enumerate(sizes):
+        if apply_jitter and idx < num_layers - 1:
+            max_dev = sz / 2.0
+            dx = np.random.uniform(-max_dev, max_dev)
+            dy = np.random.uniform(-max_dev, max_dev)
+            crop_x = center[0] + dx
+            crop_y = center[1] + dy
+        else:
+            crop_x = center[0]
+            crop_y = center[1]
+            
+        crop = get_crop(image, crop_x, crop_y, sz)
         # Resize to uniform shape (e.g., 64x64)
         resized = cv2.resize(crop, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
         stack_layers.append(resized)
@@ -74,21 +86,21 @@ def build_reference_stack(image, center, num_layers, max_size, min_size, target_
     stack = np.stack(stack_layers, axis=-1).astype(np.uint8)
     return stack
 
-def sample_crop_max_size(crop_max_cfg):
-    if isinstance(crop_max_cfg, (list, tuple)):
-        if len(crop_max_cfg) != 2:
-            raise ValueError("compiler.crop_max_size range must contain exactly two values: [min, max]")
-        min_crop, max_crop = float(crop_max_cfg[0]), float(crop_max_cfg[1])
+def sample_crop_size(crop_cfg, name="crop_size"):
+    if isinstance(crop_cfg, (list, tuple)):
+        if len(crop_cfg) != 2:
+            raise ValueError(f"compiler.{name} range must contain exactly two values: [min, max]")
+        min_crop, max_crop = float(crop_cfg[0]), float(crop_cfg[1])
         if min_crop <= 0 or max_crop <= 0:
-            raise ValueError("compiler.crop_max_size values must be positive")
+            raise ValueError(f"compiler.{name} values must be positive")
         if max_crop < min_crop:
-            raise ValueError("compiler.crop_max_size range must be ordered as [min, max]")
+            raise ValueError(f"compiler.{name} range must be ordered as [min, max]")
         return float(np.random.uniform(min_crop, max_crop))
 
-    crop_max = float(crop_max_cfg)
-    if crop_max <= 0:
-        raise ValueError("compiler.crop_max_size must be positive")
-    return crop_max
+    crop_val = float(crop_cfg)
+    if crop_val <= 0:
+        raise ValueError(f"compiler.{name} must be positive")
+    return crop_val
 
 def main():
     parser = argparse.ArgumentParser(description="Compile dataset from cached flight files.")
@@ -138,9 +150,8 @@ def main():
     # Compiler settings
     layers = compiler_cfg['stack_layers']
     max_sz_cfg = compiler_cfg['crop_max_size']
-    min_sz = float(compiler_cfg['crop_min_size'])
-    if min_sz <= 0:
-        raise ValueError("compiler.crop_min_size must be positive")
+    min_sz_cfg = compiler_cfg['crop_min_size']
+    stack_jitter_ratio = compiler_cfg.get('stack_jitter_ratio', 0.0)
     tgt_sz = compiler_cfg['stack_target_size']
     sigma = compiler_cfg['heatmap_sigma']
     relative_sigma = compiler_cfg.get('heatmap_relative_sigma', None)
@@ -178,16 +189,15 @@ def main():
             
         # 1. Reference Initialization (from frame 0)
         frame_0 = flight_data[0]
-        flight_max_sz = sample_crop_max_size(max_sz_cfg)
-        flight_min_sz = min_sz
+        flight_max_sz = sample_crop_size(max_sz_cfg, "crop_max_size")
+        flight_min_sz = sample_crop_size(min_sz_cfg, "crop_min_size")
         if flight_max_sz < flight_min_sz:
-            raise ValueError(
-                f"Sampled crop_max_size ({flight_max_sz:.2f}) is smaller than crop_min_size ({flight_min_sz:.2f})"
-            )
+            flight_max_sz = flight_min_sz
         ref_stack = build_reference_stack(
             frame_0['image_gray'], 
             frame_0['target_2d'], 
-            layers, flight_max_sz, flight_min_sz, tgt_sz
+            layers, flight_max_sz, flight_min_sz, tgt_sz,
+            jitter_ratio=stack_jitter_ratio
         )
         ref_float = ref_stack.astype(np.float32) / 255.0
         

@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.19)
 project(first_demo C CXX)
 
+# Set default build type to Release if not specified
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    message(STATUS "Setting build type to 'Release' as none was specified.")
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+endif()
+
 # Set standard C++ dialect (C++11 is sufficient for std::thread, mutex, condition_variable)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,8 +55,11 @@ endif()
 # Thread support
 find_package(Threads REQUIRED)
 
+# OpenMP support
+find_package(OpenMP REQUIRED)
+
 # Options for Resize Mode selection (RGA, OMP, CPU)
-set(RESIZE_MODE "RGA" CACHE STRING "Resize mode: RGA, OMP, CPU")
+set(RESIZE_MODE "OMP" CACHE STRING "Resize mode: RGA, OMP, CPU")
 set_property(CACHE RESIZE_MODE PROPERTY STRINGS "RGA" "OMP" "CPU")
 
 set(EXTRA_LIBS "")
@@ -67,7 +77,7 @@ if(RESIZE_MODE STREQUAL "RGA")
     set(RGA_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../docker/rknn-toolkit2/rknpu2/examples/3rdparty/rga/include)
 elseif(RESIZE_MODE STREQUAL "OMP")
     message(STATUS "[CMake] Using OpenMP Parallel CPU acceleration for resizing")
-    find_package(OpenMP REQUIRED)
+    # OpenMP already found globally
 else()
     message(STATUS "[CMake] Using simple CPU single-threaded resizing")
 endif()
@@ -84,6 +94,7 @@ add_executable(first_demo
     src/core/CameraCapture.cpp
     src/core/TrackerService.cpp
     src/core/WebServer.cpp
+    src/core/DroneControler.cpp
 )
 
 target_compile_definitions(first_demo PRIVATE
@@ -115,17 +126,13 @@ target_link_libraries(first_demo PRIVATE
     ${RKNNRT_LIB}
     ${EXTRA_LIBS}
     Threads::Threads
+    OpenMP::OpenMP_CXX
     dl
 )
 
-# Link OpenMP if selected
-if(RESIZE_MODE STREQUAL "OMP" AND OpenMP_CXX_FOUND)
-    target_link_libraries(first_demo PRIVATE OpenMP::OpenMP_CXX)
-endif()
-
 # Standalone Subgraph RKNN Tester target
 add_executable(rknn_tester
-    src/tester/rknn_tester.cpp
+    tester/rknn_tester.cpp
 )
 
 target_compile_definitions(rknn_tester PRIVATE
@@ -143,5 +150,6 @@ target_include_directories(rknn_tester PRIVATE
 target_link_libraries(rknn_tester PRIVATE
     ${RKNNRT_LIB}
     Threads::Threads
+    OpenMP::OpenMP_CXX
     dl
 )

@@ -11,7 +11,6 @@ from utils.quantization_optimization import CustomLayerQuantizeConfig
 custom_objects = {
     "DepthwiseCorrelationFusion": tracker_model.DepthwiseCorrelationFusion,
     "DepthToSpace": tracker_model.DepthToSpace,
-    "HeatmapNormalization": tracker_model.HeatmapNormalization,
     "CustomLayerQuantizeConfig": CustomLayerQuantizeConfig,
 }
 
@@ -25,7 +24,6 @@ def annotate_layer(layer):
     elif layer.__class__.__name__ in (
         "DepthwiseCorrelationFusion",
         "DepthToSpace",
-        "HeatmapNormalization",
         "UpSampling2D",
         "AveragePooling2D",
         "MaxPooling2D",
