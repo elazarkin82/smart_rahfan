@@ -44,6 +44,7 @@ TrackerService::TrackerService(const char* template_path, const char* search_bac
     m_is_model_loaded = false;
     m_is_target_defined = false;
     m_callback = NULL;
+    m_drone_cb = NULL;
  
     m_min_crop = min_crop;
     m_max_crop = max_crop;
@@ -396,6 +397,13 @@ void TrackerService::set_tracker_callback(TrackerCallback* cb)
     m_callback = cb;
 }
 
+void TrackerService::set_drone_callback(IControlerCallback* cb)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_drone_cb = cb;
+}
+
+
 void TrackerService::refresh_target(const uchar* frame, int w, int h, int target_x, int target_y)
 {
     int c;
@@ -541,6 +549,11 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     if (!m_is_model_loaded || !m_is_target_defined)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_drone_cb != NULL)
+        {
+            m_drone_cb->send_command(1000, 1000, 1000, 1000);
+        }
         return;
     }
 
@@ -732,6 +745,15 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
         {
             m_callback->onTargetDetected(out_x, out_y);
             m_callback->onHeatmapCreated(m_heatmap_buf, m_out_width_hm, m_out_height_hm);
+        }
+        if (m_drone_cb != NULL)
+        {
+            int16_t roll = 1000;
+            int16_t pitch = 1000;
+            int dx = out_x - 128;
+            int dy = out_y - 128;
+            DroneControlerHal::calculate_tracking_commands(dx, dy, roll, pitch);
+            m_drone_cb->send_command(roll, pitch, 1000, 1000);
         }
     }
 }

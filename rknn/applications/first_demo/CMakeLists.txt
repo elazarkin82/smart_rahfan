@@ -87,6 +87,7 @@ add_executable(first_demo
     src/core/CameraCapture.cpp
     src/core/TrackerService.cpp
     src/core/WebServer.cpp
+    src/core/DroneControler.cpp
 )
 
 target_compile_definitions(first_demo PRIVATE

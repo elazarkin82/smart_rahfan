@@ -9,6 +9,7 @@ MainService::MainService(const char* params_path)
     m_camera = NULL;
     m_tracker = NULL;
     m_web_server = NULL;
+    m_drone = NULL;
     m_is_running = false;
     m_has_last_frame = false;
     m_has_pending_command = false;
@@ -37,6 +38,8 @@ MainService::MainService(const char* params_path)
         m_params.min_crop = 64.0f;
         m_params.max_crop = 256.0f;
         m_params.decode_argmax_only = 0;
+        snprintf(m_params.drone_serial_port, sizeof(m_params.drone_serial_port), "/dev/ttyUSB0");
+        m_params.drone_controller_id = -1;
         save_params_file(m_params_path, m_params);
     }
 
@@ -83,14 +86,18 @@ void MainService::start()
         m_params.decode_argmax_only != 0
     );
     m_web_server = new WebServer(8080);
+    m_drone = new DroneControler(m_params.drone_serial_port, m_params.drone_controller_id);
 
     // 2. Setup callbacks integration
     m_camera->set_capture_callback(this);
     m_tracker->set_tracker_callback(this);
     m_web_server->set_command_callback(this);
+    m_web_server->set_drone_callback(m_drone);
+    m_tracker->set_drone_callback(NULL);
 
     // 3. Start background threads
     m_camera->start_capture_thread();
+    m_drone->start();
     m_main_loop_thread = std::thread(&MainService::main_loop, this);
 
     fprintf(stdout, "[MainService] All sub-services initialized and started.\n");
@@ -130,6 +137,13 @@ void MainService::stop()
     {
         delete m_web_server;
         m_web_server = NULL;
+    }
+
+    if (m_drone != NULL)
+    {
+        m_drone->stop();
+        delete m_drone;
+        m_drone = NULL;
     }
 
     StatusObject::instance()->update("web_server_status", "Offline");
@@ -182,7 +196,6 @@ void MainService::onFrame(uchar* frame, int w, int h)
 
 void MainService::onTargetDetected(int x, int y)
 {
-    // Capture tracking coordinates (called by Tracker thread context)
     m_target_x = x;
     m_target_y = y;
 
@@ -236,6 +249,8 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
     char* nl;
 
     out.decode_argmax_only = 0; // Default fallback
+    snprintf(out.drone_serial_port, sizeof(out.drone_serial_port), "/dev/ttyUSB0");
+    out.drone_controller_id = -1;
 
     fp = fopen(params_path, "r");
     if (fp == NULL)
@@ -298,6 +313,14 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
             {
                 out.decode_argmax_only = atoi(val);
             }
+            else if (strcmp(key, "drone_serial_port") == 0)
+            {
+                snprintf(out.drone_serial_port, sizeof(out.drone_serial_port), "%s", val);
+            }
+            else if (strcmp(key, "drone_controller_id") == 0)
+            {
+                out.drone_controller_id = atoi(val);
+            }
         }
     }
 
@@ -322,6 +345,8 @@ void MainService::save_params_file(const char* params_path, const Params& in)
         fprintf(fp, "min_crop=%.1f\n", in.min_crop);
         fprintf(fp, "max_crop=%.1f\n", in.max_crop);
         fprintf(fp, "decode_argmax_only=%d\n", in.decode_argmax_only);
+        fprintf(fp, "drone_serial_port=%s\n", in.drone_serial_port);
+        fprintf(fp, "drone_controller_id=%d\n", in.drone_controller_id);
         fclose(fp);
         fprintf(stdout, "[MainService] Permanent configuration saved to %s\n", params_path);
     }
@@ -394,6 +419,10 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
             m_target_y = -1;
             StatusObject::instance()->update("tracking_status", "Target Not Selected");
             StatusObject::instance()->update("target_position", "N/A");
+            if (m_drone != NULL)
+            {
+                m_drone->update_channels(1000, 1000, 1000, 1000);
+            }
             break;
 
         case WebServer::CMD_CHOOSE_TARGET:
@@ -411,6 +440,28 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
                 // Reset tracker outputs coordinates to start fresh
                 m_target_x = (int)(x_n * 256.0f);
                 m_target_y = (int)(y_n * 256.0f);
+            }
+            break;
+
+        case WebServer::CMD_SET_AUTONOMOUS:
+            {
+                bool auto_mode = (atoi(values) != 0);
+                if (auto_mode)
+                {
+                    m_web_server->set_drone_callback(NULL);
+                    m_tracker->set_drone_callback(m_drone);
+                }
+                else
+                {
+                    m_web_server->set_drone_callback(m_drone);
+                    m_tracker->set_drone_callback(NULL);
+                }
+                // Send neutral commands to the drone upon switching modes for safety
+                if (m_drone != NULL)
+                {
+                    m_drone->send_command(1000, 1000, 1000, 1000);
+                }
+                fprintf(stdout, "[MainService] Autonomous mode set to: %d\n", auto_mode);
             }
             break;
     }

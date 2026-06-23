@@ -9,6 +9,7 @@
 #include "core/CameraCapture.h"
 #include "core/TrackerService.h"
 #include "core/WebServer.h"
+#include "core/DroneControler.h"
 
 class MainService : public CameraCapture::CaptureCallback,
                     public TrackerService::TrackerCallback,
@@ -27,6 +28,8 @@ public:
         float min_crop;
         float max_crop;
         int decode_argmax_only;
+        char drone_serial_port[256];
+        int drone_controller_id;
     };
 
 private:
@@ -36,6 +39,7 @@ private:
     CameraCapture* m_camera;
     TrackerService* m_tracker;
     WebServer* m_web_server;
+    DroneControler* m_drone;
 
     // Last captured frame buffer
     uchar* m_lastFrame;

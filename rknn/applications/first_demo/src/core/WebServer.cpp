@@ -180,6 +180,47 @@ const char* INDEX_HTML =
 "            <button class=\"btn\" style=\"width: 40px; padding: 5px;\" onclick=\"stepStack(1)\">&gt;</button>\n"
 "        </div>\n"
 "    </div>\n"
+"    <div class=\"card\" style=\"width: 250px;\">\n"
+"        <h2>Drone Control</h2>\n"
+"        <div style=\"display: flex; flex-direction: column; gap: 10px; align-items: center;\">\n"
+"            <div style=\"display: flex; gap: 5px;\">\n"
+"                <button class=\"btn\" style=\"width: 80px;\" onmousedown=\"sendManualControl(0, 500, 0, 0)\" onmouseup=\"resetManualControl()\">Pitch +</button>\n"
+"            </div>\n"
+"            <div style=\"display: flex; gap: 5px;\">\n"
+"                <button class=\"btn\" style=\"width: 80px;\" onmousedown=\"sendManualControl(-500, 0, 0, 0)\" onmouseup=\"resetManualControl()\">Roll -</button>\n"
+"                <button class=\"btn\" style=\"width: 80px; background: #4b5563;\" onclick=\"resetManualControl()\">Hover</button>\n"
+"                <button class=\"btn\" style=\"width: 80px;\" onmousedown=\"sendManualControl(500, 0, 0, 0)\" onmouseup=\"resetManualControl()\">Roll +</button>\n"
+"            </div>\n"
+"            <div style=\"display: flex; gap: 5px;\">\n"
+"                <button class=\"btn\" style=\"width: 80px;\" onmousedown=\"sendManualControl(0, -500, 0, 0)\" onmouseup=\"resetManualControl()\">Pitch -</button>\n"
+"            </div>\n"
+"            <div style=\"width: 100%; border-top: 1px solid #1f2937; margin: 10px 0;\"></div>\n"
+"            <div style=\"display: flex; gap: 10px; width: 100%;\">\n"
+"                <div style=\"flex-grow: 1;\">\n"
+"                    <label>Yaw</label>\n"
+"                    <div style=\"display: flex; gap: 5px; margin-top: 5px;\">\n"
+"                        <button class=\"btn\" style=\"padding: 5px;\" onmousedown=\"sendManualControl(0, 0, -500, 0)\" onmouseup=\"resetManualControl()\">L</button>\n"
+"                        <button class=\"btn\" style=\"padding: 5px;\" onmousedown=\"sendManualControl(0, 0, 500, 0)\" onmouseup=\"resetManualControl()\">R</button>\n"
+"                    </div>\n"
+"                </div>\n"
+"                <div style=\"flex-grow: 1;\">\n"
+"                    <label>Throttle</label>\n"
+"                    <div style=\"display: flex; gap: 5px; margin-top: 5px;\">\n"
+"                        <button class=\"btn\" style=\"padding: 5px;\" onmousedown=\"sendManualControl(0, 0, 0, 500)\" onmouseup=\"resetManualControl()\">U</button>\n"
+"                        <button class=\"btn\" style=\"padding: 5px;\" onmousedown=\"sendManualControl(0, 0, 0, -500)\" onmouseup=\"resetManualControl()\">D</button>\n"
+"                    </div>\n"
+"                </div>\n"
+"            </div>\n"
+"            <div style=\"width: 100%; border-top: 1px solid #1f2937; margin: 10px 0;\"></div>\n"
+"            <div class=\"form-group\" style=\"width: 100%;\">\n"
+"                <label>Flight Mode</label>\n"
+"                <div style=\"display: flex; align-items: center; justify-content: space-between; margin-top: 5px; background: #030712; padding: 10px; border-radius: 6px; border: 1px solid #374151;\">\n"
+"                    <span style=\"font-size: 14px; font-weight: 600; color: #f59e0b;\">MANUAL ONLY</span>\n"
+"                    <input type=\"checkbox\" id=\"autonomousMode\" disabled style=\"width: 20px; height: 20px; cursor: not-allowed;\">\n"
+"                </div>\n"
+"            </div>\n"
+"        </div>\n"
+"    </div>\n"
 "    <div class=\"status-card\">\n"
 "        <div class=\"card\">\n"
 "            <h2>Telemetry Status</h2>\n"
@@ -341,6 +382,70 @@ const char* INDEX_HTML =
 "\n"
 "setInterval(fetchStatus, 1000);\n"
 "fetchStatus();\n"
+"\n"
+"let rollVal = 1000;\n"
+"let pitchVal = 1000;\n"
+"let yawVal = 1000;\n"
+"let throttleVal = 1000;\n"
+"let activeKeys = {};\n"
+"\n"
+"function sendManualControl(r_off, p_off, y_off, t_off) {\n"
+"    rollVal = 1000 + r_off;\n"
+"    pitchVal = 1000 + p_off;\n"
+"    yawVal = 1000 + y_off;\n"
+"    throttleVal = 1000 + t_off;\n"
+"    \n"
+"    rollVal = Math.max(0, Math.min(2000, rollVal));\n"
+"    pitchVal = Math.max(0, Math.min(2000, pitchVal));\n"
+"    yawVal = Math.max(0, Math.min(2000, yawVal));\n"
+"    throttleVal = Math.max(0, Math.min(2000, throttleVal));\n"
+"    \n"
+"    fetch(`/command?cmd=DRONE_MANUAL&val=${rollVal},${pitchVal},${yawVal},${throttleVal}`);\n"
+"}\n"
+"\n"
+"function resetManualControl() {\n"
+"    rollVal = 1000;\n"
+"    pitchVal = 1000;\n"
+"    yawVal = 1000;\n"
+"    throttleVal = 1000;\n"
+"    fetch(`/command?cmd=DRONE_MANUAL&val=1000,1000,1000,1000`);\n"
+"}\n"
+"\n"
+"document.addEventListener('keydown', function(e) {\n"
+"    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].indexOf(e.code) > -1) {\n"
+"        e.preventDefault();\n"
+"    }\n"
+"    \n"
+"    if (activeKeys[e.code]) return;\n"
+"    activeKeys[e.code] = true;\n"
+"    \n"
+"    updateKeyboardControl();\n"
+"});\n"
+"\n"
+"document.addEventListener('keyup', function(e) {\n"
+"    delete activeKeys[e.code];\n"
+"    updateKeyboardControl();\n"
+"});\n"
+"\n"
+"function updateKeyboardControl() {\n"
+"    let r = 0, p = 0, y = 0, t = 0;\n"
+"    let active = false;\n"
+"    \n"
+"    if (activeKeys['KeyW'] || activeKeys['ArrowUp']) { p = 500; active = true; }\n"
+"    if (activeKeys['KeyS'] || activeKeys['ArrowDown']) { p = -500; active = true; }\n"
+"    if (activeKeys['KeyA'] || activeKeys['ArrowLeft']) { r = -500; active = true; }\n"
+"    if (activeKeys['KeyD'] || activeKeys['ArrowRight']) { r = 500; active = true; }\n"
+"    if (activeKeys['KeyQ']) { y = -500; active = true; }\n"
+"    if (activeKeys['KeyE']) { y = 500; active = true; }\n"
+"    if (activeKeys['Space']) { t = 500; active = true; }\n"
+"    if (activeKeys['ShiftLeft'] || activeKeys['ShiftRight']) { t = -500; active = true; }\n"
+"    \n"
+"    if (active) {\n"
+"        sendManualControl(r, p, y, t);\n"
+"    } else {\n"
+"        resetManualControl();\n"
+"    }\n"
+"}\n"
 "</script>\n"
 "</body>\n"
 "</html>\n";
@@ -420,6 +525,14 @@ public:
         else if (strcmp(cmd_buf, "RESET_TARGET") == 0)
         {
             cmd_key = WebServer::CMD_RESET_TARGET;
+        }
+        else if (strcmp(cmd_buf, "DRONE_MANUAL") == 0)
+        {
+            cmd_key = WebServer::CMD_DRONE_MANUAL;
+        }
+        else if (strcmp(cmd_buf, "SET_AUTONOMOUS") == 0)
+        {
+            cmd_key = WebServer::CMD_SET_AUTONOMOUS;
         }
 
         if (cmd_key != 0)
@@ -654,6 +767,7 @@ WebServer::WebServer(int port)
     int i;
 
     m_cmd_callback = NULL;
+    m_drone_cb = NULL;
     m_is_streaming = false;
     m_has_new_frame = false;
 
@@ -725,6 +839,13 @@ void WebServer::set_command_callback(CommandCallback* cb)
     std::lock_guard<std::mutex> lock(m_mutex);
     m_cmd_callback = cb;
 }
+
+void WebServer::set_drone_callback(IControlerCallback* cb)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_drone_cb = cb;
+}
+
 
 void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
 {
@@ -823,6 +944,14 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
 void WebServer::trigger_command(Command key, const char* values)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (key == CMD_DRONE_MANUAL && m_drone_cb != NULL)
+    {
+        int r = 1000, p = 1000, y = 1000, t = 1000;
+        if (sscanf(values, "%d,%d,%d,%d", &r, &p, &y, &t) == 4)
+        {
+            m_drone_cb->send_command((int16_t)r, (int16_t)p, (int16_t)y, (int16_t)t);
+        }
+    }
     if (m_cmd_callback != NULL)
     {
         m_cmd_callback->onCommand(key, values, (int)strlen(values));

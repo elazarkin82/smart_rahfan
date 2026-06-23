@@ -7,6 +7,8 @@
 #include <RgaApi.h>
 #include <im2d.h>
 #endif
+#include "utils/DroneControlerHal.hpp"
+
 
 typedef unsigned char uchar;
 
@@ -32,7 +34,9 @@ private:
     bool m_is_model_loaded;
     bool m_is_target_defined;
     TrackerCallback* m_callback;
+    IControlerCallback* m_drone_cb;
     std::mutex m_mutex;
+
 
     // Model tensor attributes
     int m_in_width_ref;
@@ -111,6 +115,7 @@ public:
     void refresh_target(const uchar* frame, int w, int h, int target_x, int target_y);
     void clear_target();
     void set_tracker_callback(TrackerCallback* cb);
+    void set_drone_callback(IControlerCallback* cb);
     void update_frame(uchar* frame, int w, int h);
 };
 
