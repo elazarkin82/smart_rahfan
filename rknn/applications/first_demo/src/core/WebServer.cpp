@@ -952,9 +952,12 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
     // Draw the tracking bounding box borders if target coordinates are valid
     if (m_target_x >= 0 && m_target_y >= 0)
     {
-        // Scale coordinate system from 256x256 to camera frame space
-        x_cam = (m_target_x * w) / 256;
-        y_cam = (m_target_y * h) / 256;
+        // Scale coordinate system from 256x256 search crop frame space back to camera frame space
+        int crop_size = std::min(w, h);
+        int x0 = (w - crop_size) / 2;
+        int y0 = (h - crop_size) / 2;
+        x_cam = x0 + (m_target_x * crop_size) / 256;
+        y_cam = y0 + (m_target_y * crop_size) / 256;
 
         box_size = 30;
         half = box_size / 2;

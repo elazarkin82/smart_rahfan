@@ -22,30 +22,20 @@
 #include <linux/dma-heap.h>
 #endif
 
-TrackerService::TrackerService(const char* template_path, const char* search_backbone_path, const char* decoder_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only)
+TrackerService::TrackerService(const char* model_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only)
 {
     FILE* fp;
     long model_size;
     void* model_data;
     int ret;
-    rknn_input_output_num io_num_temp;
-    rknn_input_output_num io_num_backbone;
-    rknn_input_output_num io_num_decoder;
-    rknn_tensor_attr template_in_attrs[1];
-    rknn_tensor_attr template_out_attrs[1];
-    rknn_tensor_attr backbone_in_attrs[1];
-    rknn_tensor_attr backbone_out_attrs[4];
-    rknn_tensor_attr decoder_in_attrs[2];
-    rknn_tensor_attr decoder_out_attrs[1];
- 
-    m_ctx_template = 0;
-    m_ctx_search_backbone = 0;
-    m_ctx_decoder = 0;
+    rknn_input_output_num io_num;
+
+    m_ctx_model = 0;
     m_is_model_loaded = false;
     m_is_target_defined = false;
     m_callback = NULL;
     m_drone_cb = NULL;
- 
+
     m_min_crop = min_crop;
     m_max_crop = max_crop;
     m_quality_enabled = quality_enabled;
@@ -62,23 +52,23 @@ TrackerService::TrackerService(const char* template_path, const char* search_bac
     m_rga_dst_handle = 0;
 #endif
 
-    m_in_width_ref = 64;
-    m_in_height_ref = 64;
-    m_in_channels_ref = 16;
+    m_in_width_ref = 128;
+    m_in_height_ref = 128;
+    m_in_channels_ref = 2;
 
     m_in_width_search = 256;
     m_in_height_search = 256;
     m_in_channels_search = 1;
 
-    m_out_width_hm = 256;
-    m_out_height_hm = 256;
+    m_out_width_hm = 32;
+    m_out_height_hm = 32;
 
-    // 1. Load template model file into memory
-    fp = fopen(template_path, "rb");
+    // Load model file into memory
+    fp = fopen(model_path, "rb");
     if (fp == NULL)
     {
-        fprintf(stderr, "[TrackerService] Failed to open template model file: %s\n", template_path);
-        StatusObject::instance()->update("tracker_model_status", "Error: Template File Not Found");
+        fprintf(stderr, "[TrackerService] Failed to open model file: %s\n", model_path);
+        StatusObject::instance()->update("tracker_model_status", "Error: Model File Not Found");
         return;
     }
 
@@ -90,7 +80,7 @@ TrackerService::TrackerService(const char* template_path, const char* search_bac
     if (model_data == NULL)
     {
         fclose(fp);
-        fprintf(stderr, "[TrackerService] Failed to allocate memory for template model buffer.\n");
+        fprintf(stderr, "[TrackerService] Failed to allocate memory for model buffer.\n");
         StatusObject::instance()->update("tracker_model_status", "Error: OOM on Load");
         return;
     }
@@ -99,276 +89,148 @@ TrackerService::TrackerService(const char* template_path, const char* search_bac
     {
         free(model_data);
         fclose(fp);
-        fprintf(stderr, "[TrackerService] Failed to read template model file contents.\n");
+        fprintf(stderr, "[TrackerService] Failed to read model file contents.\n");
         StatusObject::instance()->update("tracker_model_status", "Error: Read Failure");
         return;
     }
     fclose(fp);
 
-    // Initialize RKNN context for template encoder
-    ret = rknn_init(&m_ctx_template, model_data, model_size, 0, NULL);
+    // Initialize RKNN context for unified model
+    ret = rknn_init(&m_ctx_model, model_data, model_size, 0, NULL);
     free(model_data);
 
     if (ret < 0)
     {
-        fprintf(stderr, "[TrackerService] rknn_init for template failed: %d\n", ret);
-        StatusObject::instance()->update("tracker_model_status", "Error: Template NPU Init Failed");
+        fprintf(stderr, "[TrackerService] rknn_init failed: %d\n", ret);
+        StatusObject::instance()->update("tracker_model_status", "Error: NPU Init Failed");
         return;
     }
 
-    // 2. Load search backbone model file into memory
-    fp = fopen(search_backbone_path, "rb");
-    if (fp == NULL)
-    {
-        rknn_destroy(m_ctx_template);
-        fprintf(stderr, "[TrackerService] Failed to open search backbone model file: %s\n", search_backbone_path);
-        StatusObject::instance()->update("tracker_model_status", "Error: Backbone File Not Found");
-        return;
-    }
-
-    fseek(fp, 0, SEEK_END);
-    model_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-
-    model_data = malloc(model_size);
-    if (model_data == NULL)
-    {
-        fclose(fp);
-        rknn_destroy(m_ctx_template);
-        fprintf(stderr, "[TrackerService] Failed to allocate memory for search backbone model buffer.\n");
-        StatusObject::instance()->update("tracker_model_status", "Error: OOM on Load");
-        return;
-    }
-
-    if (fread(model_data, 1, model_size, fp) != (size_t)model_size)
-    {
-        free(model_data);
-        fclose(fp);
-        rknn_destroy(m_ctx_template);
-        fprintf(stderr, "[TrackerService] Failed to read search backbone model file contents.\n");
-        StatusObject::instance()->update("tracker_model_status", "Error: Read Failure");
-        return;
-    }
-    fclose(fp);
-
-    // Initialize RKNN context for search backbone
-    ret = rknn_init(&m_ctx_search_backbone, model_data, model_size, 0, NULL);
-    free(model_data);
-
+    // Query dynamic tensor info
+    ret = rknn_query(m_ctx_model, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
     if (ret < 0)
     {
-        rknn_destroy(m_ctx_template);
-        fprintf(stderr, "[TrackerService] rknn_init for search backbone failed: %d\n", ret);
-        StatusObject::instance()->update("tracker_model_status", "Error: Backbone NPU Init Failed");
+        fprintf(stderr, "[TrackerService] rknn_query RKNN_QUERY_IN_OUT_NUM failed: %d\n", ret);
+        rknn_destroy(m_ctx_model);
+        StatusObject::instance()->update("tracker_model_status", "Error: Query Failed");
         return;
     }
 
-    // 3. Load decoder model file into memory
-    fp = fopen(decoder_path, "rb");
-    if (fp == NULL)
+    if (io_num.n_input != 2 || io_num.n_output != 2)
     {
-        rknn_destroy(m_ctx_template);
-        rknn_destroy(m_ctx_search_backbone);
-        fprintf(stderr, "[TrackerService] Failed to open decoder model file: %s\n", decoder_path);
-        StatusObject::instance()->update("tracker_model_status", "Error: Decoder File Not Found");
+        fprintf(stderr, "[TrackerService] Expected 2 inputs and 2 outputs. Found inputs=%d outputs=%d\n", io_num.n_input, io_num.n_output);
+        rknn_destroy(m_ctx_model);
+        StatusObject::instance()->update("tracker_model_status", "Error: IO Count Mismatch");
         return;
     }
 
-    fseek(fp, 0, SEEK_END);
-    model_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-
-    model_data = malloc(model_size);
-    if (model_data == NULL)
-    {
-        fclose(fp);
-        rknn_destroy(m_ctx_template);
-        rknn_destroy(m_ctx_search_backbone);
-        fprintf(stderr, "[TrackerService] Failed to allocate memory for decoder model buffer.\n");
-        StatusObject::instance()->update("tracker_model_status", "Error: OOM on Load");
-        return;
-    }
-
-    if (fread(model_data, 1, model_size, fp) != (size_t)model_size)
-    {
-        free(model_data);
-        fclose(fp);
-        rknn_destroy(m_ctx_template);
-        rknn_destroy(m_ctx_search_backbone);
-        fprintf(stderr, "[TrackerService] Failed to read decoder model file contents.\n");
-        StatusObject::instance()->update("tracker_model_status", "Error: Read Failure");
-        return;
-    }
-    fclose(fp);
-
-    // Initialize RKNN context for decoder
-    ret = rknn_init(&m_ctx_decoder, model_data, model_size, 0, NULL);
-    free(model_data);
-
-    if (ret < 0)
-    {
-        rknn_destroy(m_ctx_template);
-        rknn_destroy(m_ctx_search_backbone);
-        fprintf(stderr, "[TrackerService] rknn_init for decoder failed: %d\n", ret);
-        StatusObject::instance()->update("tracker_model_status", "Error: Decoder NPU Init Failed");
-        return;
-    }
-
-    // 4. Query dynamic tensor dimensions & attributes
-    rknn_query(m_ctx_template, RKNN_QUERY_IN_OUT_NUM, &io_num_temp, sizeof(io_num_temp));
-    rknn_query(m_ctx_search_backbone, RKNN_QUERY_IN_OUT_NUM, &io_num_backbone, sizeof(io_num_backbone));
-    rknn_query(m_ctx_decoder, RKNN_QUERY_IN_OUT_NUM, &io_num_decoder, sizeof(io_num_decoder));
-    m_backbone_out_num = (int)io_num_backbone.n_output;
-
-    // Query attributes for template model
-    memset(template_in_attrs, 0, sizeof(template_in_attrs));
-    template_in_attrs[0].index = 0;
-    rknn_query(m_ctx_template, RKNN_QUERY_INPUT_ATTR, &template_in_attrs[0], sizeof(rknn_tensor_attr));
-
-    memset(template_out_attrs, 0, sizeof(template_out_attrs));
-    template_out_attrs[0].index = 0;
-    rknn_query(m_ctx_template, RKNN_QUERY_OUTPUT_ATTR, &template_out_attrs[0], sizeof(rknn_tensor_attr));
-    m_fmt_template = template_out_attrs[0].fmt;
-
-    // Query attributes for backbone model
-    memset(backbone_in_attrs, 0, sizeof(backbone_in_attrs));
-    backbone_in_attrs[0].index = 0;
-    rknn_query(m_ctx_search_backbone, RKNN_QUERY_INPUT_ATTR, &backbone_in_attrs[0], sizeof(rknn_tensor_attr));
-
-    // Query attributes for decoder output model
-    memset(decoder_out_attrs, 0, sizeof(decoder_out_attrs));
-    decoder_out_attrs[0].index = 0;
-    rknn_query(m_ctx_decoder, RKNN_QUERY_OUTPUT_ATTR, &decoder_out_attrs[0], sizeof(rknn_tensor_attr));
-
-    // Keep shapes (handle NCHW vs NHWC layouts dynamically based on channel position)
-    // Reference stack input has 2 channels
-    if (template_in_attrs[0].dims[1] == 2)
-    {
-        m_in_height_ref = template_in_attrs[0].dims[2];
-        m_in_width_ref = template_in_attrs[0].dims[3];
-        m_in_channels_ref = template_in_attrs[0].dims[1];
-    }
-    else
-    {
-        m_in_height_ref = template_in_attrs[0].dims[1];
-        m_in_width_ref = template_in_attrs[0].dims[2];
-        m_in_channels_ref = template_in_attrs[0].dims[3];
-    }
-
-    // Search frame input has 1 channel
-    if (backbone_in_attrs[0].dims[1] == 1)
-    {
-        m_in_height_search = backbone_in_attrs[0].dims[2];
-        m_in_width_search = backbone_in_attrs[0].dims[3];
-        m_in_channels_search = backbone_in_attrs[0].dims[1];
-    }
-    else
-    {
-        m_in_height_search = backbone_in_attrs[0].dims[1];
-        m_in_width_search = backbone_in_attrs[0].dims[2];
-        m_in_channels_search = backbone_in_attrs[0].dims[3];
-    }
-
-    // Heatmap output has 1 channel
-    if (decoder_out_attrs[0].dims[1] == 1)
-    {
-        m_out_height_hm = decoder_out_attrs[0].dims[2];
-        m_out_width_hm = decoder_out_attrs[0].dims[3];
-    }
-    else
-    {
-        m_out_height_hm = decoder_out_attrs[0].dims[1];
-        m_out_width_hm = decoder_out_attrs[0].dims[2];
-    }
-
-    // Dynamic output index resolution for Search Backbone based on shape (handles NCHW/NHWC layout query)
-    m_idx_skip3 = -1;
-    m_idx_search_features = -1;
-    m_fmt_skip3 = RKNN_TENSOR_NCHW;
-    m_fmt_search_features = RKNN_TENSOR_NCHW;
-
-    for (uint32_t i = 0; i < io_num_backbone.n_output; ++i)
+    // Map input tensors dynamically by name or shape
+    int ref_idx = -1;
+    int search_idx = -1;
+    for (uint32_t i = 0; i < io_num.n_input; ++i)
     {
         rknn_tensor_attr attr;
         attr.index = i;
-        rknn_query(m_ctx_search_backbone, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr));
-        
-        uint32_t channels = 0, height = 0, width = 0;
-        if (attr.dims[2] == attr.dims[3]) // NCHW layout: [batch, channels, height, width]
-        {
-            channels = attr.dims[1];
-            height = attr.dims[2];
-            width = attr.dims[3];
-        }
-        else // NHWC layout: [batch, height, width, channels]
-        {
-            height = attr.dims[1];
-            width = attr.dims[2];
-            channels = attr.dims[3];
-        }
-        
-        if (height == 32 && width == 32 && channels == 32)
-        {
-            m_idx_skip3 = (int)i;
-            m_fmt_skip3 = RKNN_TENSOR_NHWC;
-        }
-        else if (height == 16 && width == 16 && channels == 64)
-        {
-            m_idx_search_features = (int)i;
-            m_fmt_search_features = RKNN_TENSOR_NHWC;
-        }
+        rknn_query(m_ctx_model, RKNN_QUERY_INPUT_ATTR, &attr, sizeof(attr));
+        if (strstr(attr.name, "reference_stack") != NULL) ref_idx = (int)i;
+        else if (strstr(attr.name, "search_frame") != NULL) search_idx = (int)i;
     }
+    if (ref_idx == -1 || search_idx == -1)
+    {
+        fprintf(stdout, "[WARNING] Dynamic input name matching failed. Falling back to default order.\n");
+        ref_idx = 0;
+        search_idx = 1;
+    }
+    m_idx_ref_stack = ref_idx;
+    m_idx_search_frame = search_idx;
 
-    // Dynamic input index resolution for Decoder based on shape (NHWC layout query)
-    m_idx_dec_corr = -1;
-    m_idx_dec_skip3 = -1;
-
-    for (uint32_t i = 0; i < io_num_decoder.n_input; ++i)
+    // Map output tensors dynamically by element count
+    int hm_idx = -1;
+    int q_idx = -1;
+    for (uint32_t i = 0; i < io_num.n_output; ++i)
     {
         rknn_tensor_attr attr;
         attr.index = i;
-        rknn_query(m_ctx_decoder, RKNN_QUERY_INPUT_ATTR, &attr, sizeof(attr));
-        
-        uint32_t height = attr.dims[1];
-        uint32_t width = attr.dims[2];
-        uint32_t channels = attr.dims[3];
-        
-        if (height == 32 && width == 32 && channels == 32) m_idx_dec_skip3 = (int)i;
-        else if (height == 16 && width == 16 && channels == 64) m_idx_dec_corr = (int)i;
+        rknn_query(m_ctx_model, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr));
+        if (attr.n_elems == 1) q_idx = (int)i;
+        else hm_idx = (int)i;
     }
-
-    if (m_idx_skip3 == -1 || m_idx_search_features == -1 || m_idx_dec_corr == -1 || m_idx_dec_skip3 == -1)
+    if (hm_idx == -1 || q_idx == -1)
     {
-        fprintf(stderr, "[TrackerService] Error: Failed to resolve all tensor indices.\n");
-        m_is_model_loaded = false;
-        return;
+        fprintf(stdout, "[WARNING] Dynamic output mapping failed. Falling back to default order.\n");
+        hm_idx = 0;
+        q_idx = 1;
+    }
+    m_idx_heatmap = hm_idx;
+    m_idx_quality = q_idx;
+
+    // Query attributes to extract shapes
+    rknn_tensor_attr ref_attr;
+    ref_attr.index = m_idx_ref_stack;
+    rknn_query(m_ctx_model, RKNN_QUERY_INPUT_ATTR, &ref_attr, sizeof(ref_attr));
+
+    rknn_tensor_attr search_attr;
+    search_attr.index = m_idx_search_frame;
+    rknn_query(m_ctx_model, RKNN_QUERY_INPUT_ATTR, &search_attr, sizeof(search_attr));
+
+    rknn_tensor_attr hm_attr;
+    hm_attr.index = m_idx_heatmap;
+    rknn_query(m_ctx_model, RKNN_QUERY_OUTPUT_ATTR, &hm_attr, sizeof(hm_attr));
+
+    // Reference stack shape extraction (dynamic)
+    if (ref_attr.dims[1] == 2 || ref_attr.dims[1] == 16)
+    {
+        m_in_height_ref = ref_attr.dims[2];
+        m_in_width_ref = ref_attr.dims[3];
+        m_in_channels_ref = ref_attr.dims[1];
+    }
+    else
+    {
+        m_in_height_ref = ref_attr.dims[1];
+        m_in_width_ref = ref_attr.dims[2];
+        m_in_channels_ref = ref_attr.dims[3];
     }
 
-    fprintf(stdout, "[TrackerService] Loaded split RKNN model subgraphs successfully.\n");
-    fprintf(stdout, " - Template Input (Reference): %dx%dx%d\n", m_in_width_ref, m_in_height_ref, m_in_channels_ref);
-    fprintf(stdout, " - Backbone Input (Search): %dx%dx%d\n", m_in_width_search, m_in_height_search, m_in_channels_search);
-    fprintf(stdout, " - Decoder Output (Heatmap): %dx%d\n", m_out_width_hm, m_out_height_hm);
-    fprintf(stdout, " - Backbone Outputs: skip3_idx=%d, search_features_idx=%d\n", m_idx_skip3, m_idx_search_features);
-    fprintf(stdout, " - Decoder Inputs: corr_features_idx=%d, skip3_idx=%d\n", m_idx_dec_corr, m_idx_dec_skip3);
+    // Search frame shape extraction (dynamic)
+    if (search_attr.dims[1] == 1)
+    {
+        m_in_height_search = search_attr.dims[2];
+        m_in_width_search = search_attr.dims[3];
+        m_in_channels_search = search_attr.dims[1];
+    }
+    else
+    {
+        m_in_height_search = search_attr.dims[1];
+        m_in_width_search = search_attr.dims[2];
+        m_in_channels_search = search_attr.dims[3];
+    }
+
+    // Heatmap shape extraction (dynamic)
+    if (hm_attr.dims[1] == 1)
+    {
+        m_out_height_hm = hm_attr.dims[2];
+        m_out_width_hm = hm_attr.dims[3];
+    }
+    else
+    {
+        m_out_height_hm = hm_attr.dims[1];
+        m_out_width_hm = hm_attr.dims[2];
+    }
 
     m_is_model_loaded = true;
-    StatusObject::instance()->update("tracker_model_status", "Loaded & Ready");
+    StatusObject::instance()->update("tracker_model_status", "Model Loaded Successfully");
 
     // Initialize pre-allocated buffers (static sizing)
     memset(m_ref_stack_buf, 0, sizeof(m_ref_stack_buf));
     memset(m_search_buf, 0, sizeof(m_search_buf));
     memset(m_heatmap_buf, 0, sizeof(m_heatmap_buf));
-    memset(m_template_features, 0, sizeof(m_template_features));
-    memset(m_corr_out_buf, 0, sizeof(m_corr_out_buf));
 }
 
 TrackerService::~TrackerService()
 {
     if (m_is_model_loaded)
     {
-        rknn_destroy(m_ctx_template);
-        rknn_destroy(m_ctx_search_backbone);
-        rknn_destroy(m_ctx_decoder);
+        rknn_destroy(m_ctx_model);
 #if defined(USE_RGA)
         release_rga_buffers();
 #endif
@@ -412,10 +274,7 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
     float max_sz;
     float min_sz;
     int y, x;
-    uchar* temp_64x64;
-    int ret;
-    rknn_input inputs[1];
-    rknn_output outputs[1];
+    uchar* temp_ref;
 
     if (!m_is_model_loaded)
     {
@@ -424,7 +283,7 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
 
     max_sz = m_max_crop;
     min_sz = m_min_crop;
-    temp_64x64 = (uchar*)malloc(m_in_width_ref * m_in_height_ref);
+    temp_ref = (uchar*)malloc(m_in_width_ref * m_in_height_ref);
 
     for (c = 0; c < m_in_channels_ref; ++c)
     {
@@ -453,63 +312,20 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
             }
         }
 
-        resize_bilinear_gray(crop_buf, sz_int, sz_int, temp_64x64, m_in_width_ref, m_in_height_ref);
+        resize_bilinear_gray(crop_buf, sz_int, sz_int, temp_ref, m_in_width_ref, m_in_height_ref);
         
         for (y = 0; y < m_in_height_ref; ++y)
         {
             for (x = 0; x < m_in_width_ref; ++x)
             {
-                m_ref_stack_buf[(y * m_in_width_ref + x) * m_in_channels_ref + c] = temp_64x64[y * m_in_width_ref + x];
+                m_ref_stack_buf[(y * m_in_width_ref + x) * m_in_channels_ref + c] = temp_ref[y * m_in_width_ref + x];
             }
         }
 
         free(crop_buf);
     }
 
-    free(temp_64x64);
-
-    // Run NPU inference on template context to compute template features
-    memset(inputs, 0, sizeof(inputs));
-    inputs[0].index = 0;
-    inputs[0].type = RKNN_TENSOR_UINT8;
-    inputs[0].size = m_in_width_ref * m_in_height_ref * m_in_channels_ref;
-    inputs[0].buf = m_ref_stack_buf;
-    inputs[0].fmt = RKNN_TENSOR_NHWC;
-
-    ret = rknn_inputs_set(m_ctx_template, 1, inputs);
-    if (ret < 0)
-    {
-        fprintf(stderr, "[TrackerService] Failed to set inputs for template model: %d\n", ret);
-        return;
-    }
-
-    ret = rknn_run(m_ctx_template, NULL);
-    if (ret < 0)
-    {
-        fprintf(stderr, "[TrackerService] Failed to run template model: %d\n", ret);
-        return;
-    }
-
-    memset(outputs, 0, sizeof(outputs));
-    outputs[0].want_float = 1; // Get features in FP32 format for CPU depthwise correlation
-    ret = rknn_outputs_get(m_ctx_template, 1, outputs, NULL);
-    if (ret < 0)
-    {
-        fprintf(stderr, "[TrackerService] Failed to get outputs for template model: %d\n", ret);
-        return;
-    }
-
-    // Copy to template features cache
-    memcpy(m_template_features, outputs[0].buf, 64 * 8 * 8 * sizeof(float));
-    if (m_fmt_template == RKNN_TENSOR_NHWC)
-    {
-        NNOperationsCpu::transpose_nhwc_to_nchw(m_template_features, m_template_features_nchw, 1, 64, 8, 8);
-    }
-    else
-    {
-        memcpy(m_template_features_nchw, m_template_features, 64 * 8 * 8 * sizeof(float));
-    }
-    rknn_outputs_release(m_ctx_template, 1, outputs);
+    free(temp_ref);
 
     std::lock_guard<std::mutex> lock(m_mutex);
     m_is_target_defined = true;
@@ -522,29 +338,21 @@ void TrackerService::refresh_target(const uchar* frame, int w, int h, int target
 
 void TrackerService::update_frame(uchar* frame, int w, int h)
 {
-    rknn_input inputs_sb[1];
-    rknn_output outputs_sb[4];
-    rknn_input inputs_d[2];
-    rknn_output outputs_d[1];
+    rknn_input inputs[2];
+    rknn_output outputs[2];
     int ret;
     int out_x;
     int out_y;
     std::chrono::steady_clock::time_point t_start;
     std::chrono::steady_clock::time_point t_resize_start;
     std::chrono::steady_clock::time_point t_resize_end;
-    std::chrono::steady_clock::time_point t_sb_start;
-    std::chrono::steady_clock::time_point t_sb_end;
-    std::chrono::steady_clock::time_point t_corr_start;
-    std::chrono::steady_clock::time_point t_corr_end;
-    std::chrono::steady_clock::time_point t_dec_start;
-    std::chrono::steady_clock::time_point t_dec_end;
+    std::chrono::steady_clock::time_point t_npu_start;
+    std::chrono::steady_clock::time_point t_npu_end;
     std::chrono::steady_clock::time_point t_decode_start;
     std::chrono::steady_clock::time_point t_decode_end;
     std::chrono::steady_clock::time_point t_end;
     float resize_ms;
-    float sb_ms;
-    float corr_ms;
-    float dec_ms;
+    float npu_ms;
     float decode_ms;
     float total_ms;
     char time_buf[64];
@@ -566,133 +374,55 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     resize_center_square_bilinear_gray(frame, w, h, m_search_buf, m_in_width_search, m_in_height_search);
     t_resize_end = std::chrono::steady_clock::now();
 
-    // 2. Setup Search Backbone inputs
-    memset(inputs_sb, 0, sizeof(inputs_sb));
-    inputs_sb[0].index = 0;
-    inputs_sb[0].type = RKNN_TENSOR_UINT8;
-    inputs_sb[0].size = m_in_width_search * m_in_height_search * m_in_channels_search;
-    inputs_sb[0].buf = m_search_buf;
-    inputs_sb[0].fmt = RKNN_TENSOR_NHWC;
+    // 2. Setup inputs
+    memset(inputs, 0, sizeof(inputs));
 
-    t_sb_start = std::chrono::steady_clock::now();
-    ret = rknn_inputs_set(m_ctx_search_backbone, 1, inputs_sb);
+    inputs[m_idx_ref_stack].index = m_idx_ref_stack;
+    inputs[m_idx_ref_stack].type = RKNN_TENSOR_UINT8;
+    inputs[m_idx_ref_stack].size = m_in_width_ref * m_in_height_ref * m_in_channels_ref;
+    inputs[m_idx_ref_stack].buf = m_ref_stack_buf;
+    inputs[m_idx_ref_stack].fmt = RKNN_TENSOR_NHWC;
+
+    inputs[m_idx_search_frame].index = m_idx_search_frame;
+    inputs[m_idx_search_frame].type = RKNN_TENSOR_UINT8;
+    inputs[m_idx_search_frame].size = m_in_width_search * m_in_height_search * m_in_channels_search;
+    inputs[m_idx_search_frame].buf = m_search_buf;
+    inputs[m_idx_search_frame].fmt = RKNN_TENSOR_NHWC;
+
+    t_npu_start = std::chrono::steady_clock::now();
+    ret = rknn_inputs_set(m_ctx_model, 2, inputs);
     if (ret < 0)
     {
-        fprintf(stderr, "[TrackerService] rknn_inputs_set search backbone failed: %d\n", ret);
+        fprintf(stderr, "[TrackerService] rknn_inputs_set failed: %d\n", ret);
         return;
     }
 
-    ret = rknn_run(m_ctx_search_backbone, NULL);
+    ret = rknn_run(m_ctx_model, NULL);
     if (ret < 0)
     {
-        fprintf(stderr, "[TrackerService] rknn_run search backbone failed: %d\n", ret);
+        fprintf(stderr, "[TrackerService] rknn_run failed: %d\n", ret);
         return;
     }
 
-    memset(outputs_sb, 0, sizeof(outputs_sb));
-    for (int i = 0; i < m_backbone_out_num; ++i)
-    {
-        outputs_sb[i].index = i;
-        outputs_sb[i].want_float = 1;
-    }
+    memset(outputs, 0, sizeof(outputs));
+    outputs[0].index = 0;
+    outputs[0].want_float = 1;
+    outputs[1].index = 1;
+    outputs[1].want_float = 1;
 
-    ret = rknn_outputs_get(m_ctx_search_backbone, m_backbone_out_num, outputs_sb, NULL);
+    ret = rknn_outputs_get(m_ctx_model, 2, outputs, NULL);
     if (ret < 0)
     {
-        fprintf(stderr, "[TrackerService] rknn_outputs_get search backbone failed: %d\n", ret);
+        fprintf(stderr, "[TrackerService] rknn_outputs_get failed: %d\n", ret);
         return;
     }
-    t_sb_end = std::chrono::steady_clock::now();
+    t_npu_end = std::chrono::steady_clock::now();
 
-    // 3. Run CPU Depthwise Correlation (expects NCHW, produces NCHW)
-    t_corr_start = std::chrono::steady_clock::now();
-    if (m_fmt_search_features == RKNN_TENSOR_NHWC)
-    {
-        NNOperationsCpu::transpose_nhwc_to_nchw(
-            (const float*)outputs_sb[m_idx_search_features].buf,
-            m_search_features_nchw,
-            1, 64, 16, 16
-        );
-    }
-    else
-    {
-        memcpy(m_search_features_nchw, outputs_sb[m_idx_search_features].buf, 64 * 16 * 16 * sizeof(float));
-    }
-
-    NNOperationsCpu::depthwise_correlation_nchw_neon_omp(
-        m_search_features_nchw,      // search features
-        m_template_features_nchw,     // kernel features
-        m_corr_out_buf,               // output
-        64, 16, 16, 8, 8
-    );
-
-    // Transpose correlation output and skip3 output to NHWC layout (needed for Decoder inputs)
-    NNOperationsCpu::transpose_nchw_to_nhwc(m_corr_out_buf, m_corr_out_nhwc, 1, 64, 16, 16);
-    
-    if (m_fmt_skip3 == RKNN_TENSOR_NHWC)
-    {
-        memcpy(m_skip3_nhwc, outputs_sb[m_idx_skip3].buf, 32 * 32 * 32 * sizeof(float));
-    }
-    else
-    {
-        NNOperationsCpu::transpose_nchw_to_nhwc(
-            (const float*)outputs_sb[m_idx_skip3].buf,
-            m_skip3_nhwc,
-            1, 32, 32, 32
-        );
-    }
-    t_corr_end = std::chrono::steady_clock::now();
-
-    // 4. Setup Decoder inputs
-    memset(inputs_d, 0, sizeof(inputs_d));
-
-    inputs_d[m_idx_dec_corr].index = m_idx_dec_corr;
-    inputs_d[m_idx_dec_corr].type = RKNN_TENSOR_FLOAT32;
-    inputs_d[m_idx_dec_corr].size = 16 * 16 * 64 * sizeof(float);
-    inputs_d[m_idx_dec_corr].buf = m_corr_out_nhwc;
-    inputs_d[m_idx_dec_corr].fmt = RKNN_TENSOR_NHWC;
-
-    inputs_d[m_idx_dec_skip3].index = m_idx_dec_skip3;
-    inputs_d[m_idx_dec_skip3].type = RKNN_TENSOR_FLOAT32;
-    inputs_d[m_idx_dec_skip3].size = 32 * 32 * 32 * sizeof(float);
-    inputs_d[m_idx_dec_skip3].buf = m_skip3_nhwc;
-    inputs_d[m_idx_dec_skip3].fmt = RKNN_TENSOR_NHWC;
-
-    t_dec_start = std::chrono::steady_clock::now();
-    ret = rknn_inputs_set(m_ctx_decoder, 2, inputs_d);
-    if (ret < 0)
-    {
-        fprintf(stderr, "[TrackerService] rknn_inputs_set decoder failed: %d\n", ret);
-        rknn_outputs_release(m_ctx_search_backbone, m_backbone_out_num, outputs_sb);
-        return;
-    }
-
-    ret = rknn_run(m_ctx_decoder, NULL);
-    if (ret < 0)
-    {
-        fprintf(stderr, "[TrackerService] rknn_run decoder failed: %d\n", ret);
-        rknn_outputs_release(m_ctx_search_backbone, m_backbone_out_num, outputs_sb);
-        return;
-    }
-
-    memset(outputs_d, 0, sizeof(outputs_d));
-    outputs_d[0].index = 0;
-    outputs_d[0].want_float = 1;
-
-    ret = rknn_outputs_get(m_ctx_decoder, 1, outputs_d, NULL);
-    if (ret < 0)
-    {
-        fprintf(stderr, "[TrackerService] rknn_outputs_get decoder failed: %d\n", ret);
-        rknn_outputs_release(m_ctx_search_backbone, m_backbone_out_num, outputs_sb);
-        return;
-    }
-    t_dec_end = std::chrono::steady_clock::now();
-
-    // 5. Decode heatmap using standard argmax
+    // 3. Decode heatmap and extract quality
     t_decode_start = std::chrono::steady_clock::now();
     
     // Scale raw heatmap outputs from pre_threshold range [-1.0, 1.0] back to standard [0.0, 1.0]
-    const float* raw_hm = (const float*)outputs_d[0].buf;
+    const float* raw_hm = (const float*)outputs[m_idx_heatmap].buf;
     for (int i = 0; i < m_out_width_hm * m_out_height_hm; ++i)
     {
         m_heatmap_buf[i] = (raw_hm[i] + 1.0f) / 2.0f;
@@ -710,17 +440,20 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     }
     t_decode_end = std::chrono::steady_clock::now();
 
-    // Release all outputs
-    rknn_outputs_release(m_ctx_decoder, 1, outputs_d);
-    rknn_outputs_release(m_ctx_search_backbone, m_backbone_out_num, outputs_sb);
+    float q_val = 0.0f;
+    if (m_quality_enabled)
+    {
+        q_val = ((float*)outputs[m_idx_quality].buf)[0];
+    }
+
+    // Release NPU outputs
+    rknn_outputs_release(m_ctx_model, 2, outputs);
 
     t_end = std::chrono::steady_clock::now();
 
     // Calculate times in milliseconds
     resize_ms = std::chrono::duration<float, std::milli>(t_resize_end - t_resize_start).count();
-    sb_ms = std::chrono::duration<float, std::milli>(t_sb_end - t_sb_start).count();
-    corr_ms = std::chrono::duration<float, std::milli>(t_corr_end - t_corr_start).count();
-    dec_ms = std::chrono::duration<float, std::milli>(t_dec_end - t_dec_start).count();
+    npu_ms = std::chrono::duration<float, std::milli>(t_npu_end - t_npu_start).count();
     decode_ms = std::chrono::duration<float, std::milli>(t_decode_end - t_decode_start).count();
     total_ms = std::chrono::duration<float, std::milli>(t_end - t_start).count();
 
@@ -728,19 +461,27 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     snprintf(time_buf, sizeof(time_buf), "%.2f ms", resize_ms);
     StatusObject::instance()->update("tracker_time_resize", time_buf);
 
-    snprintf(time_buf, sizeof(time_buf), "%.2f ms (SB:%.1f, Dec:%.1f)", sb_ms + dec_ms, sb_ms, dec_ms);
+    snprintf(time_buf, sizeof(time_buf), "%.2f ms", npu_ms);
     StatusObject::instance()->update("tracker_time_npu", time_buf);
 
-    snprintf(time_buf, sizeof(time_buf), "%.2f ms (CPU Corr:%.1f)", decode_ms + corr_ms, corr_ms);
+    snprintf(time_buf, sizeof(time_buf), "%.2f ms (CPU decode)", decode_ms);
     StatusObject::instance()->update("tracker_time_decode", time_buf);
 
     snprintf(time_buf, sizeof(time_buf), "%.2f ms", total_ms);
     StatusObject::instance()->update("tracker_time_total", time_buf);
 
     // Update StatusObject with quality telemetry
-    StatusObject::instance()->update("tracker_quality", "Disabled");
+    if (m_quality_enabled)
+    {
+        snprintf(time_buf, sizeof(time_buf), "%.4f", q_val);
+        StatusObject::instance()->update("tracker_quality", time_buf);
+    }
+    else
+    {
+        StatusObject::instance()->update("tracker_quality", "Disabled");
+    }
 
-    // 6. Trigger TrackerCallback
+    // 4. Trigger TrackerCallback
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_callback != NULL)

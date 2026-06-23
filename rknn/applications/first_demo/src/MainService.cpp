@@ -31,9 +31,7 @@ MainService::MainService(const char* params_path)
         snprintf(m_params.cam_dev, sizeof(m_params.cam_dev), "/dev/video0");
         m_params.width = 640;
         m_params.height = 480;
-        snprintf(m_params.rknn_template_model_path, sizeof(m_params.rknn_template_model_path), "tracker_template.rknn");
-        snprintf(m_params.rknn_search_backbone_model_path, sizeof(m_params.rknn_search_backbone_model_path), "tracker_search_backbone.rknn");
-        snprintf(m_params.rknn_decoder_model_path, sizeof(m_params.rknn_decoder_model_path), "tracker_decoder.rknn");
+        snprintf(m_params.rknn_model_path, sizeof(m_params.rknn_model_path), "matmul_corr.rknn");
         snprintf(m_params.quality_mode, sizeof(m_params.quality_mode), "disabled");
         m_params.min_crop = 64.0f;
         m_params.max_crop = 256.0f;
@@ -76,11 +74,9 @@ void MainService::start()
 
     // 1. Create sub-services
     m_camera = new CameraCapture(m_params.cam_dev, m_params.width, m_params.height);
-    bool quality_enabled = false;
+    bool quality_enabled = (strcmp(m_params.quality_mode, "disabled") != 0);
     m_tracker = new TrackerService(
-        m_params.rknn_template_model_path,
-        m_params.rknn_search_backbone_model_path,
-        m_params.rknn_decoder_model_path,
+        m_params.rknn_model_path,
         m_params.min_crop,
         m_params.max_crop,
         quality_enabled,
@@ -286,17 +282,9 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
             {
                 out.height = atoi(val);
             }
-            else if (strcmp(key, "rknn_template_model_path") == 0)
+            else if (strcmp(key, "rknn_model_path") == 0)
             {
-                snprintf(out.rknn_template_model_path, sizeof(out.rknn_template_model_path), "%s", val);
-            }
-            else if (strcmp(key, "rknn_search_backbone_model_path") == 0)
-            {
-                snprintf(out.rknn_search_backbone_model_path, sizeof(out.rknn_search_backbone_model_path), "%s", val);
-            }
-            else if (strcmp(key, "rknn_decoder_model_path") == 0)
-            {
-                snprintf(out.rknn_decoder_model_path, sizeof(out.rknn_decoder_model_path), "%s", val);
+                snprintf(out.rknn_model_path, sizeof(out.rknn_model_path), "%s", val);
             }
             else if (strcmp(key, "quality_mode") == 0)
             {
@@ -339,9 +327,7 @@ void MainService::save_params_file(const char* params_path, const Params& in)
         fprintf(fp, "cam_dev=%s\n", in.cam_dev);
         fprintf(fp, "capture_width=%d\n", in.width);
         fprintf(fp, "capture_height=%d\n", in.height);
-        fprintf(fp, "rknn_template_model_path=%s\n", in.rknn_template_model_path);
-        fprintf(fp, "rknn_search_backbone_model_path=%s\n", in.rknn_search_backbone_model_path);
-        fprintf(fp, "rknn_decoder_model_path=%s\n", in.rknn_decoder_model_path);
+        fprintf(fp, "rknn_model_path=%s\n", in.rknn_model_path);
         fprintf(fp, "quality_mode=%s\n", in.quality_mode);
         fprintf(fp, "min_crop=%.1f\n", in.min_crop);
         fprintf(fp, "max_crop=%.1f\n", in.max_crop);
@@ -441,9 +427,12 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
                 // Initialize tracker reference templates with full frame and target pixel coordinates
                 m_tracker->refresh_target(m_lastFrame, m_lastFrame_w, m_lastFrame_h, target_px, target_py);
 
-                // Reset tracker outputs coordinates to start fresh
-                m_target_x = (int)(x_n * 256.0f);
-                m_target_y = (int)(y_n * 256.0f);
+                // Reset tracker outputs coordinates relative to the 256x256 search crop frame space
+                int crop_size = std::min(m_lastFrame_w, m_lastFrame_h);
+                int x0 = (m_lastFrame_w - crop_size) / 2;
+                int y0 = (m_lastFrame_h - crop_size) / 2;
+                m_target_x = ((target_px - x0) * 256) / crop_size;
+                m_target_y = ((target_py - y0) * 256) / crop_size;
             }
             break;
 
