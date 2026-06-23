@@ -36,6 +36,7 @@ MainService::MainService(const char* params_path)
         snprintf(m_params.quality_mode, sizeof(m_params.quality_mode), "disabled");
         m_params.min_crop = 64.0f;
         m_params.max_crop = 256.0f;
+        m_params.decode_argmax_only = 0;
         save_params_file(m_params_path, m_params);
     }
 
@@ -78,7 +79,8 @@ void MainService::start()
         m_params.rknn_decoder_model_path,
         m_params.min_crop,
         m_params.max_crop,
-        quality_enabled
+        quality_enabled,
+        m_params.decode_argmax_only != 0
     );
     m_web_server = new WebServer(8080);
 
@@ -233,6 +235,8 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
     char* val;
     char* nl;
 
+    out.decode_argmax_only = 0; // Default fallback
+
     fp = fopen(params_path, "r");
     if (fp == NULL)
     {
@@ -290,6 +294,10 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
             {
                 out.max_crop = (float)atof(val);
             }
+            else if (strcmp(key, "decode_argmax_only") == 0)
+            {
+                out.decode_argmax_only = atoi(val);
+            }
         }
     }
 
@@ -313,6 +321,7 @@ void MainService::save_params_file(const char* params_path, const Params& in)
         fprintf(fp, "quality_mode=%s\n", in.quality_mode);
         fprintf(fp, "min_crop=%.1f\n", in.min_crop);
         fprintf(fp, "max_crop=%.1f\n", in.max_crop);
+        fprintf(fp, "decode_argmax_only=%d\n", in.decode_argmax_only);
         fclose(fp);
         fprintf(stdout, "[MainService] Permanent configuration saved to %s\n", params_path);
     }

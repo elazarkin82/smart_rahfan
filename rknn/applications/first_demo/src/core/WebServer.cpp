@@ -665,7 +665,7 @@ WebServer::WebServer(int port)
     m_has_new_heatmap = false;
     m_is_heatmap_streaming = false;
 
-    m_frame_buf = (uchar*)malloc(1920 * 1280);
+    m_frame_buf = (uchar*)malloc(1920 * 1280 * 3);
     m_jpeg_buf = (uchar*)malloc(1920 * 1280);
     m_jpeg_size = 0;
 
@@ -739,8 +739,13 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
 
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    // Copy raw grayscale frame internally
-    memcpy(m_frame_buf, frame, w * h);
+    // Convert raw grayscale frame to RGB internally
+    for (int i = 0; i < w * h; ++i)
+    {
+        m_frame_buf[i * 3 + 0] = frame[i]; // R
+        m_frame_buf[i * 3 + 1] = frame[i]; // G
+        m_frame_buf[i * 3 + 2] = frame[i]; // B
+    }
     m_frame_w = w;
     m_frame_h = h;
     m_target_x = target_x;
@@ -761,42 +766,50 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
         y_start = y_cam - half;
         y_end = y_cam + half;
 
-        // Draw horizontal boundaries (white = 255)
+        // Draw horizontal boundaries (green: R=0, G=255, B=0)
         for (cx = x_start; cx <= x_end; ++cx)
         {
             if (cx >= 0 && cx < w)
             {
                 if (y_start >= 0 && y_start < h)
                 {
-                    m_frame_buf[y_start * w + cx] = 255;
+                    m_frame_buf[(y_start * w + cx) * 3 + 0] = 0;   // R
+                    m_frame_buf[(y_start * w + cx) * 3 + 1] = 255; // G
+                    m_frame_buf[(y_start * w + cx) * 3 + 2] = 0;   // B
                 }
                 if (y_end >= 0 && y_end < h)
                 {
-                    m_frame_buf[y_end * w + cx] = 255;
+                    m_frame_buf[(y_end * w + cx) * 3 + 0] = 0;   // R
+                    m_frame_buf[(y_end * w + cx) * 3 + 1] = 255; // G
+                    m_frame_buf[(y_end * w + cx) * 3 + 2] = 0;   // B
                 }
             }
         }
 
-        // Draw vertical boundaries
+        // Draw vertical boundaries (green: R=0, G=255, B=0)
         for (cy = y_start; cy <= y_end; ++cy)
         {
             if (cy >= 0 && cy < h)
             {
                 if (x_start >= 0 && x_start < w)
                 {
-                    m_frame_buf[cy * w + x_start] = 255;
+                    m_frame_buf[(cy * w + x_start) * 3 + 0] = 0;   // R
+                    m_frame_buf[(cy * w + x_start) * 3 + 1] = 255; // G
+                    m_frame_buf[(cy * w + x_start) * 3 + 2] = 0;   // B
                 }
                 if (x_end >= 0 && x_end < w)
                 {
-                    m_frame_buf[cy * w + x_end] = 255;
+                    m_frame_buf[(cy * w + x_end) * 3 + 0] = 0;   // R
+                    m_frame_buf[(cy * w + x_end) * 3 + 1] = 255; // G
+                    m_frame_buf[(cy * w + x_end) * 3 + 2] = 0;   // B
                 }
             }
         }
     }
 
-    // Perform the grayscale JPEG compression inside Web context thread trigger
+    // Perform the RGB JPEG compression inside Web context thread trigger
     t_comp_start = std::chrono::steady_clock::now();
-    compress_gray_to_jpeg(m_frame_buf, m_frame_w, m_frame_h, m_jpeg_buf, &m_jpeg_size);
+    compress_rgb_to_jpeg(m_frame_buf, m_frame_w, m_frame_h, m_jpeg_buf, &m_jpeg_size);
     t_comp_end = std::chrono::steady_clock::now();
 
     comp_ms = std::chrono::duration<float, std::milli>(t_comp_end - t_comp_start).count();
@@ -939,7 +952,8 @@ void WebServer::compress_rgb_to_jpeg(const uchar* rgb_buf, int w, int h, uchar* 
 
     jpeg_finish_compress(&cinfo);
 
-    if (outsize < 256 * 256 * 3)
+    unsigned long max_size = (w == 256 && h == 256) ? (256 * 256 * 3) : (1920 * 1280);
+    if (outsize < max_size)
     {
         memcpy(dest_buf, outbuffer, outsize);
         *dest_size = outsize;

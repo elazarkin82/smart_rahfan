@@ -50,6 +50,7 @@ private:
     float m_min_crop;
     float m_max_crop;
     bool m_quality_enabled;
+    bool m_use_argmax_only;
 
     // Resolved tensor indices
     int m_idx_skip3;
@@ -102,7 +103,7 @@ private:
     void decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y);
 
 public:
-    TrackerService(const char* template_path, const char* search_backbone_path, const char* decoder_path, float min_crop, float max_crop, bool quality_enabled);
+    TrackerService(const char* template_path, const char* search_backbone_path, const char* decoder_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only = false);
     ~TrackerService();
 
     bool is_model_loaded() const;

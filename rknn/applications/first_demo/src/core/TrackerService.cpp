@@ -22,7 +22,7 @@
 #include <linux/dma-heap.h>
 #endif
 
-TrackerService::TrackerService(const char* template_path, const char* search_backbone_path, const char* decoder_path, float min_crop, float max_crop, bool quality_enabled)
+TrackerService::TrackerService(const char* template_path, const char* search_backbone_path, const char* decoder_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only)
 {
     FILE* fp;
     long model_size;
@@ -48,6 +48,7 @@ TrackerService::TrackerService(const char* template_path, const char* search_bac
     m_min_crop = min_crop;
     m_max_crop = max_crop;
     m_quality_enabled = quality_enabled;
+    m_use_argmax_only = use_argmax_only;
 #if defined(USE_RGA)
     m_rga_initialized = false;
     m_rga_src_w      = 0;
@@ -1135,6 +1136,13 @@ void TrackerService::decode_heatmap(const float* raw_heatmap, int* out_x, int* o
 
     int max_y = max_flat_idx / m_out_width_hm;
     int max_x = max_flat_idx % m_out_width_hm;
+
+    if (m_use_argmax_only)
+    {
+        *out_x = max_x;
+        *out_y = max_y;
+        return;
+    }
 
     // 2. Define 15x15 local window centered at peak
     int y_start = std::max(0, max_y - 7);

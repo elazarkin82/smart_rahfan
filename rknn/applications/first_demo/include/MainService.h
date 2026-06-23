@@ -26,6 +26,7 @@ public:
         char quality_mode[64];
         float min_crop;
         float max_crop;
+        int decode_argmax_only;
     };
 
 private:
