@@ -225,6 +225,7 @@ def load_model_config(config_path="model.conf"):
 
     stack_layers      = config.getint("Stack", "stack_layers",      fallback=16)
     stack_target_size = config.getint("Stack", "stack_target_size", fallback=64)
+    search_frame_size = config.getint("Stack", "search_frame_size", fallback=256)
     reference_feature_size = config.getint("Stack", "reference_feature_size", fallback=8)
     reference_downscale = config.get("Stack", "reference_downscale", fallback="auto")
 
@@ -241,6 +242,7 @@ def load_model_config(config_path="model.conf"):
         "normalization_type": norm_type,
         "stack_layers": stack_layers,
         "stack_target_size": stack_target_size,
+        "search_frame_size": search_frame_size,
         "reference_feature_size": reference_feature_size,
         "reference_downscale": reference_downscale,
     }
@@ -331,6 +333,10 @@ stack_layers = 16
 # Must match compiler.stack_target_size in dataset_generator/pipeline_config.json.
 stack_target_size = 64
 
+# Spatial size (px) of the search frame.
+# Must match compiler.search_frame_size in dataset_generator/pipeline_config.json.
+search_frame_size = 256
+
 # Spatial size of reference encoder features used as depthwise-correlation weights.
 # Keep smaller than the search feature map, usually 8 when search bottleneck is 16.
 reference_feature_size = 8
@@ -392,13 +398,13 @@ def soft_argmax_2d(heatmap, beta=30.0):
     
     return tf.concat([pred_y, pred_x], axis=-1) # shape (B, 2)
 
-def coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality, c_bg=3.0, beta=15.0):
+def coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality, c_bg=3.0, beta=15.0, coordinate_scale=256.0):
     # 1. Differentiable Soft-Argmax to extract coordinates from predicted heatmap
     pred_coords_soft = soft_argmax_2d(pred_heatmap, beta=beta)
     
-    # 2. Scale both predicted and ground-truth coordinates to 256.0 space to compute Huber loss in pixel units
+    # 2. Scale both predicted and ground-truth coordinates to target coordinate space to compute Huber loss in pixel units
     huber = tf.keras.losses.Huber(delta=1.0, reduction=tf.keras.losses.Reduction.NONE)
-    loss_coords = huber(gt_coords * 256.0, pred_coords_soft * 256.0)
+    loss_coords = huber(gt_coords * coordinate_scale, pred_coords_soft * coordinate_scale)
     loss_coords = tf.reshape(loss_coords, [-1, 1])
     
     # 3. DBSZ ReLU / MSE loss on negative samples (predicted heatmap vs zero map)
@@ -513,11 +519,10 @@ def fold_model_weights(unfolded_model, folded_model):
 # =====================================================================
 
 class TargetTrackerVer5:
-    def __init__(self, ref_shape=None, search_shape=(256, 256, 1), config_path="model.conf"):
-        self.search_shape = search_shape
+    def __init__(self, ref_shape=None, search_shape=None, config_path="model.conf"):
         self.model = None
 
-        # Load configuration first so ref_shape can be derived from stack params
+        # Load configuration first so ref_shape / search_shape can be derived from stack params
         resolved_config_path = config_path
         if resolved_config_path and not os.path.isabs(resolved_config_path) and not os.path.exists(resolved_config_path):
             alt_path = os.path.join(os.path.dirname(__file__), resolved_config_path)
@@ -539,6 +544,7 @@ class TargetTrackerVer5:
                 "soft_argmax_beta": 15.0,
                 "stack_layers": 16,
                 "stack_target_size": 64,
+                "search_frame_size": 256,
                 "reference_feature_size": 8,
                 "reference_downscale": "auto",
             }
@@ -550,6 +556,13 @@ class TargetTrackerVer5:
             self.ref_shape = (sz, sz, ch)
         else:
             self.ref_shape = ref_shape
+
+        # Derive search_shape from config unless explicitly overridden by the caller
+        if search_shape is None:
+            s_sz = self.config.get("search_frame_size", 256)
+            self.search_shape = (s_sz, s_sz, 1)
+        else:
+            self.search_shape = search_shape
 
     def _inverted_residual_block(self, inputs, expansion, filters, strides, name_prefix):
         x = inputs
@@ -1032,6 +1045,11 @@ class TargetTrackerVer5:
         attn_mech = self.config["attention_mechanism"]
         
         # 2. Attention Fusion
+        ref_feat_sz = self.config.get("reference_feature_size", 8)
+        search_feat_sz = self.search_shape[0] // 16
+        ref_flat_sz = ref_feat_sz * ref_feat_sz
+        search_flat_sz = search_feat_sz * search_feat_sz
+        
         if attn_mech == "depthwise_corr":
             fused_features = DepthwiseCorrelationFusion(name="depthwise_correlation_fusion")([search_features, ref_features])
             c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
@@ -1048,9 +1066,9 @@ class TargetTrackerVer5:
             k_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="k_proj")(ref_features)
             v_proj = layers.Conv2D(c_v, (1, 1), use_bias=False, name="v_proj")(ref_features)
             
-            q_flat = layers.Reshape((256, c_qk), name="q_flat")(q_proj)
-            k_flat = layers.Reshape((64, c_qk), name="k_flat")(k_proj)
-            v_flat = layers.Reshape((64, c_v), name="v_flat")(v_proj)
+            q_flat = layers.Reshape((search_flat_sz, c_qk), name="q_flat")(q_proj)
+            k_flat = layers.Reshape((ref_flat_sz, c_qk), name="k_flat")(k_proj)
+            v_flat = layers.Reshape((ref_flat_sz, c_v), name="v_flat")(v_proj)
             
             q_soft = layers.Softmax(axis=-1, name="q_softmax")(q_flat)
             k_soft = layers.Softmax(axis=1, name="k_softmax")(k_flat)
@@ -1058,16 +1076,16 @@ class TargetTrackerVer5:
             k_trans = layers.Permute((2, 1), name="k_trans")(k_soft)
             kv = layers.Dot(axes=(2, 1), name="kv_dot")([k_trans, v_flat])
             fused_flat = layers.Dot(axes=(2, 1), name="linear_attention_dot")([q_soft, kv])
-            fused_features = layers.Reshape((16, 16, c_v), name="fused_features_reshape")(fused_flat)
+            fused_features = layers.Reshape((search_feat_sz, search_feat_sz, c_v), name="fused_features_reshape")(fused_flat)
             
         elif attn_mech == "multi_head_cross":
             c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
-            q_flat = layers.Reshape((256, c_v), name="q_flat")(search_features)
-            kv_flat = layers.Reshape((64, c_v), name="kv_flat")(ref_features)
+            q_flat = layers.Reshape((search_flat_sz, c_v), name="q_flat")(search_features)
+            kv_flat = layers.Reshape((ref_flat_sz, c_v), name="kv_flat")(ref_features)
             
             mha = layers.MultiHeadAttention(num_heads=4, key_dim=c_v // 4, name="mha_fusion")
             fused_flat = mha(query=q_flat, value=kv_flat, key=kv_flat)
-            fused_features = layers.Reshape((16, 16, c_v), name="fused_features_reshape")(fused_flat)
+            fused_features = layers.Reshape((search_feat_sz, search_feat_sz, c_v), name="fused_features_reshape")(fused_flat)
             
         else: # dot_cross
             c_qk = scale_filters(64) if bb_type != "custom_legacy" else 64
@@ -1077,22 +1095,22 @@ class TargetTrackerVer5:
             k_proj = layers.Conv2D(c_qk, (1, 1), use_bias=False, name="k_proj")(ref_features)
             v_proj = layers.Conv2D(c_v, (1, 1), use_bias=False, name="v_proj")(ref_features)
             
-            q_flat = layers.Reshape((256, c_qk), name="q_flat")(q_proj)
-            k_flat = layers.Reshape((64, c_qk), name="k_flat")(k_proj)
-            v_flat = layers.Reshape((64, c_v), name="v_flat")(v_proj)
+            q_flat = layers.Reshape((search_flat_sz, c_qk), name="q_flat")(q_proj)
+            k_flat = layers.Reshape((ref_flat_sz, c_qk), name="k_flat")(k_proj)
+            v_flat = layers.Reshape((ref_flat_sz, c_v), name="v_flat")(v_proj)
             
             attn_weights = layers.Dot(axes=(2, 2), name="attention_dot")([q_flat, k_flat])
             attn_weights = layers.Rescaling(scale=1.0 / np.sqrt(c_qk), name="attention_scale")(attn_weights)
             attn_weights = layers.Softmax(axis=-1, name="attention_softmax")(attn_weights)
             
             fused_flat = layers.Dot(axes=(2, 1), name="attention_value_dot")([attn_weights, v_flat])
-            fused_features = layers.Reshape((16, 16, c_v), name="fused_features_reshape")(fused_flat)
+            fused_features = layers.Reshape((search_feat_sz, search_feat_sz, c_v), name="fused_features_reshape")(fused_flat)
             
         # 3. Decoder for Output 1: Heatmap
         dec_type = self.config["decoder_type"]
         heatmap_pxl_size = self.config.get("heatmap_pxl_size", 64)
         
-        curr_size = 16
+        curr_size = search_feat_sz
         x = fused_features
         skips = [sb_ir2, sb_ir1, sb_init]
         stage = 1
@@ -1171,17 +1189,10 @@ class TargetTrackerVer5:
         output_heatmap = layers.Activation("linear", name="predicted_heatmap")(heatmap_for_loss)
         
         # 4. Heatmap-Guided Classification Branch
-        ds_factor = heatmap_pxl_size // 16
-        if ds_factor >= 2:
-            hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap_processed)
-            pool_size = ds_factor // 2
-            if pool_size > 1:
-                hm_pool = layers.AveragePooling2D(pool_size=pool_size, name="quality_hm_pool")(hm_feat)
-            else:
-                hm_pool = hm_feat
-        else:
-            hm_feat = layers.Conv2D(8, (3, 3), strides=1, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap_processed)
-            hm_pool = hm_feat
+        hm_feat = layers.Conv2D(8, (3, 3), strides=1, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap_processed)
+        
+        target_h, target_w = fused_features.shape[1], fused_features.shape[2]
+        hm_pool = layers.Resizing(target_h, target_w, interpolation="bilinear", name="quality_hm_resize")(hm_feat)
             
         q_fused = layers.Concatenate(axis=-1, name="quality_fusion")([fused_features, hm_pool])
         
@@ -1277,7 +1288,7 @@ class TargetTrackerVer5:
                 "model_heatmap_output": self.config.get("heatmap_output_source", "pre_threshold"),
                 "processed_heatmap_tensor": "predicted_heatmap_processed",
                 "decode": "argmax_or_local_centroid",
-                "coordinate_scale": 256,
+                "coordinate_scale": self.search_shape[0],
             },
         }
 
@@ -1319,18 +1330,20 @@ class TargetTrackerVer5:
                     gt_coords,
                     pred_heatmap,
                     gt_quality,
-                    beta=self.config.get("soft_argmax_beta", 15.0)
+                    beta=self.config.get("soft_argmax_beta", 15.0),
+                    coordinate_scale=float(self.search_shape[0])
                 )
                 
             if train_mode == "heatmap_only":
                 loss_quality = tf.constant(0.0, dtype=tf.float32)
             else:
                 pred_coords = get_peak_coords_tf(pred_heatmap)
-                # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
+                # Scale predicted coordinates to coordinate space (from [0, H-1] space)
                 H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
-                pred_coords_scaled = pred_coords * (256.0 / H)
-                # Compare against gt_coords scaled to 256.0 space
-                dist = tf.norm(pred_coords_scaled - gt_coords * 256.0, axis=-1, keepdims=True)
+                coord_scale = float(self.search_shape[0])
+                pred_coords_scaled = pred_coords * (coord_scale / H)
+                # Compare against gt_coords scaled to coordinate space
+                dist = tf.norm(pred_coords_scaled - gt_coords * coord_scale, axis=-1, keepdims=True)
                 dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                 target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                 target_quality = tf.stop_gradient(target_quality)
@@ -1397,18 +1410,20 @@ class TargetTrackerVer5:
                         gt_coords,
                         pred_heatmap,
                         gt_quality,
-                        beta=self.config.get("soft_argmax_beta", 15.0)
+                        beta=self.config.get("soft_argmax_beta", 15.0),
+                        coordinate_scale=float(self.search_shape[0])
                     )
                     
                 if train_mode == "heatmap_only":
                     loss_quality = tf.constant(0.0, dtype=tf.float32)
                 else:
                     pred_coords = get_peak_coords_tf(pred_heatmap)
-                    # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
+                    # Scale predicted coordinates to coordinate space (from [0, H-1] space)
                     H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
-                    pred_coords_scaled = pred_coords * (256.0 / H)
-                    # Compare against gt_coords scaled to 256.0 space
-                    dist = tf.norm(pred_coords_scaled - gt_coords * 256.0, axis=-1, keepdims=True)
+                    coord_scale = float(self.search_shape[0])
+                    pred_coords_scaled = pred_coords * (coord_scale / H)
+                    # Compare against gt_coords scaled to coordinate space
+                    dist = tf.norm(pred_coords_scaled - gt_coords * coord_scale, axis=-1, keepdims=True)
                     dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                     target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                     target_quality = tf.stop_gradient(target_quality)

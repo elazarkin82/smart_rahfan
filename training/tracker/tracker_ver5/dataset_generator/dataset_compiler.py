@@ -105,29 +105,29 @@ def sample_crop_size(crop_cfg, name="crop_size"):
 def main():
     parser = argparse.ArgumentParser(description="Compile dataset from cached flight files.")
     parser.add_argument(
-        '--cache-dirs',
-        nargs='+',
-        help="Optional list of cache directory paths containing flight_*.pkl files. Overrides config setting."
+        '--config_json',
+        type=str,
+        default='pipeline_config.json',
+        help="Path to the pipeline configuration JSON file."
     )
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    config = load_config()
+    config = load_config(args.config_json)
+    
+    compiler_cfg = config['compiler']
     
     # Resolve cache directories
-    if args.cache_dirs:
-        cache_dirs = []
-        for path in args.cache_dirs:
-            if not os.path.isabs(path):
-                path = os.path.join(script_dir, path)
-            cache_dirs.append(os.path.abspath(path))
-    else:
-        cache_dir = config['generation'].get('cache_dir', 'cache')
-        if not os.path.isabs(cache_dir):
-            cache_dir = os.path.join(script_dir, cache_dir)
-        cache_dirs = [os.path.abspath(cache_dir)]
+    cache_dirs_cfg = compiler_cfg['cache_dirs']
+    if isinstance(cache_dirs_cfg, str):
+        cache_dirs_cfg = [cache_dirs_cfg]
         
-    compiler_cfg = config['compiler']
+    cache_dirs = []
+    for path in cache_dirs_cfg:
+        if not os.path.isabs(path):
+            path = os.path.join(script_dir, path)
+        cache_dirs.append(os.path.abspath(path))
+        
     dataset_dir = compiler_cfg['dataset_dir']
     if not os.path.isabs(dataset_dir):
         dataset_dir = os.path.join(script_dir, dataset_dir)
@@ -153,6 +153,7 @@ def main():
     min_sz_cfg = compiler_cfg['crop_min_size']
     stack_jitter_ratio = compiler_cfg.get('stack_jitter_ratio', 0.0)
     tgt_sz = compiler_cfg['stack_target_size']
+    search_sz = compiler_cfg.get('search_frame_size', 256)
     sigma = compiler_cfg['heatmap_sigma']
     relative_sigma = compiler_cfg.get('heatmap_relative_sigma', None)
     neg_sample_ratio = compiler_cfg.get('synthetic_negative_ratio', compiler_cfg.get('negative_sample_ratio', 0.20))
@@ -168,7 +169,7 @@ def main():
     
     # Extendable datasets
     ref_ds = f_h5.create_dataset('reference_stack', shape=(0, tgt_sz, tgt_sz, layers), maxshape=(None, tgt_sz, tgt_sz, layers), dtype='float32', chunks=(16, tgt_sz, tgt_sz, layers))
-    search_ds = f_h5.create_dataset('search_frame', shape=(0, 256, 256, 1), maxshape=(None, 256, 256, 1), dtype='float32', chunks=(16, 256, 256, 1))
+    search_ds = f_h5.create_dataset('search_frame', shape=(0, search_sz, search_sz, 1), maxshape=(None, search_sz, search_sz, 1), dtype='float32', chunks=(16, search_sz, search_sz, 1))
     coords_ds = f_h5.create_dataset('ground_truth_coords', shape=(0, 2), maxshape=(None, 2), dtype='float32', chunks=(16, 2))
     quality_ds = f_h5.create_dataset('ground_truth_quality', shape=(0, 1), maxshape=(None, 1), dtype='float32', chunks=(16, 1))
     
@@ -228,7 +229,7 @@ def main():
             if target_2d is None:
                 # Natural negative frame
                 search_crop_gray = get_crop(search_frame_gray, w_s / 2.0, h_s / 2.0, s_crop)
-                search_resized = cv2.resize(search_crop_gray, (256, 256), interpolation=cv2.INTER_LINEAR)
+                search_resized = cv2.resize(search_crop_gray, (search_sz, search_sz), interpolation=cv2.INTER_LINEAR)
                 search_float = search_resized.astype(np.float32) / 255.0
                 search_float = np.expand_dims(search_float, axis=-1)
                 
@@ -247,18 +248,18 @@ def main():
             dy = distance * np.sin(angle)
             
             search_crop_gray = get_crop(search_frame_gray, target_2d[0] + dx, target_2d[1] + dy, s_crop)
-            search_resized = cv2.resize(search_crop_gray, (256, 256), interpolation=cv2.INTER_LINEAR)
+            search_resized = cv2.resize(search_crop_gray, (search_sz, search_sz), interpolation=cv2.INTER_LINEAR)
             search_float = search_resized.astype(np.float32) / 255.0
             search_float = np.expand_dims(search_float, axis=-1)
             
             local_target_2d = (half - dx, half - dy)
             
-            # Scale target local coordinates to 256x256 space
-            scale_factor = 256.0 / s_crop
+            # Scale target local coordinates to search_sz x search_sz space
+            scale_factor = float(search_sz) / s_crop
             local_target_2d_scaled = (local_target_2d[0] * scale_factor, local_target_2d[1] * scale_factor)
             
             # Save coordinates in [y, x] format normalized to [0, 1] space
-            coords_float = np.array([local_target_2d_scaled[1] / 256.0, local_target_2d_scaled[0] / 256.0], dtype=np.float32)
+            coords_float = np.array([local_target_2d_scaled[1] / float(search_sz), local_target_2d_scaled[0] / float(search_sz)], dtype=np.float32)
             
             quality_score = 1.0
             
@@ -277,7 +278,7 @@ def main():
                 s_crop_neg = min(h_n, w_n)
                 
                 search_crop_gray_neg = get_crop(search_frame_gray_neg, w_n / 2.0, h_n / 2.0, s_crop_neg)
-                search_resized_neg = cv2.resize(search_crop_gray_neg, (256, 256), interpolation=cv2.INTER_LINEAR)
+                search_resized_neg = cv2.resize(search_crop_gray_neg, (search_sz, search_sz), interpolation=cv2.INTER_LINEAR)
                 search_float_neg = search_resized_neg.astype(np.float32) / 255.0
                 search_float_neg = np.expand_dims(search_float_neg, axis=-1)
                 
