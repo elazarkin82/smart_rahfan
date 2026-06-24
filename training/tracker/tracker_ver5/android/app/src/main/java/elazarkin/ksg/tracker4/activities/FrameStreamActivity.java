@@ -54,9 +54,14 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private TextView tutorialHud;
     private TextView lblStatus;
     private Button btnBack;
+    private Button btnToggleControls;
+    private Button btnHideControls;
     private androidx.appcompat.widget.SwitchCompat switchBypassQuality;
     private androidx.appcompat.widget.SwitchCompat switchExperimentalPrevReference;
 
+    private View topBar;
+    private View bottomDashboard;
+    private View workspaceContainer;
     private LinearLayout resultsPanel;
     private ImageView heatmapImageView;
     private TextView txtLatency;
@@ -78,6 +83,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
     private CameraHelper cameraHelper;
     private boolean isLoopActive = false;
+    private boolean controlsVisible = true;
     
     private float targetX = 0.0f;
     private float targetY = 0.0f;
@@ -103,9 +109,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private java.nio.ByteBuffer outputQualityBuffer = null;
 
     private float[] initialReferenceStackLayers = null;
-    private float[] initialSmallestReferenceLayer = null;
     private volatile float[] previousFrameReferenceStackLayers = null;
-    private int smallestReferenceLayerIndex = 0;
     private volatile boolean experimentalPrevReferenceMode = false;
 
     private Interpreter tflite;
@@ -133,11 +137,16 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_frame_stream);
 
+        topBar = findViewById(R.id.top_bar);
+        bottomDashboard = findViewById(R.id.bottom_dashboard);
+        workspaceContainer = findViewById(R.id.workspace_container);
         viewFinder = findViewById(R.id.viewFinder);
         capturedImageView = findViewById(R.id.capturedImageView);
         tutorialHud = findViewById(R.id.tutorial_hud);
         lblStatus = findViewById(R.id.lbl_status);
         btnBack = findViewById(R.id.btn_back);
+        btnToggleControls = findViewById(R.id.btn_toggle_controls);
+        btnHideControls = findViewById(R.id.btn_hide_controls);
         switchBypassQuality = findViewById(R.id.switch_bypass_quality);
         switchExperimentalPrevReference = findViewById(R.id.switch_experimental_prev_reference);
 
@@ -242,10 +251,13 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
 
         btnBack.setOnClickListener(v -> finish());
+        btnToggleControls.setOnClickListener(v -> setControlsVisible(true));
+        btnHideControls.setOnClickListener(v -> setControlsVisible(false));
         switchExperimentalPrevReference.setOnCheckedChangeListener((buttonView, isChecked) -> {
             experimentalPrevReferenceMode = isChecked;
             previousFrameReferenceStackLayers = null;
         });
+        setControlsVisible(false);
         
         capturedImageView.setOnTouchListener((v, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
@@ -294,6 +306,36 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                 lblStatus.setText("Status: Camera bind failed!");
             }
         });
+    }
+
+    private void setControlsVisible(boolean visible) {
+        controlsVisible = visible;
+        topBar.setVisibility(visible ? View.VISIBLE : View.GONE);
+        bottomDashboard.setVisibility(visible ? View.VISIBLE : View.GONE);
+        btnToggleControls.setVisibility(visible ? View.GONE : View.VISIBLE);
+
+        androidx.constraintlayout.widget.ConstraintLayout.LayoutParams params =
+                (androidx.constraintlayout.widget.ConstraintLayout.LayoutParams) workspaceContainer.getLayoutParams();
+        if (visible) {
+            params.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.topToBottom = R.id.top_bar;
+            params.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.bottomToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.startToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.endToStart = R.id.content_guideline;
+            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+        } else {
+            params.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.topToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.bottomToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.startToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.endToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+        }
+        workspaceContainer.setLayoutParams(params);
     }
 
     @Override
@@ -360,8 +402,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     }
 
     private float getReferenceCropSizeForLayer(int layer, int frameHeight) {
-        float maxCropSize = (480.0f / 640.0f) * frameHeight;
-        float minCropSize = (128.0f / 640.0f) * frameHeight;
+        float maxCropSize = (128.0f / 640.0f) * frameHeight;
+        float minCropSize = (480.0f / 640.0f) * frameHeight;
         if (refLayers <= 1) {
             return minCropSize;
         }
@@ -409,27 +451,12 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     }
 
     private void writeExperimentalReferenceStackToInputBuffer(float[] previousStackLayers) {
-        if (previousStackLayers == null || initialSmallestReferenceLayer == null || refStackInputBuffer == null) {
+        if (previousStackLayers == null || refStackInputBuffer == null) {
             writeReferenceStackToInputBuffer(initialReferenceStackLayers);
             return;
         }
 
-        refStackInputBuffer.rewind();
-        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
-        for (int layer = 0; layer < refLayers; layer++) {
-            for (int y = 0; y < refH; y++) {
-                for (int x = 0; x < refW; x++) {
-                    float value;
-                    if (layer == smallestReferenceLayerIndex) {
-                        value = initialSmallestReferenceLayer[y * refW + x];
-                    } else {
-                        value = previousStackLayers[canonicalReferenceIndex(layer, y, x)];
-                    }
-                    refFloatBuffer.put(modelReferenceIndex(layer, y, x), value);
-                }
-            }
-        }
-        refStackInputBuffer.rewind();
+        writeReferenceStackToInputBuffer(previousStackLayers);
     }
 
     private void prepareReferenceInputForCurrentFrame() {
@@ -438,14 +465,6 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         } else {
             writeReferenceStackToInputBuffer(initialReferenceStackLayers);
         }
-    }
-
-    private void cacheInitialSmallestReferenceLayer() {
-        if (initialReferenceStackLayers == null || refLayers <= 0) return;
-        smallestReferenceLayerIndex = refLayers - 1;
-        initialSmallestReferenceLayer = new float[refH * refW];
-        int srcOffset = smallestReferenceLayerIndex * refH * refW;
-        System.arraycopy(initialReferenceStackLayers, srcOffset, initialSmallestReferenceLayer, 0, refH * refW);
     }
 
     private void gatherReferenceFrame(byte[] yPlane, int width, int height) {
@@ -465,7 +484,6 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         int stride = width; // rotated frame stride is width
 
         initialReferenceStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, cx, cy);
-        cacheInitialSmallestReferenceLayer();
         previousFrameReferenceStackLayers = null;
         writeReferenceStackToInputBuffer(initialReferenceStackLayers);
         
@@ -829,7 +847,6 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         currentUiState = STATE_IDLE;
         resultsPanel.setVisibility(View.GONE);
         initialReferenceStackLayers = null;
-        initialSmallestReferenceLayer = null;
         previousFrameReferenceStackLayers = null;
         
         tutorialHud.setText("Tap screen to lock on target");

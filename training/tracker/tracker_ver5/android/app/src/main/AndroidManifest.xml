@@ -27,6 +27,7 @@
         <activity
             android:name=".activities.FrameStreamActivity"
             android:label="Active Stream Tracking"
+            android:screenOrientation="landscape"
             android:exported="false" />
     </application>
 
