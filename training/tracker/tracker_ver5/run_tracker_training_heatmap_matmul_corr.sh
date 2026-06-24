@@ -28,6 +28,8 @@ python3 tracker_model_matmul_corr.py train \
     --train_mode heatmap_only \
     --batch_size 32
     
+    #--dataset_cache_mode streaming
+    
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
     --num_of_epochs 10 \
@@ -38,7 +40,8 @@ python3 tracker_model_matmul_corr.py train \
     --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
     --log_file outputs/train_matmul_corr.log \
     --train_mode heatmap_only \
-    --batch_size 32
+    --batch_size 32 \
+    --dataset_cache_mode streaming
 
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
@@ -50,7 +53,8 @@ python3 tracker_model_matmul_corr.py train \
     --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
     --log_file outputs/train_matmul_corr.log \
     --train_mode heatmap_only \
-    --batch_size 32
+    --batch_size 32 \
+    --dataset_cache_mode streaming
     
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
@@ -62,4 +66,5 @@ python3 tracker_model_matmul_corr.py train \
     --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
     --log_file outputs/train_matmul_corr.log \
     --train_mode heatmap_only \
-    --batch_size 32
+    --batch_size 32 \
+    --dataset_cache_mode streaming

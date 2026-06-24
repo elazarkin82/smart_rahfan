@@ -6,6 +6,8 @@
 
 MainService::MainService(const char* params_path)
 {
+    char res_buf[64];
+
     m_camera = NULL;
     m_tracker = NULL;
     m_web_server = NULL;
@@ -18,6 +20,10 @@ MainService::MainService(const char* params_path)
     m_lastFrame_h = 0;
     m_target_x = -1;
     m_target_y = -1;
+    m_camera_frame_count = 0;
+    m_camera_frame_next = 0;
+    m_tracker_frame_count = 0;
+    m_tracker_frame_next = 0;
 
     snprintf(m_params_path, sizeof(m_params_path), "%s", params_path);
 
@@ -36,13 +42,13 @@ MainService::MainService(const char* params_path)
         m_params.min_crop = 64.0f;
         m_params.max_crop = 256.0f;
         m_params.decode_argmax_only = 0;
+        m_params.iterations_num = 1;
         snprintf(m_params.drone_serial_port, sizeof(m_params.drone_serial_port), "/dev/ttyUSB0");
         m_params.drone_controller_id = -1;
         save_params_file(m_params_path, m_params);
     }
 
     // Initialize StatusObject telemetry defaults
-    char res_buf[64];
     StatusObject::instance()->update("camera_fps", "0.0 FPS");
     StatusObject::instance()->update("tracker_fps", "0.0 FPS");
     StatusObject::instance()->update("tracker_time_resize", "N/A");
@@ -65,6 +71,8 @@ MainService::~MainService()
 
 void MainService::start()
 {
+    bool quality_enabled;
+
     if (m_is_running)
     {
         return;
@@ -74,13 +82,14 @@ void MainService::start()
 
     // 1. Create sub-services
     m_camera = new CameraCapture(m_params.cam_dev, m_params.width, m_params.height);
-    bool quality_enabled = (strcmp(m_params.quality_mode, "disabled") != 0);
+    quality_enabled = (strcmp(m_params.quality_mode, "disabled") != 0);
     m_tracker = new TrackerService(
         m_params.rknn_model_path,
         m_params.min_crop,
         m_params.max_crop,
         quality_enabled,
-        m_params.decode_argmax_only != 0
+        m_params.decode_argmax_only != 0,
+        m_params.iterations_num
     );
     m_web_server = new WebServer(8080);
     m_drone = new DroneControler(m_params.drone_serial_port, m_params.drone_controller_id);
@@ -156,6 +165,8 @@ void MainService::onFrame(uchar* frame, int w, int h)
     long long elapsed;
     float real_fps;
     char fps_buf[32];
+    int i;
+    int valid_count;
 
     if (w * h > 1920 * 1280)
     {
@@ -172,20 +183,24 @@ void MainService::onFrame(uchar* frame, int w, int h)
     now = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
-        m_camera_frame_times.push(now);
-        while (!m_camera_frame_times.empty())
+        m_camera_frame_times[m_camera_frame_next] = now;
+        m_camera_frame_next = (m_camera_frame_next + 1) % FPS_HISTORY_MAX;
+        if (m_camera_frame_count < FPS_HISTORY_MAX)
         {
-            elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_camera_frame_times.front()).count();
-            if (elapsed >= 5)
+            m_camera_frame_count++;
+        }
+
+        valid_count = 0;
+        for (i = 0; i < m_camera_frame_count; ++i)
+        {
+            elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_camera_frame_times[i]).count();
+            if (elapsed < 5)
             {
-                m_camera_frame_times.pop();
-            }
-            else
-            {
-                break;
+                valid_count++;
             }
         }
-        real_fps = m_camera_frame_times.size() / 5.0f;
+
+        real_fps = valid_count / 5.0f;
         snprintf(fps_buf, sizeof(fps_buf), "%.1f FPS", real_fps);
         StatusObject::instance()->update("camera_fps", fps_buf);
     }
@@ -193,11 +208,12 @@ void MainService::onFrame(uchar* frame, int w, int h)
 
 void MainService::onTargetDetected(int x, int y)
 {
+    char pos_buf[64];
+
     m_target_x = x;
     m_target_y = y;
 
     // Report tracker status
-    char pos_buf[64];
     if (x >= 0 && y >= 0)
     {
         snprintf(pos_buf, sizeof(pos_buf), "[%d, %d]", x, y);
@@ -246,6 +262,7 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
     char* nl;
 
     out.decode_argmax_only = 0; // Default fallback
+    out.iterations_num = 1;
     snprintf(out.drone_serial_port, sizeof(out.drone_serial_port), "/dev/ttyUSB0");
     out.drone_controller_id = -1;
 
@@ -302,6 +319,10 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
             {
                 out.decode_argmax_only = atoi(val);
             }
+            else if (strcmp(key, "iterations_num") == 0)
+            {
+                out.iterations_num = atoi(val);
+            }
             else if (strcmp(key, "drone_serial_port") == 0)
             {
                 snprintf(out.drone_serial_port, sizeof(out.drone_serial_port), "%s", val);
@@ -332,6 +353,7 @@ void MainService::save_params_file(const char* params_path, const Params& in)
         fprintf(fp, "min_crop=%.1f\n", in.min_crop);
         fprintf(fp, "max_crop=%.1f\n", in.max_crop);
         fprintf(fp, "decode_argmax_only=%d\n", in.decode_argmax_only);
+        fprintf(fp, "iterations_num=%d\n", in.iterations_num);
         fprintf(fp, "drone_serial_port=%s\n", in.drone_serial_port);
         fprintf(fp, "drone_controller_id=%d\n", in.drone_controller_id);
         fclose(fp);
@@ -351,6 +373,10 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
     float y_n;
     int target_px;
     int target_py;
+    int crop_size;
+    int x0;
+    int y0;
+    bool auto_mode;
     char res_buf[64];
 
     w = 640;
@@ -428,9 +454,16 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
                 m_tracker->refresh_target(m_lastFrame, m_lastFrame_w, m_lastFrame_h, target_px, target_py);
 
                 // Reset tracker outputs coordinates relative to the 256x256 search crop frame space
-                int crop_size = std::min(m_lastFrame_w, m_lastFrame_h);
-                int x0 = (m_lastFrame_w - crop_size) / 2;
-                int y0 = (m_lastFrame_h - crop_size) / 2;
+                if (m_lastFrame_w < m_lastFrame_h)
+                {
+                    crop_size = m_lastFrame_w;
+                }
+                else
+                {
+                    crop_size = m_lastFrame_h;
+                }
+                x0 = (m_lastFrame_w - crop_size) / 2;
+                y0 = (m_lastFrame_h - crop_size) / 2;
                 m_target_x = ((target_px - x0) * 256) / crop_size;
                 m_target_y = ((target_py - y0) * 256) / crop_size;
             }
@@ -438,7 +471,7 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
 
         case WebServer::CMD_SET_AUTONOMOUS:
             {
-                bool auto_mode = (atoi(values) != 0);
+                auto_mode = (atoi(values) != 0);
                 if (auto_mode)
                 {
                     m_web_server->set_drone_callback(NULL);
@@ -472,6 +505,8 @@ void MainService::main_loop()
     long long elapsed;
     float real_fps;
     char fps_buf[32];
+    int i;
+    int valid_count;
 
     work_frame = (uchar*)malloc(1920 * 1280);
     work_w = 0;
@@ -514,20 +549,24 @@ void MainService::main_loop()
                 now = std::chrono::steady_clock::now();
                 {
                     std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
-                    m_tracker_frame_times.push(now);
-                    while (!m_tracker_frame_times.empty())
+                    m_tracker_frame_times[m_tracker_frame_next] = now;
+                    m_tracker_frame_next = (m_tracker_frame_next + 1) % FPS_HISTORY_MAX;
+                    if (m_tracker_frame_count < FPS_HISTORY_MAX)
                     {
-                        elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_tracker_frame_times.front()).count();
-                        if (elapsed >= 5)
+                        m_tracker_frame_count++;
+                    }
+
+                    valid_count = 0;
+                    for (i = 0; i < m_tracker_frame_count; ++i)
+                    {
+                        elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_tracker_frame_times[i]).count();
+                        if (elapsed < 5)
                         {
-                            m_tracker_frame_times.pop();
-                        }
-                        else
-                        {
-                            break;
+                            valid_count++;
                         }
                     }
-                    real_fps = m_tracker_frame_times.size() / 5.0f;
+
+                    real_fps = valid_count / 5.0f;
                     snprintf(fps_buf, sizeof(fps_buf), "%.1f FPS", real_fps);
                     StatusObject::instance()->update("tracker_fps", fps_buf);
                 }
@@ -537,10 +576,8 @@ void MainService::main_loop()
                 // Clear rolling queue when idle
                 {
                     std::lock_guard<std::mutex> lock_fps(m_fps_mutex);
-                    while (!m_tracker_frame_times.empty())
-                    {
-                        m_tracker_frame_times.pop();
-                    }
+                    m_tracker_frame_count = 0;
+                    m_tracker_frame_next = 0;
                 }
                 StatusObject::instance()->update("tracker_fps", "0.0 FPS");
                 // Clear times in status
@@ -559,7 +596,8 @@ void MainService::main_loop()
         // Sleep/wait on CV to avoid thread spin
         {
             std::unique_lock<std::mutex> lock(m_cmd_mutex);
-            m_cmd_condvar.wait_for(lock, std::chrono::milliseconds(10), [this]() {
+            m_cmd_condvar.wait_for(lock, std::chrono::milliseconds(10), [this]()
+            {
                 return m_has_pending_command || !m_is_running;
             });
         }

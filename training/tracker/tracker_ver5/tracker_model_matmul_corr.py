@@ -110,83 +110,6 @@ def _GroupNormalization(channels, name=None, **kwargs):
             return layers.Layer(name=name, **kwargs)
 
 @tf.keras.utils.register_keras_serializable(package="Custom")
-class DepthwiseCorrelationFusion(layers.Layer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        
-    def call(self, inputs):
-        search_feat, ref_feat = inputs
-        batch_size = search_feat.shape[0]
-        if batch_size is None:
-            batch_size = tf.shape(search_feat)[0]
-        h_s, w_s, c = search_feat.shape[1], search_feat.shape[2], search_feat.shape[3]
-        h_r, w_r = ref_feat.shape[1], ref_feat.shape[2]
-        
-        # Group batch elements along the channel dimension
-        s_transposed = tf.transpose(search_feat, [1, 2, 0, 3])
-        s_reshaped = tf.reshape(s_transposed, [1, h_s, w_s, batch_size * c])
-        
-        r_transposed = tf.transpose(ref_feat, [1, 2, 0, 3])
-        r_filter = tf.reshape(r_transposed, [h_r, w_r, batch_size * c, 1])
-        
-        out = tf.nn.depthwise_conv2d(s_reshaped, r_filter, strides=[1, 1, 1, 1], padding="SAME")
-        
-        out_reshaped = tf.reshape(out, [h_s, w_s, batch_size, c])
-        return tf.transpose(out_reshaped, [2, 0, 1, 3])
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-class Conv2DCorrelationFusion(layers.Layer):
-    def __init__(self, channels, **kwargs):
-        super().__init__(**kwargs)
-        self.channels = channels
-        
-    def build(self, input_shape):
-        self.kernel = self.add_weight(
-            shape=(1, 1, 1, self.channels),
-            initializer="glorot_uniform",
-            trainable=True,
-            name="kernel"
-        )
-        self.bias = self.add_weight(
-            shape=(self.channels,),
-            initializer="zeros",
-            trainable=True,
-            name="bias"
-        )
-        super().build(input_shape)
-        
-    def call(self, inputs):
-        search_feat, ref_feat = inputs
-        batch_size = search_feat.shape[0]
-        if batch_size is None:
-            batch_size = tf.shape(search_feat)[0]
-        h_s, w_s, c = search_feat.shape[1], search_feat.shape[2], search_feat.shape[3]
-        h_r, w_r = ref_feat.shape[1], ref_feat.shape[2]
-        
-        # 1. Depthwise correlation
-        s_transposed = tf.transpose(search_feat, [1, 2, 0, 3])
-        s_reshaped = tf.reshape(s_transposed, [1, h_s, w_s, batch_size * c])
-        
-        r_transposed = tf.transpose(ref_feat, [1, 2, 0, 3])
-        r_filter = tf.reshape(r_transposed, [h_r, w_r, batch_size * c, 1])
-        
-        out = tf.nn.depthwise_conv2d(s_reshaped, r_filter, strides=[1, 1, 1, 1], padding="SAME")
-        out_reshaped = tf.reshape(out, [h_s, w_s, batch_size, c])
-        dw_corr = tf.transpose(out_reshaped, [2, 0, 1, 3])
-        
-        # 2. Sum across channels to produce 1-channel similarity map
-        similarity = tf.reduce_sum(dw_corr, axis=-1, keepdims=True)
-        
-        # 3. Project to channels using 1x1 conv formula
-        proj = tf.nn.conv2d(similarity, self.kernel, strides=[1, 1, 1, 1], padding="SAME")
-        return tf.nn.bias_add(proj, self.bias)
-        
-    def get_config(self):
-        config = super().get_config()
-        config.update({"channels": self.channels})
-        return config
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
 class DepthToSpace(layers.Layer):
     def __init__(self, block_size=2, **kwargs):
         super().__init__(**kwargs)
@@ -225,6 +148,7 @@ def load_model_config(config_path="model.conf"):
 
     stack_layers      = config.getint("Stack", "stack_layers",      fallback=16)
     stack_target_size = config.getint("Stack", "stack_target_size", fallback=64)
+    search_frame_size = config.getint("Stack", "search_frame_size", fallback=256)
     reference_feature_size = config.getint("Stack", "reference_feature_size", fallback=8)
     reference_downscale = config.get("Stack", "reference_downscale", fallback="auto")
 
@@ -241,6 +165,7 @@ def load_model_config(config_path="model.conf"):
         "normalization_type": norm_type,
         "stack_layers": stack_layers,
         "stack_target_size": stack_target_size,
+        "search_frame_size": search_frame_size,
         "reference_feature_size": reference_feature_size,
         "reference_downscale": reference_downscale,
     }
@@ -331,6 +256,10 @@ stack_layers = 16
 # Must match compiler.stack_target_size in dataset_generator/pipeline_config.json.
 stack_target_size = 64
 
+# Spatial size (px) of the search frame.
+# Must match compiler.search_frame_size in dataset_generator/pipeline_config.json.
+search_frame_size = 256
+
 # Spatial size of reference encoder features used as depthwise-correlation weights.
 # Keep smaller than the search feature map, usually 8 when search bottleneck is 16.
 reference_feature_size = 8
@@ -392,13 +321,13 @@ def soft_argmax_2d(heatmap, beta=30.0):
     
     return tf.concat([pred_y, pred_x], axis=-1) # shape (B, 2)
 
-def coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality, c_bg=3.0, beta=15.0):
+def coordinate_distance_loss(gt_coords, pred_heatmap, gt_quality, c_bg=3.0, beta=15.0, coordinate_scale=256.0):
     # 1. Differentiable Soft-Argmax to extract coordinates from predicted heatmap
     pred_coords_soft = soft_argmax_2d(pred_heatmap, beta=beta)
     
-    # 2. Scale both predicted and ground-truth coordinates to 256.0 space to compute Huber loss in pixel units
+    # 2. Scale both predicted and ground-truth coordinates to target coordinate space to compute Huber loss in pixel units
     huber = tf.keras.losses.Huber(delta=1.0, reduction=tf.keras.losses.Reduction.NONE)
-    loss_coords = huber(gt_coords * 256.0, pred_coords_soft * 256.0)
+    loss_coords = huber(gt_coords * coordinate_scale, pred_coords_soft * coordinate_scale)
     loss_coords = tf.reshape(loss_coords, [-1, 1])
     
     # 3. DBSZ ReLU / MSE loss on negative samples (predicted heatmap vs zero map)
@@ -513,11 +442,10 @@ def fold_model_weights(unfolded_model, folded_model):
 # =====================================================================
 
 class TargetTrackerVer5:
-    def __init__(self, ref_shape=None, search_shape=(256, 256, 1), config_path="model.conf"):
-        self.search_shape = search_shape
+    def __init__(self, ref_shape=None, search_shape=None, config_path="model.conf"):
         self.model = None
 
-        # Load configuration first so ref_shape can be derived from stack params
+        # Load configuration first so ref_shape / search_shape can be derived from stack params
         resolved_config_path = config_path
         if resolved_config_path and not os.path.isabs(resolved_config_path) and not os.path.exists(resolved_config_path):
             alt_path = os.path.join(os.path.dirname(__file__), resolved_config_path)
@@ -539,6 +467,7 @@ class TargetTrackerVer5:
                 "soft_argmax_beta": 15.0,
                 "stack_layers": 16,
                 "stack_target_size": 64,
+                "search_frame_size": 256,
                 "reference_feature_size": 8,
                 "reference_downscale": "auto",
             }
@@ -550,6 +479,13 @@ class TargetTrackerVer5:
             self.ref_shape = (sz, sz, ch)
         else:
             self.ref_shape = ref_shape
+
+        # Derive search_shape from config unless explicitly overridden by the caller
+        if search_shape is None:
+            s_sz = self.config.get("search_frame_size", 256)
+            self.search_shape = (s_sz, s_sz, 1)
+        else:
+            self.search_shape = search_shape
 
     def _inverted_residual_block(self, inputs, expansion, filters, strides, name_prefix):
         x = inputs
@@ -1033,32 +969,37 @@ class TargetTrackerVer5:
         c_ref = ref_features.shape[-1]
         c_search = search_features.shape[-1]
         
-        # Pool reference features to (8, 8) if not already
-        if ref_features.shape[1] == 8 and ref_features.shape[2] == 8:
+        ref_feat_sz = self.config.get("reference_feature_size", 8)
+        search_feat_sz = self.search_shape[0] // 16
+        ref_flat_sz = ref_feat_sz * ref_feat_sz
+        search_flat_sz = search_feat_sz * search_feat_sz
+        
+        # Pool reference features to (ref_feat_sz, ref_feat_sz) if not already
+        if ref_features.shape[1] == ref_feat_sz and ref_features.shape[2] == ref_feat_sz:
             ref_pooled = ref_features
         else:
-            ref_pooled = layers.Resizing(8, 8, interpolation="bilinear", name="ref_features_resize")(ref_features)
+            ref_pooled = layers.Resizing(ref_feat_sz, ref_feat_sz, interpolation="bilinear", name="ref_features_resize")(ref_features)
             
-        # Pool search features to (16, 16) if not already
-        if search_features.shape[1] == 16 and search_features.shape[2] == 16:
+        # Pool search features to (search_feat_sz, search_feat_sz) if not already
+        if search_features.shape[1] == search_feat_sz and search_features.shape[2] == search_feat_sz:
             search_pooled = search_features
         else:
-            search_pooled = layers.Resizing(16, 16, interpolation="bilinear", name="search_features_resize")(search_features)
+            search_pooled = layers.Resizing(search_feat_sz, search_feat_sz, interpolation="bilinear", name="search_features_resize")(search_features)
             
-        # Reshape to flatten spatial dimensions: (Batch, 64, C) and (Batch, 256, C)
-        ref_flat = layers.Reshape((64, c_ref), name="ref_features_flat")(ref_pooled)
-        search_flat = layers.Reshape((256, c_search), name="search_features_flat")(search_pooled)
+        # Reshape to flatten spatial dimensions: (Batch, ref_flat_sz, C) and (Batch, search_flat_sz, C)
+        ref_flat = layers.Reshape((ref_flat_sz, c_ref), name="ref_features_flat")(ref_pooled)
+        search_flat = layers.Reshape((search_flat_sz, c_search), name="search_features_flat")(search_pooled)
         
         # Ensure channel dimensions match. If not, project ref_flat to match search_flat
         if c_ref != c_search:
             ref_flat = layers.Dense(c_search, use_bias=False, name="ref_channel_proj")(ref_flat)
             
         # Perform batched matrix multiplication: B * A^T
-        # B shape: (Batch, 256, C), A^T shape: (Batch, C, 64) -> Output shape: (Batch, 256, 64)
+        # B shape: (Batch, search_flat_sz, C), A^T shape: (Batch, C, ref_flat_sz) -> Output shape: (Batch, search_flat_sz, ref_flat_sz)
         fused_flat = layers.Dot(axes=(2, 2), name="matmul_correlation_dot")([search_flat, ref_flat])
         
-        # Reshape the spatial relation map to 4D: (Batch, 16, 16, 64)
-        fused_spatial = layers.Reshape((16, 16, 64), name="fused_matmul_reshape")(fused_flat)
+        # Reshape the spatial relation map to 4D: (Batch, search_feat_sz, search_feat_sz, ref_flat_sz)
+        fused_spatial = layers.Reshape((search_feat_sz, search_feat_sz, ref_flat_sz), name="fused_matmul_reshape")(fused_flat)
         
         # Project 64 channels to expected decoder input channels
         c_v = scale_filters(128) if bb_type != "custom_legacy" else 128
@@ -1070,7 +1011,7 @@ class TargetTrackerVer5:
         dec_type = self.config["decoder_type"]
         heatmap_pxl_size = self.config.get("heatmap_pxl_size", 64)
         
-        curr_size = 16
+        curr_size = search_feat_sz
         x = fused_features
         skips = [sb_ir2, sb_ir1, sb_init]
         stage = 1
@@ -1149,17 +1090,10 @@ class TargetTrackerVer5:
         output_heatmap = layers.Activation("linear", name="predicted_heatmap")(heatmap_for_loss)
         
         # 4. Heatmap-Guided Classification Branch
-        ds_factor = heatmap_pxl_size // 16
-        if ds_factor >= 2:
-            hm_feat = layers.Conv2D(8, (3, 3), strides=2, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap_processed)
-            pool_size = ds_factor // 2
-            if pool_size > 1:
-                hm_pool = layers.AveragePooling2D(pool_size=pool_size, name="quality_hm_pool")(hm_feat)
-            else:
-                hm_pool = hm_feat
-        else:
-            hm_feat = layers.Conv2D(8, (3, 3), strides=1, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap_processed)
-            hm_pool = hm_feat
+        hm_feat = layers.Conv2D(8, (3, 3), strides=1, padding="same", activation="relu", name="quality_hm_conv")(output_heatmap_processed)
+        
+        target_h, target_w = fused_features.shape[1], fused_features.shape[2]
+        hm_pool = layers.Resizing(target_h, target_w, interpolation="bilinear", name="quality_hm_resize")(hm_feat)
             
         q_fused = layers.Concatenate(axis=-1, name="quality_fusion")([fused_features, hm_pool])
         
@@ -1255,7 +1189,7 @@ class TargetTrackerVer5:
                 "model_heatmap_output": self.config.get("heatmap_output_source", "pre_threshold"),
                 "processed_heatmap_tensor": "predicted_heatmap_processed",
                 "decode": "argmax_or_local_centroid",
-                "coordinate_scale": 256,
+                "coordinate_scale": self.search_shape[0],
             },
         }
 
@@ -1297,18 +1231,20 @@ class TargetTrackerVer5:
                     gt_coords,
                     pred_heatmap,
                     gt_quality,
-                    beta=self.config.get("soft_argmax_beta", 15.0)
+                    beta=self.config.get("soft_argmax_beta", 15.0),
+                    coordinate_scale=float(self.search_shape[0])
                 )
                 
             if train_mode == "heatmap_only":
                 loss_quality = tf.constant(0.0, dtype=tf.float32)
             else:
                 pred_coords = get_peak_coords_tf(pred_heatmap)
-                # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
+                # Scale predicted coordinates to coordinate space (from [0, H-1] space)
                 H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
-                pred_coords_scaled = pred_coords * (256.0 / H)
-                # Compare against gt_coords scaled to 256.0 space
-                dist = tf.norm(pred_coords_scaled - gt_coords * 256.0, axis=-1, keepdims=True)
+                coord_scale = float(self.search_shape[0])
+                pred_coords_scaled = pred_coords * (coord_scale / H)
+                # Compare against gt_coords scaled to coordinate space
+                dist = tf.norm(pred_coords_scaled - gt_coords * coord_scale, axis=-1, keepdims=True)
                 dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                 target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                 target_quality = tf.stop_gradient(target_quality)
@@ -1375,18 +1311,20 @@ class TargetTrackerVer5:
                         gt_coords,
                         pred_heatmap,
                         gt_quality,
-                        beta=self.config.get("soft_argmax_beta", 15.0)
+                        beta=self.config.get("soft_argmax_beta", 15.0),
+                        coordinate_scale=float(self.search_shape[0])
                     )
                     
                 if train_mode == "heatmap_only":
                     loss_quality = tf.constant(0.0, dtype=tf.float32)
                 else:
                     pred_coords = get_peak_coords_tf(pred_heatmap)
-                    # Scale predicted coordinates to 256.0 space (from [0, H-1] space)
+                    # Scale predicted coordinates to coordinate space (from [0, H-1] space)
                     H = tf.cast(tf.shape(pred_heatmap)[1], tf.float32)
-                    pred_coords_scaled = pred_coords * (256.0 / H)
-                    # Compare against gt_coords scaled to 256.0 space
-                    dist = tf.norm(pred_coords_scaled - gt_coords * 256.0, axis=-1, keepdims=True)
+                    coord_scale = float(self.search_shape[0])
+                    pred_coords_scaled = pred_coords * (coord_scale / H)
+                    # Compare against gt_coords scaled to coordinate space
+                    dist = tf.norm(pred_coords_scaled - gt_coords * coord_scale, axis=-1, keepdims=True)
                     dynamic_target = tf.maximum(1.0 - (dist / 30.0), 0.0)
                     target_quality = tf.where(gt_quality > 0.5, dynamic_target, 0.0)
                     target_quality = tf.stop_gradient(target_quality)
