@@ -84,13 +84,15 @@ bool DroneControler::is_connected()
 
 void DroneControler::send_loop()
 {
+    int16_t r, p, y, t;
+    bool connected;
+
     while (m_is_running)
     {
+        connected = false;
+
         // Limit sending rate to 20Hz (every 50ms)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-        int16_t r, p, y, t;
-        bool connected = false;
 
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -107,8 +109,10 @@ void DroneControler::send_loop()
             if (!m_hal.write_packet(r, p, y, t, 1000, 0, m_controller_id))
             {
                 fprintf(stdout, "[DroneControler] Write failed. Closing serial port to trigger reconnection.\n");
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_hal.close_serial();
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_hal.close_serial();
+                }
             }
         }
     }
@@ -116,12 +120,14 @@ void DroneControler::send_loop()
 
 void DroneControler::reconnect_loop()
 {
+    bool connected;
+
     while (m_is_running)
     {
+        connected = false;
+
         // Attempt reconnection check every 2 seconds
         std::this_thread::sleep_for(std::chrono::seconds(2));
-
-        bool connected = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             connected = m_hal.is_connected();
@@ -130,10 +136,12 @@ void DroneControler::reconnect_loop()
         if (!connected && m_is_running)
         {
             fprintf(stdout, "[DroneControler] Attempting connection to %s...\n", m_device);
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_hal.open_serial(m_device))
             {
-                fprintf(stdout, "[DroneControler] Connection established to %s.\n", m_device);
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_hal.open_serial(m_device))
+                {
+                    fprintf(stdout, "[DroneControler] Connection established to %s.\n", m_device);
+                }
             }
         }
     }

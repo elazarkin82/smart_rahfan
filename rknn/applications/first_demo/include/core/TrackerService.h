@@ -12,6 +12,10 @@
 
 typedef unsigned char uchar;
 
+#ifndef MAX_TRACKER_ITERATIONS
+#define MAX_TRACKER_ITERATIONS 16
+#endif
+
 class TrackerService
 {
 public:
@@ -89,11 +93,22 @@ private:
     void resize_bilinear_omp(const uchar* src, int src_w, int src_h, uchar* dst, int dst_w, int dst_h);
 #endif
 
+    // Crop history and refinement helpers
+    struct CropHistory
+    {
+        float cx;
+        float cy;
+        float crop_size;
+    };
+    int m_iterations_num;
+    void crop_and_resize_gray(const uchar* src, int src_w, int src_h, float cx, float cy, float crop_size, uchar* dst, int dst_w, int dst_h);
+    void crop_and_resize_ref_stack(float crop_size, float target_size);
+
     // Heatmap post-processing
     void decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y);
 
 public:
-    TrackerService(const char* model_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only = false);
+    TrackerService(const char* model_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only = false, int iterations_num = 1);
     ~TrackerService();
 
     bool is_model_loaded() const;

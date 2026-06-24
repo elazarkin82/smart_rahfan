@@ -7,6 +7,33 @@
 #include "civetweb.h"
 #include <chrono>
 
+static int web_min_int(int a, int b)
+{
+    return (a < b) ? a : b;
+}
+
+static float web_abs_float(float v)
+{
+    return (v < 0.0f) ? -v : v;
+}
+
+static float web_clamp_float(float v, float min_value, float max_value)
+{
+    float result;
+
+    result = v;
+    if (result < min_value)
+    {
+        result = min_value;
+    }
+    else if (result > max_value)
+    {
+        result = max_value;
+    }
+
+    return result;
+}
+
 // Web browser UI HTML
 const char* INDEX_HTML = 
 "<!DOCTYPE html>\n"
@@ -563,7 +590,9 @@ private:
     WebServer* m_web_server;
 
 public:
-    CommandHandler(WebServer* ws) : m_web_server(ws) {}
+    CommandHandler(WebServer* ws) : m_web_server(ws)
+    {
+    }
 
     bool handleGet(CivetServer* server, struct mg_connection* conn) override
     {
@@ -637,7 +666,9 @@ private:
     WebServer* m_web_server;
 
 public:
-    StreamHandler(WebServer* ws) : m_web_server(ws) {}
+    StreamHandler(WebServer* ws) : m_web_server(ws)
+    {
+    }
 
     bool handleGet(CivetServer* server, struct mg_connection* conn) override
     {
@@ -930,6 +961,9 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
     int box_size, half;
     int x_start, x_end, y_start, y_end;
     int cx, cy;
+    int crop_size;
+    int x0;
+    int y0;
     std::chrono::steady_clock::time_point t_comp_start;
     std::chrono::steady_clock::time_point t_comp_end;
     float comp_ms;
@@ -953,9 +987,9 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
     if (m_target_x >= 0 && m_target_y >= 0)
     {
         // Scale coordinate system from 256x256 search crop frame space back to camera frame space
-        int crop_size = std::min(w, h);
-        int x0 = (w - crop_size) / 2;
-        int y0 = (h - crop_size) / 2;
+        crop_size = web_min_int(w, h);
+        x0 = (w - crop_size) / 2;
+        y0 = (h - crop_size) / 2;
         x_cam = x0 + (m_target_x * crop_size) / 256;
         y_cam = y0 + (m_target_y * crop_size) / 256;
 
@@ -1024,9 +1058,18 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
 void WebServer::trigger_command(Command key, const char* values)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    int r;
+    int p;
+    int y;
+    int t;
+
+    r = 1000;
+    p = 1000;
+    y = 1000;
+    t = 1000;
+
     if (key == CMD_DRONE_MANUAL && m_drone_cb != NULL)
     {
-        int r = 1000, p = 1000, y = 1000, t = 1000;
         if (sscanf(values, "%d,%d,%d,%d", &r, &p, &y, &t) == 4)
         {
             m_drone_cb->send_command((int16_t)r, (int16_t)p, (int16_t)y, (int16_t)t);
@@ -1051,7 +1094,10 @@ void WebServer::set_streaming(bool state)
 void WebServer::wait_for_frame(uchar* jpeg_dest, unsigned long* jpeg_len)
 {
     std::unique_lock<std::mutex> lock(m_mutex);
-    m_condvar.wait_for(lock, std::chrono::milliseconds(100), [this]() { return m_has_new_frame; });
+    m_condvar.wait_for(lock, std::chrono::milliseconds(100), [this]()
+    {
+        return m_has_new_frame;
+    });
 
     if (m_has_new_frame)
     {
@@ -1119,9 +1165,9 @@ static void jet_colormap(float v, uchar& r, uchar& g, uchar& b)
         v = 1.0f;
     }
     
-    r_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 3.0f)));
-    g_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 2.0f)));
-    b_f = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * v - 1.0f)));
+    r_f = web_clamp_float(1.5f - web_abs_float(4.0f * v - 3.0f), 0.0f, 1.0f);
+    g_f = web_clamp_float(1.5f - web_abs_float(4.0f * v - 2.0f), 0.0f, 1.0f);
+    b_f = web_clamp_float(1.5f - web_abs_float(4.0f * v - 1.0f), 0.0f, 1.0f);
     
     r = (uchar)(r_f * 255.0f);
     g = (uchar)(g_f * 255.0f);
@@ -1134,6 +1180,7 @@ void WebServer::compress_rgb_to_jpeg(const uchar* rgb_buf, int w, int h, uchar* 
     struct jpeg_error_mgr jerr;
     uchar* outbuffer;
     unsigned long outsize;
+    unsigned long max_size;
     JSAMPROW row_pointer[1];
 
     outbuffer = NULL;
@@ -1161,7 +1208,7 @@ void WebServer::compress_rgb_to_jpeg(const uchar* rgb_buf, int w, int h, uchar* 
 
     jpeg_finish_compress(&cinfo);
 
-    unsigned long max_size = (w == 256 && h == 256) ? (256 * 256 * 3) : (1920 * 1280);
+    max_size = (w == 256 && h == 256) ? (256 * 256 * 3) : (1920 * 1280);
     if (outsize < max_size)
     {
         memcpy(dest_buf, outbuffer, outsize);
@@ -1210,7 +1257,10 @@ void WebServer::set_heatmap_streaming(bool state)
 void WebServer::wait_for_heatmap(uchar* jpeg_dest, unsigned long* jpeg_len)
 {
     std::unique_lock<std::mutex> lock(m_mutex);
-    m_condvar.wait_for(lock, std::chrono::milliseconds(100), [this]() { return m_has_new_heatmap; });
+    m_condvar.wait_for(lock, std::chrono::milliseconds(100), [this]()
+    {
+        return m_has_new_heatmap;
+    });
 
     if (m_has_new_heatmap)
     {
@@ -1228,8 +1278,10 @@ void WebServer::update_stack(const uchar* stack, int w, int h, int c)
     int y, x;
 
     std::lock_guard<std::mutex> lock(m_mutex);
+    int layers;
+    char layers_str[16];
 
-    int layers = std::min(c, (int)MAX_STACK_LAYERS);
+    layers = web_min_int(c, (int)MAX_STACK_LAYERS);
 
     if (stack != NULL)
     {
@@ -1262,7 +1314,6 @@ void WebServer::update_stack(const uchar* stack, int w, int h, int c)
         free(temp_black);
     }
 
-    char layers_str[16];
     snprintf(layers_str, sizeof(layers_str), "%d", layers);
     StatusObject::instance()->update("stack_layers", layers_str);
 }

@@ -89,6 +89,7 @@ bool CameraCapture::config_device()
 {
     struct v4l2_format fmt;
     struct v4l2_requestbuffers req;
+    enum v4l2_buf_type type;
     unsigned int i;
 
     // 1. Set video format (YUYV is standard for UVC uncompressed streams)
@@ -170,7 +171,7 @@ bool CameraCapture::config_device()
     }
 
     // 5. Start streaming
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(m_fd, VIDIOC_STREAMON, &type) < 0)
     {
         fprintf(stderr, "[CameraCapture] Error starting stream: %s\n", strerror(errno));

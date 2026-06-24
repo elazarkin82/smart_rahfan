@@ -4,7 +4,6 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
-#include <queue>
 #include <chrono>
 #include "core/CameraCapture.h"
 #include "core/TrackerService.h"
@@ -26,11 +25,17 @@ public:
         float min_crop;
         float max_crop;
         int decode_argmax_only;
+        int iterations_num;
         char drone_serial_port[256];
         int drone_controller_id;
     };
 
 private:
+    enum
+    {
+        FPS_HISTORY_MAX = 1024
+    };
+
     Params m_params;
     char m_params_path[256];
 
@@ -62,8 +67,12 @@ private:
     char m_pending_command_val[512];
 
     // Real FPS calculations (rolling 5-second window)
-    std::queue<std::chrono::steady_clock::time_point> m_camera_frame_times;
-    std::queue<std::chrono::steady_clock::time_point> m_tracker_frame_times;
+    std::chrono::steady_clock::time_point m_camera_frame_times[FPS_HISTORY_MAX];
+    std::chrono::steady_clock::time_point m_tracker_frame_times[FPS_HISTORY_MAX];
+    int m_camera_frame_count;
+    int m_camera_frame_next;
+    int m_tracker_frame_count;
+    int m_tracker_frame_next;
     std::mutex m_fps_mutex;
 
     // Helper functions
