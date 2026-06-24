@@ -6,7 +6,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#121212"
-    android:fitsSystemWindows="true"
+    android:fitsSystemWindows="false"
     tools:context=".activities.FrameStreamActivity">
 
     <androidx.constraintlayout.widget.Guideline
@@ -152,7 +152,7 @@
                     android:textStyle="bold" />
             </RelativeLayout>
 
-            <!-- Quality Filter Bypass Toggle -->
+            <!-- Quality no longer hides detection; it only colors the tracking indicator. -->
             <androidx.appcompat.widget.SwitchCompat
                 android:id="@+id/switch_bypass_quality"
                 android:layout_width="wrap_content"
@@ -162,6 +162,7 @@
                 android:textColor="#ffffff"
                 android:textSize="12sp"
                 android:checked="false"
+                android:visibility="gone"
                 app:thumbTint="#00e6ff"
                 app:trackTint="#555555" />
 
@@ -203,7 +204,7 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Output Heatmap (256x256)"
+                            android:text="Raw Heatmap (min/max)"
                             android:textColor="#aaaaaa"
                             android:textSize="11sp"
                             android:layout_marginBottom="6dp" />
