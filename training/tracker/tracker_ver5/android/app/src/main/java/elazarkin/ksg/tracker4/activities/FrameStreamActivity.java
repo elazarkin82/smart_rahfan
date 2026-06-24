@@ -134,10 +134,6 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private Thread workerThread = null;
     private volatile boolean isWorkerActive = false;
 
-    // Tracking position state in absolute camera frame pixels
-    private float lastTrackedX = 0.0f;
-    private float lastTrackedY = 0.0f;
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -568,10 +564,6 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         float cx = normCoords[0] * width;
         float cy = normCoords[1] * height;
 
-        // Initialize tracking position state
-        lastTrackedX = cx;
-        lastTrackedY = cy;
-        
         int stride = width; // rotated frame stride is width
 
         initialReferenceStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, cx, cy);
@@ -667,9 +659,9 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         float[] currBuffer = new float[searchW * searchH];
         long preStart = SystemClock.elapsedRealtime();
         
-        // Center the search crop dynamically around the last tracked target position
-        float cx = lastTrackedX;
-        float cy = lastTrackedY;
+        // Search input is always the centered square crop of the current frame.
+        float cx = width / 2.0f;
+        float cy = height / 2.0f;
         
         // JNI extracts square crop around static frame center (cx, cy)
         MainActivity.downsampleSearchCrop(yPlane, width, height, stride, cx, cy, cropSize, searchW, searchH, currBuffer);
@@ -732,20 +724,21 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         // Clamp target position to camera frame boundaries to keep tracking running continuously
         x_global = Math.max(0.0f, Math.min((float)width - 1.0f, x_global));
         y_global = Math.max(0.0f, Math.min((float)height - 1.0f, y_global));
+        final float finalTrackedX = x_global;
+        final float finalTrackedY = y_global;
 
-        // Save for next frame centering
-        lastTrackedX = x_global;
-        lastTrackedY = y_global;
-
-        if (experimentalPrevReferenceMode && finalQualityScore >= EXPERIMENTAL_STACK_UPDATE_QUALITY_THRESHOLD) {
-            previousFrameReferenceStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, x_global, y_global);
+        final boolean finalExperimentalMode = experimentalPrevReferenceMode;
+        final boolean finalStackUpdated = finalExperimentalMode
+                && finalQualityScore >= EXPERIMENTAL_STACK_UPDATE_QUALITY_THRESHOLD;
+        if (finalStackUpdated) {
+            previousFrameReferenceStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, finalTrackedX, finalTrackedY);
         }
 
         long totalDuration = SystemClock.elapsedRealtime() - startTime;
 
         // Convert absolute camera coordinates to normalized [0, 1] relative to camera frame
-        float gx = x_global / (float) width;
-        float gy = y_global / (float) height;
+        float gx = finalTrackedX / (float) width;
+        float gy = finalTrackedY / (float) height;
 
         // Since the frame is rotated to screen space, screen normalization is direct (1:1)
         final float screenX_norm = gx;
@@ -776,8 +769,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             paint.setColor(Color.RED);
             paint.setStyle(Paint.Style.FILL);
             paint.setAntiAlias(true);
-            float scaledX = lastTrackedX / (float) downsampleFactor;
-            float scaledY = lastTrackedY / (float) downsampleFactor;
+            float scaledX = finalTrackedX / (float) downsampleFactor;
+            float scaledY = finalTrackedY / (float) downsampleFactor;
             canvas.drawCircle(scaledX, scaledY, 3.0f, paint);
         } catch (Exception e) {
             e.printStackTrace();
@@ -797,22 +790,37 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             public void run() {
                 if (currentUiState != STATE_TRACKING) return;
                 
-                int circleColor = finalQualityScore >= QUALITY_DISPLAY_THRESHOLD ? Color.GREEN : Color.RED;
-                lblStatus.setText(finalQualityScore < QUALITY_DISPLAY_THRESHOLD
+                float targetColorThreshold = finalExperimentalMode
+                        ? EXPERIMENTAL_STACK_UPDATE_QUALITY_THRESHOLD
+                        : QUALITY_DISPLAY_THRESHOLD;
+                int circleColor = finalQualityScore >= targetColorThreshold ? Color.GREEN : Color.RED;
+                lblStatus.setText(finalQualityScore < targetColorThreshold
                         ? String.format("Status: Weak Lock! Quality: %.2f", finalQualityScore)
                         : "Status: Active tracking");
-                drawTrackingIndicator(lastTrackedX, lastTrackedY, width, height, circleColor);
+                drawTrackingIndicator(finalTrackedX, finalTrackedY, width, height, circleColor);
                 renderDiagnostics(outputHeatmap, currBuffer, fullFrameBmp, px, py);
 
                 txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
                         preDuration, infDuration, postDuration, totalDuration));
-                txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Quality: %.2f]", screenX_norm, screenY_norm, finalQualityScore));
+                txtPredictedCoords.setText(String.format(
+                        "Target Pos: (%.3f, %.3f) [Quality: %.2f | Stack update: %s]",
+                        screenX_norm,
+                        screenY_norm,
+                        finalQualityScore,
+                        finalStackUpdated ? "yes" : "no"
+                ));
                 txtBufferStatus.setText(String.format(
-                        "Heatmap raw: min=%.3f max=%.3f argmax=(%d,%d) | %s | %s",
+                        "Heatmap raw: min=%.3f max=%.3f argmax=(%d,%d) p=(%.3f,%.3f) search_center=(%.0f,%.0f) global=(%.0f,%.0f) | %s | %s",
                         heatmapStats.minVal,
                         heatmapStats.maxVal,
                         heatmapStats.maxX,
                         heatmapStats.maxY,
+                        px,
+                        py,
+                        cx,
+                        cy,
+                        finalTrackedX,
+                        finalTrackedY,
                         heatmapOutputDebug,
                         qualityOutputDebug
                 ));
@@ -880,6 +888,15 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             hmColors[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
         }
         hmBitmap.setPixels(hmColors, 0, heatmapW, 0, 0, heatmapW, heatmapH);
+        Canvas hmCanvas = new Canvas(hmBitmap);
+        Paint hmPaint = new Paint();
+        hmPaint.setAntiAlias(true);
+        hmPaint.setStyle(Paint.Style.STROKE);
+        hmPaint.setStrokeWidth(Math.max(1.0f, heatmapW / 64.0f));
+        hmPaint.setColor(Color.GREEN);
+        hmCanvas.drawCircle(stats.maxX, stats.maxY, Math.max(2.0f, heatmapW / 32.0f), hmPaint);
+        hmCanvas.drawLine(stats.maxX - 3.0f, stats.maxY, stats.maxX + 3.0f, stats.maxY, hmPaint);
+        hmCanvas.drawLine(stats.maxX, stats.maxY - 3.0f, stats.maxX, stats.maxY + 3.0f, hmPaint);
         heatmapImageView.setImageBitmap(hmBitmap);
 
         // 2. Render cropCurrView (the current active search crop)
