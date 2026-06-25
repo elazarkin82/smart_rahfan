@@ -519,8 +519,6 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     int map_idx;
     int dx;
     int dy;
-    int16_t yaw;
-    int16_t pitch;
     std::chrono::steady_clock::time_point t_start;
     std::chrono::steady_clock::time_point t_resize_start;
     std::chrono::steady_clock::time_point t_resize_end;
@@ -680,6 +678,12 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
         {
             q_val = ((float*)outputs[m_idx_quality].buf)[0];
         }
+        
+        if (q_val < 0.2f)
+        {
+			run_success = false;
+			break;
+		}
 
         // Release NPU outputs for this iteration
         rknn_outputs_release(m_ctx_model, 2, outputs);
@@ -788,12 +792,14 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
         }
         if (m_drone_cb != NULL && out_x >= 0 && out_y >= 0)
         {
-            yaw = 1000;
-            pitch = 1000;
+            int16_t yaw = 1000;
+            int16_t roll = 1000; // <- ->
+            int16_t pitch = 1500;
+            int16_t throttle = 1000;
             dx = out_x - 128;
             dy = out_y - 128;
-            DroneControlerHal::calculate_tracking_commands(dx, dy, yaw, pitch);
-            m_drone_cb->send_command(1000, pitch, yaw, 1000);
+            DroneControlerHal::calculate_tracking_commands(dx, dy, roll, throttle);
+            m_drone_cb->send_command(roll, pitch, yaw, throttle);
         }
     }
 }

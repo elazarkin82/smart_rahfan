@@ -64,7 +64,7 @@ echo "[TF ENV] TRACKER_GPU_MEMORY_LIMIT_MB=${TRACKER_GPU_MEMORY_LIMIT_MB}"
 
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 20 \
+    --num_of_epochs 5 \
     --lr 1e-3 \
     --loss_quality bce \
     --output outputs/tracker_matmul_corr_with_quality.keras \
@@ -76,7 +76,7 @@ python3 tracker_model_matmul_corr.py train \
     
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 10 \
+    --num_of_epochs 5 \
     --lr 1e-4 \
     --loss_quality bce \
     --output outputs/tracker_matmul_corr_with_quality.keras \
@@ -88,7 +88,7 @@ python3 tracker_model_matmul_corr.py train \
 
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 10 \
+    --num_of_epochs 5 \
     --lr 1e-5 \
     --loss_quality bce \
     --output outputs/tracker_matmul_corr_with_quality.keras \

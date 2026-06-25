@@ -30,19 +30,7 @@ private:
 
     static int16_t clamp_axis_value(int16_t value)
     {
-        int16_t result;
-
-        result = value;
-        if (result < 0)
-        {
-            result = 0;
-        }
-        else if (result > 2000)
-        {
-            result = 2000;
-        }
-
-        return result;
+        return value < 500 ? 500 : value > 1500 ? 1500 : value;
     }
 
 public:
@@ -185,7 +173,7 @@ public:
     static void calculate_tracking_commands(int dx, int dy, int16_t& out_yaw, int16_t& out_pitch)
     {
         const int16_t MID_VALUE = 1000;
-        const float Kp = 2.5f; // Proportional feedback gain
+        const float Kp = 25.0f; // Proportional feedback gain
         float yaw_offset;
         float pitch_offset;
         int16_t y_val;
