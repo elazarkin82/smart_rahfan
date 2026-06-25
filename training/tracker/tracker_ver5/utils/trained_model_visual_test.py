@@ -234,17 +234,17 @@ class ModelInferenceVisualizer:
         
         return ImageTk.PhotoImage(pil_img)
         
-    def create_frame_slot(self, parent, label_text):
+    def create_frame_slot(self, parent, label_text, panel_size=256):
         container = tk.Frame(parent, bg="#121212", padx=10)
         container.pack(side="left")
         
         lbl = tk.Label(container, text=label_text, font=("Inter", 11, "bold"), bg="#121212", fg="#e0e0e0")
         lbl.pack(pady=5)
         
-        panel = tk.Label(container, bg="#1a1a1a", bd=1, relief="solid", width=256, height=256)
+        panel = tk.Label(container, bg="#1a1a1a", bd=1, relief="solid", width=panel_size, height=panel_size)
         panel.pack()
         
-        coord_lbl = tk.Label(container, text="[N/A]", font=("Consolas", 10), bg="#121212", fg="#888888", pady=5, height=3)
+        coord_lbl = tk.Label(container, text="[N/A]", font=("Consolas", 10), bg="#121212", fg="#888888", pady=5, height=4, width=34, justify="left")
         coord_lbl.pack()
         
         return panel, coord_lbl
@@ -290,7 +290,7 @@ class ModelInferenceVisualizer:
             self.heatmap_panels = []
             self.heatmap_lbls = []
             for i in range(self.iterations_num):
-                p, l = self.create_frame_slot(self.frames_frame, f"Heatmap (Iter {i})")
+                p, l = self.create_frame_slot(self.frames_frame, f"Heatmap (Iter {i})", panel_size=224)
                 self.heatmap_panels.append(p)
                 self.heatmap_lbls.append(l)
         else:
@@ -308,7 +308,7 @@ class ModelInferenceVisualizer:
             self.heatmap_panels = []
             self.heatmap_lbls = []
             for i in range(self.iterations_num):
-                p, l = self.create_frame_slot(bottom_row, f"Heatmap (Iter {i})")
+                p, l = self.create_frame_slot(bottom_row, f"Heatmap (Iter {i})", panel_size=224)
                 self.heatmap_panels.append(p)
                 self.heatmap_lbls.append(l)
                 
@@ -591,6 +591,27 @@ class ModelInferenceVisualizer:
             curr_y = tl_y + curr_y * (crop_size / self.search_frame_size)
         return curr_x, curr_y
 
+    def select_iteration_by_quality(self, qualities):
+        if len(qualities) == 0:
+            return None, [], "Rejected: no iterations", "no iterations"
+
+        if qualities[0] < 0.3:
+            return None, [], f"Rejected: q0={qualities[0]:.2f} < 0.30", "first quality below 0.30"
+
+        valid_iters = [0]
+        for idx in range(1, len(qualities)):
+            if qualities[idx] < 0.75:
+                break
+            valid_iters.append(idx)
+
+        high_quality_iters = [idx for idx in valid_iters if qualities[idx] > 0.9]
+        if high_quality_iters:
+            selected_iter = high_quality_iters[-1]
+            return selected_iter, valid_iters, None, "last quality above 0.90"
+
+        selected_iter = max(valid_iters, key=lambda idx: qualities[idx])
+        return selected_iter, valid_iters, None, "best quality"
+
     def update_visualization(self):
         import tensorflow as tf
         
@@ -703,7 +724,8 @@ class ModelInferenceVisualizer:
             dmy = my * (256.0 / self.search_frame_size)
             iter_preds_mapped.append((dmx, dmy))
             
-        final_pred = iter_preds_mapped[-1]
+        selected_iter, selected_valid_iters, selected_reject_reason, selected_reason = self.select_iteration_by_quality(iter_pred_qualities)
+        final_pred = iter_preds_mapped[selected_iter] if selected_iter is not None else None
         
         # Prepare GT label
         if gt_quality > 0.5:
@@ -743,28 +765,29 @@ class ModelInferenceVisualizer:
             cv2.circle(search_vis, (cx, cy), 6, (0, 230, 255), 2)
             cv2.circle(search_vis, (cx, cy), 2, (0, 230, 255), -1)
             
-        # Draw Intermediate predictions (as small red circles and yellow lines connecting them)
-        for idx in range(self.iterations_num - 1):
-            mx, my = iter_preds_mapped[idx]
+        # Draw all iteration predictions; the selected final prediction is highlighted in green.
+        for idx, (mx, my) in enumerate(iter_preds_mapped):
             imx, imy = int(mx), int(my)
-            cv2.circle(search_vis, (imx, imy), 3, (0, 0, 255), -1) # Red for intermediate
             if idx > 0:
                 prev_mx, prev_my = iter_preds_mapped[idx - 1]
-                cv2.line(search_vis, (int(prev_mx), int(prev_my)), (imx, imy), (0, 255, 255), 1) # Yellow line
-                
-        if self.iterations_num > 1:
-            # Draw line to final prediction
-            prev_mx, prev_my = iter_preds_mapped[-2]
-            cv2.line(search_vis, (int(prev_mx), int(prev_my)), (int(final_pred[0]), int(final_pred[1])), (0, 255, 255), 1)
+                cv2.line(search_vis, (int(prev_mx), int(prev_my)), (imx, imy), (0, 255, 255), 1)
+            if idx != selected_iter:
+                cv2.circle(search_vis, (imx, imy), 3, (0, 0, 255), -1)
             
-        # Draw Final prediction (as green circle)
-        pcx, pcy = int(final_pred[0]), int(final_pred[1])
-        cv2.circle(search_vis, (pcx, pcy), 6, (51, 255, 51), 2)
-        cv2.circle(search_vis, (pcx, pcy), 2, (51, 255, 51), -1)
+        if final_pred is not None:
+            pcx, pcy = int(final_pred[0]), int(final_pred[1])
+            cv2.circle(search_vis, (pcx, pcy), 6, (51, 255, 51), 2)
+            cv2.circle(search_vis, (pcx, pcy), 2, (51, 255, 51), -1)
         
         self.tk_img_search = ImageTk.PhotoImage(Image.fromarray(search_vis))
         self.search_panel.config(image=self.tk_img_search)
-        self.search_lbl.config(text=curr_lbl_text, fg=curr_lbl_fg)
+        if selected_iter is not None:
+            selected_quality = iter_pred_qualities[selected_iter]
+            search_lbl_text = f"{curr_lbl_text}\nSelected iter: {selected_iter}  q={selected_quality:.2f}"
+            self.search_lbl.config(text=search_lbl_text, fg="#33ff33")
+        else:
+            search_lbl_text = f"{curr_lbl_text}\n{selected_reject_reason}"
+            self.search_lbl.config(text=search_lbl_text, fg="#ff3366")
         
         # Draw all predicted heatmaps
         self.tk_imgs_predicted = []
@@ -772,6 +795,7 @@ class ModelInferenceVisualizer:
             heatmap = iter_heatmaps[idx]
             heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
             heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+            heatmap_color_rgb = cv2.resize(heatmap_color_rgb, (224, 224), interpolation=cv2.INTER_NEAREST)
             tk_img = ImageTk.PhotoImage(Image.fromarray(heatmap_color_rgb))
             self.tk_imgs_predicted.append(tk_img)
             
@@ -790,11 +814,29 @@ class ModelInferenceVisualizer:
             else:
                 error_str = "Error: N/A"
                 
-            info_text = f"Mapped: [{mx:.1f}, {my:.1f}]\nIter: [{px:.1f}, {py:.1f}]\n{error_str}\nQuality: {iter_pred_qualities[idx]:.2f}"
-            lbl.config(text=info_text, fg="#33ff33")
+            quality_suffix = ""
+            label_fg = "#33ff33"
+            panel_bd = 1
+            if idx == selected_iter:
+                quality_suffix = " SELECTED"
+                label_fg = "#ffff66"
+                panel_bd = 3
+            elif selected_iter is None and idx == 0:
+                quality_suffix = " REJECTED"
+                label_fg = "#ff3366"
+            elif idx not in selected_valid_iters:
+                quality_suffix = " IGNORED"
+                label_fg = "#888888"
+            info_text = f"Mapped: [{mx:.1f}, {my:.1f}]\nIter: [{px:.1f}, {py:.1f}]\n{error_str}\nQuality: {iter_pred_qualities[idx]:.2f}{quality_suffix}"
+            panel.config(bd=panel_bd)
+            lbl.config(text=info_text, fg=label_fg)
             
         # Update status bar
-        self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | Press Space")
+        if selected_iter is not None:
+            selected_status = f"Selected Iter: {selected_iter} q={iter_pred_qualities[selected_iter]:.2f} ({selected_reason})"
+        else:
+            selected_status = selected_reject_reason
+        self.status_bar.config(text=f"Flight: {meta['flight_id']} | Frame: {meta['frame_idx']} | Dist: {meta['distance']:.1f}m | {selected_status} | Press Space")
 
     def on_close(self):
         self.root.destroy()
