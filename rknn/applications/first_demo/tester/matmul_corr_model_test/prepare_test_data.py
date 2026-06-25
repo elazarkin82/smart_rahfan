@@ -3,8 +3,8 @@ import h5py
 import numpy as np
 import tensorflow as tf
 
-#MODEL_PATH = "/home/elazarkin/work/projects/smart_rahfan/training/tracker/tracker_ver5/outputs/tracker_matmul_corr_with_quality_fbn.keras"
-MODEL_PATH = "/home/elazarkin/work/projects/smart_rahfan/training/tracker/tracker_ver5/outputs/tracker_matmul_corr_fbn.keras"
+MODEL_PATH = "/home/elazarkin/work/projects/smart_rahfan/training/tracker/tracker_ver5/outputs/tracker_matmul_corr_with_quality_fbn.keras"
+#MODEL_PATH = "/home/elazarkin/work/projects/smart_rahfan/training/tracker/tracker_ver5/outputs/tracker_matmul_corr_fbn.keras"
 DATASET_PATH = "/home/elazarkin/work/projects/smart_rahfan/training/tracker/tracker_ver5/dataset_generator/compiled/dataset.h5"
 
 def main():
