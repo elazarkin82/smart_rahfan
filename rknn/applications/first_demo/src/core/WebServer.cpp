@@ -883,6 +883,7 @@ WebServer::WebServer(int port)
     m_frame_h = 0;
     m_target_x = -1;
     m_target_y = -1;
+    m_target_low_quality = false;
 
     m_has_new_heatmap = false;
     m_is_heatmap_streaming = false;
@@ -955,7 +956,7 @@ void WebServer::set_drone_callback(IControlerCallback* cb)
 }
 
 
-void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
+void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y, bool target_low_quality)
 {
     int x_cam, y_cam;
     int box_size, half;
@@ -964,6 +965,9 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
     int crop_size;
     int x0;
     int y0;
+    uchar box_r;
+    uchar box_g;
+    uchar box_b;
     std::chrono::steady_clock::time_point t_comp_start;
     std::chrono::steady_clock::time_point t_comp_end;
     float comp_ms;
@@ -982,6 +986,7 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
     m_frame_h = h;
     m_target_x = target_x;
     m_target_y = target_y;
+    m_target_low_quality = target_low_quality;
 
     // Draw the tracking bounding box borders if target coordinates are valid
     if (m_target_x >= 0 && m_target_y >= 0)
@@ -995,48 +1000,60 @@ void WebServer::update(uchar* frame, int w, int h, int target_x, int target_y)
 
         box_size = 30;
         half = box_size / 2;
+        if (m_target_low_quality)
+        {
+            box_r = 255;
+            box_g = 0;
+            box_b = 0;
+        }
+        else
+        {
+            box_r = 0;
+            box_g = 255;
+            box_b = 0;
+        }
 
         x_start = x_cam - half;
         x_end = x_cam + half;
         y_start = y_cam - half;
         y_end = y_cam + half;
 
-        // Draw horizontal boundaries (green: R=0, G=255, B=0)
+        // Draw horizontal boundaries.
         for (cx = x_start; cx <= x_end; ++cx)
         {
             if (cx >= 0 && cx < w)
             {
                 if (y_start >= 0 && y_start < h)
                 {
-                    m_frame_buf[(y_start * w + cx) * 3 + 0] = 0;   // R
-                    m_frame_buf[(y_start * w + cx) * 3 + 1] = 255; // G
-                    m_frame_buf[(y_start * w + cx) * 3 + 2] = 0;   // B
+                    m_frame_buf[(y_start * w + cx) * 3 + 0] = box_r;
+                    m_frame_buf[(y_start * w + cx) * 3 + 1] = box_g;
+                    m_frame_buf[(y_start * w + cx) * 3 + 2] = box_b;
                 }
                 if (y_end >= 0 && y_end < h)
                 {
-                    m_frame_buf[(y_end * w + cx) * 3 + 0] = 0;   // R
-                    m_frame_buf[(y_end * w + cx) * 3 + 1] = 255; // G
-                    m_frame_buf[(y_end * w + cx) * 3 + 2] = 0;   // B
+                    m_frame_buf[(y_end * w + cx) * 3 + 0] = box_r;
+                    m_frame_buf[(y_end * w + cx) * 3 + 1] = box_g;
+                    m_frame_buf[(y_end * w + cx) * 3 + 2] = box_b;
                 }
             }
         }
 
-        // Draw vertical boundaries (green: R=0, G=255, B=0)
+        // Draw vertical boundaries.
         for (cy = y_start; cy <= y_end; ++cy)
         {
             if (cy >= 0 && cy < h)
             {
                 if (x_start >= 0 && x_start < w)
                 {
-                    m_frame_buf[(cy * w + x_start) * 3 + 0] = 0;   // R
-                    m_frame_buf[(cy * w + x_start) * 3 + 1] = 255; // G
-                    m_frame_buf[(cy * w + x_start) * 3 + 2] = 0;   // B
+                    m_frame_buf[(cy * w + x_start) * 3 + 0] = box_r;
+                    m_frame_buf[(cy * w + x_start) * 3 + 1] = box_g;
+                    m_frame_buf[(cy * w + x_start) * 3 + 2] = box_b;
                 }
                 if (x_end >= 0 && x_end < w)
                 {
-                    m_frame_buf[(cy * w + x_end) * 3 + 0] = 0;   // R
-                    m_frame_buf[(cy * w + x_end) * 3 + 1] = 255; // G
-                    m_frame_buf[(cy * w + x_end) * 3 + 2] = 0;   // B
+                    m_frame_buf[(cy * w + x_end) * 3 + 0] = box_r;
+                    m_frame_buf[(cy * w + x_end) * 3 + 1] = box_g;
+                    m_frame_buf[(cy * w + x_end) * 3 + 2] = box_b;
                 }
             }
         }

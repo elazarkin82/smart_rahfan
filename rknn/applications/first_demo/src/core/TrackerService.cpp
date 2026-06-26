@@ -51,7 +51,7 @@ static double tracker_max_double(double a, double b)
     return (a > b) ? a : b;
 }
 
-TrackerService::TrackerService(const char* model_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only, int iterations_num)
+TrackerService::TrackerService(const char* model_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only, int iterations_num, float quality_lost_threshold, float quality_display_threshold)
 {
     FILE* fp;
     long model_size;
@@ -77,6 +77,8 @@ TrackerService::TrackerService(const char* model_path, float min_crop, float max
     m_min_crop = min_crop;
     m_max_crop = max_crop;
     m_quality_enabled = quality_enabled;
+    m_quality_lost_threshold = quality_lost_threshold;
+    m_quality_display_threshold = quality_display_threshold;
     m_use_argmax_only = use_argmax_only;
     m_iterations_num = iterations_num;
     if (m_iterations_num < 1)
@@ -514,11 +516,12 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     int i;
     int peak_x_hm;
     int peak_y_hm;
-    int crop_history_count;
-    int iter_pred_count;
-    int map_idx;
     int dx;
     int dy;
+    int best_iter;
+    int best_x;
+    int best_y;
+    int heatmap_count;
     std::chrono::steady_clock::time_point t_start;
     std::chrono::steady_clock::time_point t_resize_start;
     std::chrono::steady_clock::time_point t_resize_end;
@@ -534,22 +537,16 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     float pcx;
     float pcy;
     float q_val;
-    float crop_size;
-    float mx;
-    float my;
-    float cx;
-    float cy;
-    float tl_x;
-    float tl_y;
+    float best_quality;
+    float selected_quality;
     char time_buf[64];
     uchar* ref_stack_backup;
     uchar* curr_search;
-    uchar* next_search;
     const float* raw_hm;
-    CropHistory crop_history[MAX_TRACKER_ITERATIONS];
-    float iter_pred_x[MAX_TRACKER_ITERATIONS];
-    float iter_pred_y[MAX_TRACKER_ITERATIONS];
+    float best_heatmap[MAX_HEATMAP_PXL_SIZE * MAX_HEATMAP_PXL_SIZE];
     bool run_success;
+    bool has_candidate;
+    bool selected_quality_low;
 
     if (!m_is_model_loaded || !m_is_target_defined)
     {
@@ -565,25 +562,31 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     npu_ms = 0.0f;
     decode_ms = 0.0f;
     total_ms = 0.0f;
-    pcx = 0.0f;
-    pcy = 0.0f;
-    q_val = 0.0f;
-    crop_history_count = 0;
-    iter_pred_count = 0;
+    q_val = 1.0f;
+    best_quality = -1.0f;
+    selected_quality = 0.0f;
+    best_iter = -1;
+    best_x = -1;
+    best_y = -1;
+    heatmap_count = m_out_width_hm * m_out_height_hm;
     run_success = true;
+    has_candidate = false;
+    selected_quality_low = false;
     out_x = -1;
     out_y = -1;
 
     t_start = std::chrono::steady_clock::now();
 
-    // Backup reference stack to allow modifying it in iterations
     ref_stack_backup = (uchar*)malloc(m_in_width_ref * m_in_height_ref * m_in_channels_ref);
+    curr_search = (uchar*)malloc(m_in_width_search * m_in_height_search);
+    if (ref_stack_backup == NULL || curr_search == NULL)
+    {
+        free(ref_stack_backup);
+        free(curr_search);
+        return;
+    }
     memcpy(ref_stack_backup, m_ref_stack_buf, m_in_width_ref * m_in_height_ref * m_in_channels_ref);
 
-    // Initialize temporary search frame
-    curr_search = (uchar*)malloc(m_in_width_search * m_in_height_search);
-
-    // Crop the centered square search region for the first iteration
     t_resize_start = std::chrono::steady_clock::now();
     resize_center_square_bilinear_gray(frame, w, h, curr_search, m_in_width_search, m_in_height_search);
     t_resize_end = std::chrono::steady_clock::now();
@@ -591,10 +594,8 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
 
     for (iter = 0; iter < m_iterations_num; ++iter)
     {
-        // Setup current search buffer
         memcpy(m_search_buf, curr_search, m_in_width_search * m_in_height_search);
 
-        // Setup inputs for NPU
         memset(inputs, 0, sizeof(inputs));
 
         inputs[m_idx_ref_stack].index = m_idx_ref_stack;
@@ -642,12 +643,10 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
         t_npu_end = std::chrono::steady_clock::now();
         npu_ms += std::chrono::duration<float, std::milli>(t_npu_end - t_npu_start).count();
 
-        // Decode heatmap and extract quality
         t_decode_start = std::chrono::steady_clock::now();
 
-        // Scale raw heatmap outputs from pre_threshold range [-1.0, 1.0] back to standard [0.0, 1.0]
         raw_hm = (const float*)outputs[m_idx_heatmap].buf;
-        for (i = 0; i < m_out_width_hm * m_out_height_hm; ++i)
+        for (i = 0; i < heatmap_count; ++i)
         {
             m_heatmap_buf[i] = (raw_hm[i] + 1.0f) / 2.0f;
         }
@@ -667,93 +666,54 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
             pcy = m_in_height_search / 2.0f;
         }
 
-        iter_pred_x[iter_pred_count] = pcx;
-        iter_pred_y[iter_pred_count] = pcy;
-        iter_pred_count++;
-
-        t_decode_end = std::chrono::steady_clock::now();
-        decode_ms += std::chrono::duration<float, std::milli>(t_decode_end - t_decode_start).count();
-
         if (m_quality_enabled)
         {
             q_val = ((float*)outputs[m_idx_quality].buf)[0];
         }
-        
-        if (q_val < 0.2f)
+        else
         {
-			run_success = false;
-			break;
-		}
-
-        // Release NPU outputs for this iteration
-        rknn_outputs_release(m_ctx_model, 2, outputs);
-
-        // Update StatusObject with quality telemetry from the last iteration
-        if (iter == m_iterations_num - 1)
-        {
-            if (m_quality_enabled)
-            {
-                snprintf(time_buf, sizeof(time_buf), "%.4f", q_val);
-                StatusObject::instance()->update("tracker_quality", time_buf);
-            }
-            else
-            {
-                StatusObject::instance()->update("tracker_quality", "Disabled");
-            }
+            q_val = 1.0f;
         }
 
-        // Prepare next iteration search crop and reference crop
+        if (!has_candidate || q_val > best_quality)
+        {
+            has_candidate = true;
+            best_quality = q_val;
+            best_iter = iter;
+            best_x = (int)roundf(pcx * (256.0f / m_in_width_search));
+            best_y = (int)roundf(pcy * (256.0f / m_in_height_search));
+            memcpy(best_heatmap, m_heatmap_buf, heatmap_count * sizeof(float));
+        }
+
+        t_decode_end = std::chrono::steady_clock::now();
+        decode_ms += std::chrono::duration<float, std::milli>(t_decode_end - t_decode_start).count();
+
+        rknn_outputs_release(m_ctx_model, 2, outputs);
+
         if (iter < m_iterations_num - 1)
         {
             t_resize_start = std::chrono::steady_clock::now();
-
-            crop_size = m_in_width_search / 2.0f;
-            crop_history[crop_history_count].cx = pcx;
-            crop_history[crop_history_count].cy = pcy;
-            crop_history[crop_history_count].crop_size = crop_size;
-            crop_history_count++;
-
-            // Crop search frame
-            next_search = (uchar*)malloc(m_in_width_search * m_in_height_search);
-            crop_and_resize_gray(curr_search, m_in_width_search, m_in_height_search, pcx, pcy, crop_size, next_search, m_in_width_search, m_in_height_search);
-            memcpy(curr_search, next_search, m_in_width_search * m_in_height_search);
-            free(next_search);
-
-            // Crop reference stack
             crop_and_resize_ref_stack(m_in_width_ref / 2.0f, m_in_width_ref);
-
             t_resize_end = std::chrono::steady_clock::now();
             resize_ms += std::chrono::duration<float, std::milli>(t_resize_end - t_resize_start).count();
         }
     }
 
-    if (run_success)
+    if (run_success && has_candidate)
     {
-        // 3. Map final coordinates back to the original starting search space
-        t_decode_start = std::chrono::steady_clock::now();
-        mx = pcx;
-        my = pcy;
-        if (iter_pred_count > 0)
+        selected_quality = best_quality;
+        selected_quality_low = m_quality_enabled && selected_quality < m_quality_display_threshold;
+        if (m_quality_enabled && selected_quality < m_quality_lost_threshold)
         {
-            mx = iter_pred_x[iter_pred_count - 1];
-            my = iter_pred_y[iter_pred_count - 1];
-            for (map_idx = crop_history_count - 1; map_idx >= 0; --map_idx)
-            {
-                cx = crop_history[map_idx].cx;
-                cy = crop_history[map_idx].cy;
-                crop_size = crop_history[map_idx].crop_size;
-                tl_x = cx - crop_size / 2.0f;
-                tl_y = cy - crop_size / 2.0f;
-                mx = tl_x + mx * (crop_size / m_in_width_search);
-                my = tl_y + my * (crop_size / m_in_height_search);
-            }
+            out_x = -1;
+            out_y = -1;
         }
-
-        // Scale mapped coordinates to standard 256x256 display space
-        out_x = (int)roundf(mx * (256.0f / m_in_width_search));
-        out_y = (int)roundf(my * (256.0f / m_in_height_search));
-        t_decode_end = std::chrono::steady_clock::now();
-        decode_ms += std::chrono::duration<float, std::milli>(t_decode_end - t_decode_start).count();
+        else
+        {
+            out_x = best_x;
+            out_y = best_y;
+        }
+        memcpy(m_heatmap_buf, best_heatmap, heatmap_count * sizeof(float));
     }
     else
     {
@@ -761,7 +721,6 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
         out_y = -1;
     }
 
-    // Restore reference stack and clean up temporary memory
     memcpy(m_ref_stack_buf, ref_stack_backup, m_in_width_ref * m_in_height_ref * m_in_channels_ref);
     free(ref_stack_backup);
     free(curr_search);
@@ -769,7 +728,6 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     t_end = std::chrono::steady_clock::now();
     total_ms = std::chrono::duration<float, std::milli>(t_end - t_start).count();
 
-    // Update StatusObject
     snprintf(time_buf, sizeof(time_buf), "%.2f ms", resize_ms);
     StatusObject::instance()->update("tracker_time_resize", time_buf);
 
@@ -782,23 +740,48 @@ void TrackerService::update_frame(uchar* frame, int w, int h)
     snprintf(time_buf, sizeof(time_buf), "%.2f ms", total_ms);
     StatusObject::instance()->update("tracker_time_total", time_buf);
 
-    // 4. Trigger TrackerCallback
+    if (m_quality_enabled && has_candidate)
+    {
+        snprintf(time_buf, sizeof(time_buf), "%.4f", selected_quality);
+        StatusObject::instance()->update("tracker_quality", time_buf);
+        snprintf(time_buf, sizeof(time_buf), "%d", best_iter);
+        StatusObject::instance()->update("tracker_selected_iteration", time_buf);
+        if (selected_quality < m_quality_lost_threshold)
+        {
+            StatusObject::instance()->update("tracker_quality_state", "Lost");
+        }
+        else if (selected_quality_low)
+        {
+            StatusObject::instance()->update("tracker_quality_state", "Low");
+        }
+        else
+        {
+            StatusObject::instance()->update("tracker_quality_state", "OK");
+        }
+    }
+    else
+    {
+        StatusObject::instance()->update("tracker_quality", "Disabled");
+        StatusObject::instance()->update("tracker_selected_iteration", "N/A");
+        StatusObject::instance()->update("tracker_quality_state", "Disabled");
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_callback != NULL)
         {
-            m_callback->onTargetDetected(out_x, out_y);
+            m_callback->onTargetDetected(out_x, out_y, selected_quality_low);
             m_callback->onHeatmapCreated(m_heatmap_buf, m_out_width_hm, m_out_height_hm);
         }
         if (m_drone_cb != NULL && out_x >= 0 && out_y >= 0)
         {
             int16_t yaw = 1000;
-            int16_t roll = 1000; // <- ->
-            int16_t pitch = 1500;
+            int16_t roll = 1000;
+            int16_t pitch = 2000;
             int16_t throttle = 1000;
             dx = out_x - 128;
             dy = out_y - 128;
-            DroneControlerHal::calculate_tracking_commands(dx, dy, roll, throttle);
+            DroneControlerHal::calculate_tracking_commands(dx, dy, yaw, throttle);
             m_drone_cb->send_command(roll, pitch, yaw, throttle);
         }
     }

@@ -78,7 +78,6 @@ def build_reference_stack(image, center, num_layers, max_size, min_size, target_
             crop_y = center[1]
             
         crop = get_crop(image, crop_x, crop_y, sz)
-        # Resize to uniform shape (e.g., 64x64)
         resized = cv2.resize(crop, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
         stack_layers.append(resized)
         
@@ -154,8 +153,6 @@ def main():
     stack_jitter_ratio = compiler_cfg.get('stack_jitter_ratio', 0.0)
     tgt_sz = compiler_cfg['stack_target_size']
     search_sz = compiler_cfg.get('search_frame_size', 256)
-    sigma = compiler_cfg['heatmap_sigma']
-    relative_sigma = compiler_cfg.get('heatmap_relative_sigma', None)
     neg_sample_ratio = compiler_cfg.get('synthetic_negative_ratio', compiler_cfg.get('negative_sample_ratio', 0.20))
     
     h5_path = os.path.join(dataset_dir, "dataset.h5")

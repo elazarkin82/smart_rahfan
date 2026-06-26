@@ -25,7 +25,7 @@ public:
         virtual ~TrackerCallback()
         {
         }
-        virtual void onTargetDetected(int x, int y) = 0;
+        virtual void onTargetDetected(int x, int y, bool low_quality) = 0;
         virtual void onHeatmapCreated(const float* heatmap, int w, int h) = 0;
         virtual void onStackCreated(const uchar* stack, int w, int h, int c) = 0;
     };
@@ -56,6 +56,8 @@ private:
     float m_min_crop;
     float m_max_crop;
     bool m_quality_enabled;
+    float m_quality_lost_threshold;
+    float m_quality_display_threshold;
     bool m_use_argmax_only;
 
     // Resolved tensor indices
@@ -108,7 +110,7 @@ private:
     void decode_heatmap(const float* raw_heatmap, int* out_x, int* out_y);
 
 public:
-    TrackerService(const char* model_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only = false, int iterations_num = 1);
+    TrackerService(const char* model_path, float min_crop, float max_crop, bool quality_enabled, bool use_argmax_only = false, int iterations_num = 1, float quality_lost_threshold = 0.20f, float quality_display_threshold = 0.20f);
     ~TrackerService();
 
     bool is_model_loaded() const;

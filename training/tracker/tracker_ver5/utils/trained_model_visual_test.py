@@ -308,7 +308,7 @@ class ModelInferenceVisualizer:
             self.heatmap_panels = []
             self.heatmap_lbls = []
             for i in range(self.iterations_num):
-                p, l = self.create_frame_slot(bottom_row, f"Heatmap (Iter {i})", panel_size=224)
+                p, l = self.create_frame_slot(bottom_row, f"Heatmap (Iter {i})", panel_size=160)
                 self.heatmap_panels.append(p)
                 self.heatmap_lbls.append(l)
                 
@@ -595,20 +595,7 @@ class ModelInferenceVisualizer:
         if len(qualities) == 0:
             return None, [], "Rejected: no iterations", "no iterations"
 
-        if qualities[0] < 0.3:
-            return None, [], f"Rejected: q0={qualities[0]:.2f} < 0.30", "first quality below 0.30"
-
-        valid_iters = [0]
-        for idx in range(1, len(qualities)):
-            if qualities[idx] < 0.75:
-                break
-            valid_iters.append(idx)
-
-        high_quality_iters = [idx for idx in valid_iters if qualities[idx] > 0.9]
-        if high_quality_iters:
-            selected_iter = high_quality_iters[-1]
-            return selected_iter, valid_iters, None, "last quality above 0.90"
-
+        valid_iters = list(range(len(qualities)))
         selected_iter = max(valid_iters, key=lambda idx: qualities[idx])
         return selected_iter, valid_iters, None, "best quality"
 
@@ -700,22 +687,11 @@ class ModelInferenceVisualizer:
             iter_preds_in_iter_space.append((pcx, pcy))
             
             if iter_idx < self.iterations_num - 1:
-                # Save the crop history: center (pcx, pcy) and crop size
-                crop_size = self.search_frame_size / 2.0
-                crop_history.append((pcx, pcy, crop_size))
-                
-                # Crop and resize search frame for the next iteration
-                curr_search = self.crop_and_resize(curr_search, pcx, pcy, crop_size, self.search_frame_size)
-                
-                # Crop and resize reference stack for the next iteration (crop size = ref_w / 2)
+                # Evaluate the next independent candidate with the same search frame and a tighter reference stack.
                 curr_ref = self.crop_and_resize_ref_stack(curr_ref, ref_w / 2, ref_w)
                 
-        # Now map all predicted coordinates back to the original space (which is self.search_frame_size)
-        iter_preds_mapped_search_space = []
-        for idx in range(self.iterations_num):
-            px, py = iter_preds_in_iter_space[idx]
-            mx, my = self.map_to_original(px, py, crop_history[:idx])
-            iter_preds_mapped_search_space.append((mx, my))
+        # All candidates use the same search frame, so predictions are already in search-frame space.
+        iter_preds_mapped_search_space = list(iter_preds_in_iter_space)
             
         # Map to display space (256x256) for drawing
         iter_preds_mapped = []
@@ -795,7 +771,7 @@ class ModelInferenceVisualizer:
             heatmap = iter_heatmaps[idx]
             heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
             heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-            heatmap_color_rgb = cv2.resize(heatmap_color_rgb, (224, 224), interpolation=cv2.INTER_NEAREST)
+            heatmap_color_rgb = cv2.resize(heatmap_color_rgb, (160, 160), interpolation=cv2.INTER_NEAREST)
             tk_img = ImageTk.PhotoImage(Image.fromarray(heatmap_color_rgb))
             self.tk_imgs_predicted.append(tk_img)
             
@@ -824,9 +800,6 @@ class ModelInferenceVisualizer:
             elif selected_iter is None and idx == 0:
                 quality_suffix = " REJECTED"
                 label_fg = "#ff3366"
-            elif idx not in selected_valid_iters:
-                quality_suffix = " IGNORED"
-                label_fg = "#888888"
             info_text = f"Mapped: [{mx:.1f}, {my:.1f}]\nIter: [{px:.1f}, {py:.1f}]\n{error_str}\nQuality: {iter_pred_qualities[idx]:.2f}{quality_suffix}"
             panel.config(bd=panel_bd)
             lbl.config(text=info_text, fg=label_fg)

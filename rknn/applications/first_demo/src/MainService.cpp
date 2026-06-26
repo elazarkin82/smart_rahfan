@@ -20,6 +20,7 @@ MainService::MainService(const char* params_path)
     m_lastFrame_h = 0;
     m_target_x = -1;
     m_target_y = -1;
+    m_target_low_quality = false;
     m_camera_frame_count = 0;
     m_camera_frame_next = 0;
     m_tracker_frame_count = 0;
@@ -39,6 +40,8 @@ MainService::MainService(const char* params_path)
         m_params.height = 480;
         snprintf(m_params.rknn_model_path, sizeof(m_params.rknn_model_path), "matmul_corr.rknn");
         snprintf(m_params.quality_mode, sizeof(m_params.quality_mode), "disabled");
+        m_params.quality_lost_threshold = 0.20f;
+        m_params.quality_display_threshold = 0.20f;
         m_params.min_crop = 64.0f;
         m_params.max_crop = 256.0f;
         m_params.decode_argmax_only = 0;
@@ -89,7 +92,9 @@ void MainService::start()
         m_params.max_crop,
         quality_enabled,
         m_params.decode_argmax_only != 0,
-        m_params.iterations_num
+        m_params.iterations_num,
+        m_params.quality_lost_threshold,
+        m_params.quality_display_threshold
     );
     m_web_server = new WebServer(8080);
     m_drone = new DroneControler(m_params.drone_serial_port, m_params.drone_controller_id);
@@ -206,18 +211,26 @@ void MainService::onFrame(uchar* frame, int w, int h)
     }
 }
 
-void MainService::onTargetDetected(int x, int y)
+void MainService::onTargetDetected(int x, int y, bool low_quality)
 {
     char pos_buf[64];
 
     m_target_x = x;
     m_target_y = y;
+    m_target_low_quality = low_quality;
 
     // Report tracker status
     if (x >= 0 && y >= 0)
     {
         snprintf(pos_buf, sizeof(pos_buf), "[%d, %d]", x, y);
-        StatusObject::instance()->update("tracking_status", "Target Acquired");
+        if (low_quality)
+        {
+            StatusObject::instance()->update("tracking_status", "Target Low Quality");
+        }
+        else
+        {
+            StatusObject::instance()->update("tracking_status", "Target Acquired");
+        }
         StatusObject::instance()->update("target_position", pos_buf);
     }
     else
@@ -263,6 +276,8 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
 
     out.decode_argmax_only = 0; // Default fallback
     out.iterations_num = 1;
+    out.quality_lost_threshold = 0.20f;
+    out.quality_display_threshold = 0.20f;
     snprintf(out.drone_serial_port, sizeof(out.drone_serial_port), "/dev/ttyUSB0");
     out.drone_controller_id = -1;
 
@@ -307,6 +322,14 @@ bool MainService::parse_params_file(const char* params_path, Params& out)
             {
                 snprintf(out.quality_mode, sizeof(out.quality_mode), "%s", val);
             }
+            else if (strcmp(key, "quality_lost_threshold") == 0)
+            {
+                out.quality_lost_threshold = (float)atof(val);
+            }
+            else if (strcmp(key, "quality_display_threshold") == 0)
+            {
+                out.quality_display_threshold = (float)atof(val);
+            }
             else if (strcmp(key, "min_crop") == 0)
             {
                 out.min_crop = (float)atof(val);
@@ -350,6 +373,8 @@ void MainService::save_params_file(const char* params_path, const Params& in)
         fprintf(fp, "capture_height=%d\n", in.height);
         fprintf(fp, "rknn_model_path=%s\n", in.rknn_model_path);
         fprintf(fp, "quality_mode=%s\n", in.quality_mode);
+        fprintf(fp, "quality_lost_threshold=%.2f\n", in.quality_lost_threshold);
+        fprintf(fp, "quality_display_threshold=%.2f\n", in.quality_display_threshold);
         fprintf(fp, "min_crop=%.1f\n", in.min_crop);
         fprintf(fp, "max_crop=%.1f\n", in.max_crop);
         fprintf(fp, "decode_argmax_only=%d\n", in.decode_argmax_only);
@@ -432,6 +457,7 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
             m_tracker->set_drone_callback(NULL);
             m_target_x = -1;
             m_target_y = -1;
+            m_target_low_quality = false;
             StatusObject::instance()->update("tracking_status", "Target Not Selected");
             StatusObject::instance()->update("target_position", "N/A");
             StatusObject::instance()->update("flight_mode", "Manual");
@@ -466,6 +492,7 @@ void MainService::process_command_internal(WebServer::Command key, const char* v
                 y0 = (m_lastFrame_h - crop_size) / 2;
                 m_target_x = ((target_px - x0) * 256) / crop_size;
                 m_target_y = ((target_py - y0) * 256) / crop_size;
+                m_target_low_quality = false;
             }
             break;
 
@@ -588,7 +615,7 @@ void MainService::main_loop()
             }
             
             // Send tracking overlays to web server stream
-            m_web_server->update(work_frame, work_w, work_h, m_target_x, m_target_y);
+            m_web_server->update(work_frame, work_w, work_h, m_target_x, m_target_y, m_target_low_quality);
             
             has_frame = false;
         }

@@ -22,6 +22,8 @@ public:
         int height;
         char rknn_model_path[256];
         char quality_mode[64];
+        float quality_lost_threshold;
+        float quality_display_threshold;
         float min_crop;
         float max_crop;
         int decode_argmax_only;
@@ -54,6 +56,7 @@ private:
     // Track coordinates
     int m_target_x;
     int m_target_y;
+    bool m_target_low_quality;
 
     // Service lifecycle
     bool m_is_running;
@@ -90,7 +93,7 @@ public:
 
     // Callbacks implementation
     void onFrame(uchar* frame, int w, int h) override;
-    void onTargetDetected(int x, int y) override;
+    void onTargetDetected(int x, int y, bool low_quality) override;
     void onHeatmapCreated(const float* heatmap, int w, int h) override;
     void onStackCreated(const uchar* stack, int w, int h, int c) override;
     void onCommand(WebServer::Command key, const char* values, int len) override;

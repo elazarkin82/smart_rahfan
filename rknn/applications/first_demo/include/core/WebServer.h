@@ -51,6 +51,7 @@ private:
     int m_frame_h;
     int m_target_x;
     int m_target_y;
+    bool m_target_low_quality;
     bool m_has_new_frame;
 
     // Heatmap stream state & buffers
@@ -78,7 +79,7 @@ public:
 
     void set_command_callback(CommandCallback* cb);
     void set_drone_callback(IControlerCallback* cb);
-    void update(uchar* frame, int w, int h, int target_x, int target_y);
+    void update(uchar* frame, int w, int h, int target_x, int target_y, bool target_low_quality);
     void update_heatmap(const float* heatmap, int w, int h);
     void update_stack(const uchar* stack, int w, int h, int c);
     void get_stack_layer(int idx, const uchar** jpeg_dest, unsigned long* jpeg_len);

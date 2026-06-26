@@ -16,9 +16,13 @@ echo "[TF ENV] TRACKER_GPU_MEMORY_LIMIT_MB=${TRACKER_GPU_MEMORY_LIMIT_MB}"
 # Run training using the matmul correlation loss script
 #
 # --train_mode heatmap_only: Trains spatial features using coordinate distance loss on positive samples.
+
+BATCH_SIZE=64
+
+# --dataset_cache_mode streaming for memory error
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 5 \
+    --num_of_epochs 30 \
     --lr 1e-3 \
     --loss_quality bce \
     --output outputs/tracker_matmul_corr.keras \
@@ -26,13 +30,11 @@ python3 tracker_model_matmul_corr.py train \
     --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
     --log_file outputs/train_matmul_corr.log \
     --train_mode heatmap_only \
-    --batch_size 32
-    
-    #--dataset_cache_mode streaming
+    --batch_size ${BATCH_SIZE}
     
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 5 \
+    --num_of_epochs 20 \
     --lr 1e-4 \
     --loss_quality bce \
     --output outputs/tracker_matmul_corr.keras \
@@ -40,12 +42,11 @@ python3 tracker_model_matmul_corr.py train \
     --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
     --log_file outputs/train_matmul_corr.log \
     --train_mode heatmap_only \
-    --batch_size 32 \
-    --dataset_cache_mode streaming
+    --batch_size ${BATCH_SIZE}
 
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 5 \
+    --num_of_epochs 10 \
     --lr 1e-5 \
     --loss_quality bce \
     --output outputs/tracker_matmul_corr.keras \
@@ -53,18 +54,4 @@ python3 tracker_model_matmul_corr.py train \
     --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
     --log_file outputs/train_matmul_corr.log \
     --train_mode heatmap_only \
-    --batch_size 32 \
-    --dataset_cache_mode streaming
-    
-python3 tracker_model_matmul_corr.py train \
-    --dataset_dir dataset_generator/compiled \
-    --num_of_epochs 5 \
-    --lr 1e-6 \
-    --loss_quality bce \
-    --output outputs/tracker_matmul_corr.keras \
-    --init_keras_file outputs/tracker_matmul_corr.keras \
-    --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
-    --log_file outputs/train_matmul_corr.log \
-    --train_mode heatmap_only \
-    --batch_size 32 \
-    --dataset_cache_mode streaming
+    --batch_size ${BATCH_SIZE}
