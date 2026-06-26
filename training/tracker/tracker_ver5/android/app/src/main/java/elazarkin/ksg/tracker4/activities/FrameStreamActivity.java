@@ -10,6 +10,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -32,6 +34,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
@@ -40,7 +43,11 @@ import java.util.concurrent.locks.Condition;
 public class FrameStreamActivity extends AppCompatActivity implements CameraHelper.FrameProcessor {
 
     private static final int CAMERA_PERMISSION_REQUEST_CODE = 1002;
-    private static final float CONFIDENCE_THRESHOLD = 0.30f;
+    private static final float QUALITY_DISPLAY_THRESHOLD = 0.50f;
+    private static final float EXPERIMENTAL_STACK_UPDATE_QUALITY_THRESHOLD = 0.75f;
+
+    private static final int ITER_STATUS_CANDIDATE = 0;
+    private static final int ITER_STATUS_SELECTED = 1;
 
     private static final int STATE_IDLE = 0;
     private static final int STATE_GATHERING = 1;
@@ -54,8 +61,17 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private TextView tutorialHud;
     private TextView lblStatus;
     private Button btnBack;
+    private Button btnToggleControls;
+    private Button btnHideControls;
+    private Button btnSettings;
     private androidx.appcompat.widget.SwitchCompat switchBypassQuality;
+    private androidx.appcompat.widget.SwitchCompat switchExperimentalPrevReference;
+    private androidx.appcompat.widget.SwitchCompat switchUseQuality;
 
+    private View topBar;
+    private View bottomDashboard;
+    private View workspaceContainer;
+    private View settingsPanel;
     private LinearLayout resultsPanel;
     private ImageView heatmapImageView;
     private TextView txtLatency;
@@ -68,15 +84,26 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private TextView lblHistStack;
     private SeekBar seekBarHistLayer;
     private int selectedHistLayer = 0;
+    private TextView lblReferenceIteration;
+    private SeekBar seekBarReferenceIteration;
+    private int selectedReferenceIteration = 0;
+    private TextView lblHeatmapIteration;
+    private SeekBar seekBarHeatmapIteration;
+    private int selectedHeatmapIteration = 0;
+    private TextView lblIterations;
+    private SeekBar seekBarIterations;
+    private volatile int iterationsNum = 4;
+    private TextView lblQualityThreshold;
+    private SeekBar seekBarQualityThreshold;
+    private volatile boolean useQualityForTarget = true;
+    private volatile float targetLostQualityThreshold = QUALITY_DISPLAY_THRESHOLD;
 
-    private float[] cachedFlatHeatmap = null;
-    private float[] cachedCurrBuffer = null;
+    private IterationResult[] cachedIterationResults = null;
     private Bitmap cachedFullFrameBmp = null;
-    private float cachedPx = 0.5f;
-    private float cachedPy = 0.5f;
 
     private CameraHelper cameraHelper;
     private boolean isLoopActive = false;
+    private boolean controlsVisible = true;
     
     private float targetX = 0.0f;
     private float targetY = 0.0f;
@@ -95,11 +122,19 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private int searchInputIndex = 1;
     private int heatmapOutputIndex = 0;
     private int qualityOutputIndex = 1;
+    private String heatmapOutputDebug = "hm=?";
+    private String qualityOutputDebug = "q=?";
 
     private java.nio.ByteBuffer refStackInputBuffer = null;
     private java.nio.ByteBuffer searchBuffer = null;
     private java.nio.ByteBuffer outputHeatmapBuffer = null;
     private java.nio.ByteBuffer outputQualityBuffer = null;
+
+    private float[] initialReferenceStackLayers = null;
+    private volatile ReferenceSource initialReferenceSource = null;
+    private volatile float[] previousFrameReferenceStackLayers = null;
+    private volatile ReferenceSource previousFrameReferenceSource = null;
+    private volatile boolean experimentalPrevReferenceMode = false;
 
     private Interpreter tflite;
 
@@ -117,22 +152,29 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private Thread workerThread = null;
     private volatile boolean isWorkerActive = false;
 
-    // Tracking position state in absolute camera frame pixels
-    private float lastTrackedX = 0.0f;
-    private float lastTrackedY = 0.0f;
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        supportRequestWindowFeature(Window.FEATURE_NO_TITLE);
+        enableFullscreenImmersive();
         setContentView(R.layout.activity_frame_stream);
 
+        topBar = findViewById(R.id.top_bar);
+        bottomDashboard = findViewById(R.id.bottom_dashboard);
+        workspaceContainer = findViewById(R.id.workspace_container);
         viewFinder = findViewById(R.id.viewFinder);
         capturedImageView = findViewById(R.id.capturedImageView);
         tutorialHud = findViewById(R.id.tutorial_hud);
         lblStatus = findViewById(R.id.lbl_status);
         btnBack = findViewById(R.id.btn_back);
+        btnToggleControls = findViewById(R.id.btn_toggle_controls);
+        btnHideControls = findViewById(R.id.btn_hide_controls);
+        btnSettings = findViewById(R.id.btn_settings);
         switchBypassQuality = findViewById(R.id.switch_bypass_quality);
+        switchExperimentalPrevReference = findViewById(R.id.switch_experimental_prev_reference);
+        switchUseQuality = findViewById(R.id.switch_use_quality);
 
+        settingsPanel = findViewById(R.id.settings_panel);
         resultsPanel = findViewById(R.id.results_panel);
         heatmapImageView = findViewById(R.id.heatmapImageView);
         txtLatency = findViewById(R.id.txt_latency);
@@ -144,14 +186,84 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         lblHistStack = findViewById(R.id.lblHistStack);
         seekBarHistLayer = findViewById(R.id.seekBarHistLayer);
+        lblReferenceIteration = findViewById(R.id.lblReferenceIteration);
+        seekBarReferenceIteration = findViewById(R.id.seekBarReferenceIteration);
+        lblHeatmapIteration = findViewById(R.id.lblHeatmapIteration);
+        seekBarHeatmapIteration = findViewById(R.id.seekBarHeatmapIteration);
+        lblIterations = findViewById(R.id.lblIterations);
+        seekBarIterations = findViewById(R.id.seekBarIterations);
+        lblQualityThreshold = findViewById(R.id.lblQualityThreshold);
+        seekBarQualityThreshold = findViewById(R.id.seekBarQualityThreshold);
         seekBarHistLayer.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 selectedHistLayer = progress;
-                lblHistStack.setText("Hist Stack (L: " + selectedHistLayer + ")");
-                if (cachedFlatHeatmap != null && cachedCurrBuffer != null) {
-                    renderDiagnostics(cachedFlatHeatmap, cachedCurrBuffer, cachedFullFrameBmp, cachedPx, cachedPy);
+                updateReferenceDebugLabel();
+                if (cachedIterationResults != null) {
+                    renderDiagnostics(cachedIterationResults, selectedHeatmapIteration, cachedFullFrameBmp);
                 }
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        seekBarReferenceIteration.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                selectedReferenceIteration = progress;
+                updateReferenceDebugLabel();
+                if (cachedIterationResults != null) {
+                    renderDiagnostics(cachedIterationResults, selectedHeatmapIteration, cachedFullFrameBmp);
+                }
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        seekBarHeatmapIteration.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                selectedHeatmapIteration = progress;
+                if (cachedIterationResults != null) {
+                    renderDiagnostics(cachedIterationResults, selectedHeatmapIteration, cachedFullFrameBmp);
+                } else {
+                    lblHeatmapIteration.setText("Heatmap Iter: " + selectedHeatmapIteration);
+                }
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        seekBarIterations.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                iterationsNum = progress + 1;
+                lblIterations.setText("Iterations: " + iterationsNum);
+                if (selectedHeatmapIteration >= iterationsNum) {
+                    selectedHeatmapIteration = iterationsNum - 1;
+                }
+                if (selectedReferenceIteration >= iterationsNum) {
+                    selectedReferenceIteration = iterationsNum - 1;
+                }
+                seekBarHeatmapIteration.setMax(Math.max(0, iterationsNum - 1));
+                seekBarHeatmapIteration.setProgress(selectedHeatmapIteration);
+                seekBarReferenceIteration.setMax(Math.max(0, iterationsNum - 1));
+                seekBarReferenceIteration.setProgress(selectedReferenceIteration);
+                updateReferenceDebugLabel();
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        seekBarIterations.setProgress(iterationsNum - 1);
+        switchUseQuality.setChecked(useQualityForTarget);
+        switchUseQuality.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            useQualityForTarget = isChecked;
+            updateQualityThresholdLabel();
+        });
+        seekBarQualityThreshold.setProgress(Math.round(targetLostQualityThreshold * 100.0f));
+        updateQualityThresholdLabel();
+        seekBarQualityThreshold.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                targetLostQualityThreshold = progress / 100.0f;
+                updateQualityThresholdLabel();
             }
             @Override public void onStartTrackingTouch(SeekBar seekBar) {}
             @Override public void onStopTrackingTouch(SeekBar seekBar) {}
@@ -204,20 +316,33 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             searchW = parsedSearch.w;
             
             int numOutputs = tflite.getOutputTensorCount();
-            heatmapOutputIndex = 0;
-            qualityOutputIndex = 1;
+            heatmapOutputIndex = -1;
+            qualityOutputIndex = -1;
             for (int i = 0; i < numOutputs; i++) {
-                int[] shape = tflite.getOutputTensor(i).shape();
-                if (shape != null && shape.length > 2 && shape[shape.length - 2] > 1) {
+                org.tensorflow.lite.Tensor outputTensor = tflite.getOutputTensor(i);
+                if (tensorNameContains(outputTensor, "quality") || tensorNameContains(outputTensor, "predicted_quality")) {
+                    qualityOutputIndex = i;
+                } else if (tensorNameContains(outputTensor, "heatmap") || tensorNameContains(outputTensor, "predicted_heatmap")) {
                     heatmapOutputIndex = i;
-                } else {
+                }
+            }
+            for (int i = 0; i < numOutputs && (heatmapOutputIndex == -1 || qualityOutputIndex == -1); i++) {
+                int[] shape = tflite.getOutputTensor(i).shape();
+                if (heatmapOutputIndex == -1 && shape != null && shape.length > 2 && shape[shape.length - 2] > 1) {
+                    heatmapOutputIndex = i;
+                } else if (qualityOutputIndex == -1 && i != heatmapOutputIndex) {
                     qualityOutputIndex = i;
                 }
+            }
+            if (heatmapOutputIndex == -1) {
+                heatmapOutputIndex = 0;
             }
             
             ParsedShape parsedHeatmap = parseTensorShape(tflite.getOutputTensor(heatmapOutputIndex), 256, 256, 1);
             heatmapH = parsedHeatmap.h;
             heatmapW = parsedHeatmap.w;
+            heatmapOutputDebug = describeTensor("hm", heatmapOutputIndex);
+            qualityOutputDebug = describeTensor("q", qualityOutputIndex);
             
             // Allocate buffers with dynamic sizes
             refStackInputBuffer = java.nio.ByteBuffer.allocateDirect(1 * refH * refW * refLayers * 4).order(java.nio.ByteOrder.nativeOrder());
@@ -234,6 +359,18 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
 
         btnBack.setOnClickListener(v -> finish());
+        btnToggleControls.setOnClickListener(v -> setControlsVisible(true));
+        btnHideControls.setOnClickListener(v -> setControlsVisible(false));
+        btnSettings.setOnClickListener(v -> {
+            settingsPanel.setVisibility(settingsPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+            enableFullscreenImmersive();
+        });
+        switchExperimentalPrevReference.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            experimentalPrevReferenceMode = isChecked;
+            previousFrameReferenceStackLayers = null;
+            previousFrameReferenceSource = null;
+        });
+        setControlsVisible(false);
         
         capturedImageView.setOnTouchListener((v, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
@@ -282,6 +419,55 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                 lblStatus.setText("Status: Camera bind failed!");
             }
         });
+    }
+
+    private void setControlsVisible(boolean visible) {
+        controlsVisible = visible;
+        topBar.setVisibility(visible ? View.VISIBLE : View.GONE);
+        bottomDashboard.setVisibility(visible ? View.VISIBLE : View.GONE);
+        btnToggleControls.setVisibility(visible ? View.GONE : View.VISIBLE);
+
+        androidx.constraintlayout.widget.ConstraintLayout.LayoutParams params =
+                (androidx.constraintlayout.widget.ConstraintLayout.LayoutParams) workspaceContainer.getLayoutParams();
+        if (visible) {
+            params.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.topToBottom = R.id.top_bar;
+            params.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.bottomToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.startToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.endToStart = R.id.content_guideline;
+            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+        } else {
+            params.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.topToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.bottomToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.startToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+            params.endToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET;
+        }
+        workspaceContainer.setLayoutParams(params);
+        enableFullscreenImmersive();
+    }
+
+    private void enableFullscreenImmersive() {
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().hide();
+        }
+        getWindow().setFlags(
+                WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN
+        );
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        );
     }
 
     @Override
@@ -336,6 +522,190 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
     }
 
+    private int canonicalReferenceIndex(int layer, int y, int x) {
+        return layer * refH * refW + y * refW + x;
+    }
+
+    private int modelReferenceIndex(int layer, int y, int x) {
+        if (refShapeIsNCHW) {
+            return layer * refH * refW + y * refW + x;
+        }
+        return y * refW * refLayers + x * refLayers + layer;
+    }
+
+    private float getReferenceCropSizeForLayer(int layer, int frameHeight) {
+        float smallestCropSize = (512.0f / 600.0f) * frameHeight;
+        float largestCropSize = (512.0f / 600.0f) * frameHeight;
+        if (refLayers <= 1) {
+            return largestCropSize;
+        }
+        return largestCropSize - layer * ((largestCropSize - smallestCropSize) / (float)(refLayers - 1));
+    }
+
+    private float getReferenceCropSizeForIteration(int layer, int frameHeight, int iterationIndex) {
+        float baseSize = getReferenceCropSizeForLayer(layer, frameHeight);
+        if (iterationIndex <= 0) {
+            return baseSize;
+        }
+        if (refLayers > 1 && layer == refLayers - 1) {
+            return baseSize;
+        }
+        return Math.max(1.0f, baseSize * (float)Math.pow(0.5f, iterationIndex));
+    }
+
+    private float sampleYPlaneBilinear(byte[] yPlane, int width, int height, int stride, float srcX, float srcY) {
+        int x0 = (int) Math.floor(srcX);
+        int y0 = (int) Math.floor(srcY);
+        int x1 = x0 + 1;
+        int y1 = y0 + 1;
+
+        float dx = srcX - (float) x0;
+        float dy = srcY - (float) y0;
+
+        x0 = Math.max(0, Math.min(width - 1, x0));
+        x1 = Math.max(0, Math.min(width - 1, x1));
+        y0 = Math.max(0, Math.min(height - 1, y0));
+        y1 = Math.max(0, Math.min(height - 1, y1));
+
+        float p00 = yPlane[y0 * stride + x0] & 0xFF;
+        float p10 = yPlane[y0 * stride + x1] & 0xFF;
+        float p01 = yPlane[y1 * stride + x0] & 0xFF;
+        float p11 = yPlane[y1 * stride + x1] & 0xFF;
+
+        return ((1.0f - dx) * (1.0f - dy) * p00)
+                + (dx * (1.0f - dy) * p10)
+                + ((1.0f - dx) * dy * p01)
+                + (dx * dy * p11);
+    }
+
+    private float[] buildReferenceStackLayers(byte[] yPlane, int width, int height, int stride, float cx, float cy) {
+        return buildReferenceStackLayers(yPlane, width, height, stride, cx, cy, 0);
+    }
+
+    private float[] buildReferenceStackLayers(ReferenceSource source, int iterationIndex) {
+        if (source == null) {
+            return null;
+        }
+        return buildReferenceStackLayers(
+                source.yPlane,
+                source.width,
+                source.height,
+                source.stride,
+                source.cx,
+                source.cy,
+                iterationIndex
+        );
+    }
+
+    private float[] buildReferenceStackLayers(byte[] yPlane, int width, int height, int stride, float cx, float cy, int iterationIndex) {
+        float[] stack = new float[refLayers * refH * refW];
+        for (int layer = 0; layer < refLayers; layer++) {
+            float size = getReferenceCropSizeForIteration(layer, height, iterationIndex);
+            float half = size / 2.0f;
+
+            for (int y = 0; y < refH; y++) {
+                for (int x = 0; x < refW; x++) {
+                    float srcX = cx - half + (x / (float)(refW - 1)) * size;
+                    float srcY = cy - half + (y / (float)(refH - 1)) * size;
+
+                    float pixel = sampleYPlaneBilinear(yPlane, width, height, stride, srcX, srcY);
+                    stack[canonicalReferenceIndex(layer, y, x)] = pixel / 255.0f;
+                }
+            }
+        }
+        return stack;
+    }
+
+    private void preserveInitialSmallestReferenceLayer(float[] stackLayers) {
+        if (stackLayers == null || initialReferenceStackLayers == null || refLayers <= 1) {
+            return;
+        }
+
+        int smallestLayer = refLayers - 1;
+        for (int y = 0; y < refH; y++) {
+            for (int x = 0; x < refW; x++) {
+                int index = canonicalReferenceIndex(smallestLayer, y, x);
+                stackLayers[index] = initialReferenceStackLayers[index];
+            }
+        }
+    }
+
+    private ReferenceSource selectReferenceSourceForCurrentFrame() {
+        if (experimentalPrevReferenceMode && previousFrameReferenceSource != null) {
+            return previousFrameReferenceSource;
+        }
+        return initialReferenceSource;
+    }
+
+    private float[] calculateDiscreteArgmaxCoords(float[] heatmap, int hmW, int hmH) {
+        HeatmapStats stats = calculateHeatmapStats(heatmap, hmW, hmH);
+
+        return new float[] { stats.maxX / (float) hmW, stats.maxY / (float) hmH };
+    }
+
+    private HeatmapStats calculateHeatmapStats(float[] heatmap, int hmW, int hmH) {
+        float minVal = Float.MAX_VALUE;
+        float maxVal = -Float.MAX_VALUE;
+        int maxX = hmW / 2;
+        int maxY = hmH / 2;
+
+        for (int y = 0; y < hmH; y++) {
+            for (int x = 0; x < hmW; x++) {
+                float val = heatmap[y * hmW + x];
+                if (val < minVal) {
+                    minVal = val;
+                }
+                if (val > maxVal) {
+                    maxVal = val;
+                    maxX = x;
+                    maxY = y;
+                }
+            }
+        }
+
+        return new HeatmapStats(minVal, maxVal, maxX, maxY);
+    }
+
+    private int selectBestQualityIteration(IterationResult[] iterationResults) {
+        if (iterationResults == null || iterationResults.length == 0) {
+            return -1;
+        }
+
+        for (IterationResult result : iterationResults) {
+            result.status = ITER_STATUS_CANDIDATE;
+        }
+
+        int selectedIndex = 0;
+        float bestQuality = iterationResults[0].qualityScore;
+        for (int i = 1; i < iterationResults.length; i++) {
+            if (iterationResults[i].qualityScore > bestQuality) {
+                bestQuality = iterationResults[i].qualityScore;
+                selectedIndex = i;
+            }
+        }
+
+        iterationResults[selectedIndex].status = ITER_STATUS_SELECTED;
+        return selectedIndex;
+    }
+
+    private void writeReferenceStackToInputBuffer(float[] stackLayers) {
+        if (stackLayers == null || refStackInputBuffer == null) return;
+
+        refStackInputBuffer.rewind();
+        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
+        for (int layer = 0; layer < refLayers; layer++) {
+            for (int y = 0; y < refH; y++) {
+                for (int x = 0; x < refW; x++) {
+                    refFloatBuffer.put(
+                            modelReferenceIndex(layer, y, x),
+                            stackLayers[canonicalReferenceIndex(layer, y, x)]
+                    );
+                }
+            }
+        }
+        refStackInputBuffer.rewind();
+    }
+
     private void gatherReferenceFrame(byte[] yPlane, int width, int height) {
         float[] normCoords = MainActivity.mapAlignedScreenCoordsToFrame(targetX, targetY, viewFinder.getWidth(), viewFinder.getHeight(), width, height);
         if (normCoords == null) {
@@ -346,41 +716,13 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         float cx = normCoords[0] * width;
         float cy = normCoords[1] * height;
 
-        // Initialize tracking position state
-        lastTrackedX = cx;
-        lastTrackedY = cy;
-        
-        // Zoom range matches pipeline_config.json: from size 512 down to 16 pixels (scaled dynamically by camera height relative to 600px training size)
-        float maxCropSize = (512.0f / 600.0f) * height;
-        float minCropSize = (16.0f / 600.0f) * height;
-        
         int stride = width; // rotated frame stride is width
-        
-        refStackInputBuffer.rewind();
-        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
-        for (int layer = 0; layer < refLayers; layer++) {
-            float size = maxCropSize - layer * ((maxCropSize - minCropSize) / (float)(refLayers - 1));
-            float half = size / 2.0f;
-            
-            for (int y = 0; y < refH; y++) {
-                for (int x = 0; x < refW; x++) {
-                    float srcX = cx - half + (x / (float)(refW - 1)) * size;
-                    float srcY = cy - half + (y / (float)(refH - 1)) * size;
-                    
-                    int ix = (int) Math.max(0, Math.min(width - 1, srcX));
-                    int iy = (int) Math.max(0, Math.min(height - 1, srcY));
-                    
-                    int pixel = yPlane[iy * stride + ix] & 0xFF;
-                    int index;
-                    if (refShapeIsNCHW) {
-                        index = layer * refH * refW + y * refW + x;
-                    } else {
-                        index = y * refW * refLayers + x * refLayers + layer;
-                    }
-                    refFloatBuffer.put(index, pixel / 255.0f);
-                }
-            }
-        }
+
+        initialReferenceSource = new ReferenceSource(yPlane, width, height, stride, cx, cy);
+        initialReferenceStackLayers = buildReferenceStackLayers(initialReferenceSource, 0);
+        previousFrameReferenceStackLayers = null;
+        previousFrameReferenceSource = null;
+        writeReferenceStackToInputBuffer(initialReferenceStackLayers);
         
         currentUiState = STATE_TRACKING;
         
@@ -471,60 +813,80 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         float[] currBuffer = new float[searchW * searchH];
         long preStart = SystemClock.elapsedRealtime();
         
-        // Center the search crop dynamically around the last tracked target position
-        float cx = lastTrackedX;
-        float cy = lastTrackedY;
+        // Search input is always the centered square crop of the current frame.
+        float cx = width / 2.0f;
+        float cy = height / 2.0f;
         
         // JNI extracts square crop around static frame center (cx, cy)
         MainActivity.downsampleSearchCrop(yPlane, width, height, stride, cx, cy, cropSize, searchW, searchH, currBuffer);
         
         long preDuration = SystemClock.elapsedRealtime() - preStart;
 
-        searchBuffer.rewind();
-        searchBuffer.asFloatBuffer().put(currBuffer);
-        
-        outputHeatmapBuffer.rewind();
-        
+        ReferenceSource referenceSource = selectReferenceSourceForCurrentFrame();
+        if (referenceSource == null) return;
+
+        int activeIterations = Math.max(1, iterationsNum);
+        IterationResult[] iterationResults = new IterationResult[activeIterations];
+        long infDuration = 0L;
+        long postDuration = 0L;
+
+        boolean hasQualityOutput = (qualityOutputIndex >= 0 && outputQualityBuffer != null);
         Object[] inputs = new Object[2];
         inputs[refInputIndex] = refStackInputBuffer;
         inputs[searchInputIndex] = searchBuffer;
 
-        Map<Integer, Object> outputs = new HashMap<>();
-        outputs.put(heatmapOutputIndex, outputHeatmapBuffer);
-        
-        // Check if model has a second output for quality
-        boolean hasQualityOutput = (tflite != null && tflite.getOutputTensorCount() > 1);
-        if (hasQualityOutput) {
-            outputQualityBuffer.rewind();
-            outputs.put(qualityOutputIndex, outputQualityBuffer);
+        for (int iterIdx = 0; iterIdx < activeIterations; iterIdx++) {
+            float[] iterReferenceStack = buildReferenceStackLayers(referenceSource, iterIdx);
+            preserveInitialSmallestReferenceLayer(iterReferenceStack);
+            writeReferenceStackToInputBuffer(iterReferenceStack);
+
+            searchBuffer.rewind();
+            searchBuffer.asFloatBuffer().put(currBuffer);
+            searchBuffer.rewind();
+
+            outputHeatmapBuffer.rewind();
+            Map<Integer, Object> outputs = new HashMap<>();
+            outputs.put(heatmapOutputIndex, outputHeatmapBuffer);
+            if (hasQualityOutput) {
+                outputQualityBuffer.rewind();
+                outputs.put(qualityOutputIndex, outputQualityBuffer);
+            }
+
+            long infStart = SystemClock.elapsedRealtime();
+            tflite.runForMultipleInputsOutputs(inputs, outputs);
+            infDuration += SystemClock.elapsedRealtime() - infStart;
+
+            float[] outputHeatmap = new float[heatmapW * heatmapH];
+            outputHeatmapBuffer.rewind();
+            outputHeatmapBuffer.asFloatBuffer().get(outputHeatmap);
+
+            long postStart = SystemClock.elapsedRealtime();
+            HeatmapStats heatmapStats = calculateHeatmapStats(outputHeatmap, heatmapW, heatmapH);
+            float iterPxNorm = heatmapStats.maxX / (float) heatmapW;
+            float iterPyNorm = heatmapStats.maxY / (float) heatmapH;
+            postDuration += SystemClock.elapsedRealtime() - postStart;
+
+            float qualityScore = hasQualityOutput ? outputQualityBuffer.getFloat(0) : heatmapStats.maxVal;
+            iterationResults[iterIdx] = new IterationResult(
+                    Arrays.copyOf(currBuffer, currBuffer.length),
+                    Arrays.copyOf(iterReferenceStack, iterReferenceStack.length),
+                    outputHeatmap,
+                    heatmapStats,
+                    iterPxNorm,
+                    iterPyNorm,
+                    iterPxNorm,
+                    iterPyNorm,
+                    qualityScore
+            );
+
         }
 
-        long infStart = SystemClock.elapsedRealtime();
-        tflite.runForMultipleInputsOutputs(inputs, outputs);
-        long infDuration = SystemClock.elapsedRealtime() - infStart;
-
-        float[] outputHeatmap = new float[heatmapW * heatmapH];
-        outputHeatmapBuffer.rewind();
-        outputHeatmapBuffer.asFloatBuffer().get(outputHeatmap);
-
-        float qScore = 1.0f;
-        if (hasQualityOutput) {
-            qScore = outputQualityBuffer.getFloat(0);
-        } else {
-            // If quality output is missing, we could estimate it from heatmap peak
-            float maxVal = 0;
-            for (float v : outputHeatmap) if (v > maxVal) maxVal = v;
-            qScore = maxVal;
-        }
-        final float finalQualityScore = qScore;
-
-        long postStart = SystemClock.elapsedRealtime();
-        // Calculate noise-immune sub-pixel centroid
-        float[] localCoords = MainActivity.calculateLocalRefinedArgmaxCentroid(outputHeatmap, heatmapW, heatmapH);
-        long postDuration = SystemClock.elapsedRealtime() - postStart;
-        
-        float px = localCoords[0]; // relative x in [0.0, 1.0] inside the crop
-        float py = localCoords[1]; // relative y in [0.0, 1.0] inside the crop
+        final int selectedResultIndex = Math.max(0, selectBestQualityIteration(iterationResults));
+        final IterationResult finalIterationResult = iterationResults[selectedResultIndex];
+        final HeatmapStats heatmapStats = finalIterationResult.heatmapStats;
+        final float finalQualityScore = finalIterationResult.qualityScore;
+        float px = finalIterationResult.mappedPxNorm;
+        float py = finalIterationResult.mappedPyNorm;
         
         // Coordinate Re-projection: Map crop-relative coordinates back to camera absolute coordinates using static center
         float halfSize = cropSize / 2.0f;
@@ -536,16 +898,27 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         // Clamp target position to camera frame boundaries to keep tracking running continuously
         x_global = Math.max(0.0f, Math.min((float)width - 1.0f, x_global));
         y_global = Math.max(0.0f, Math.min((float)height - 1.0f, y_global));
+        final float finalTrackedX = x_global;
+        final float finalTrackedY = y_global;
 
-        // Save for next frame centering
-        lastTrackedX = x_global;
-        lastTrackedY = y_global;
+        final boolean finalExperimentalMode = experimentalPrevReferenceMode;
+        final boolean finalStackUpdated = finalExperimentalMode
+                && finalQualityScore >= EXPERIMENTAL_STACK_UPDATE_QUALITY_THRESHOLD;
+        if (finalStackUpdated) {
+            ReferenceSource updatedReferenceSource = new ReferenceSource(yPlane, width, height, stride, finalTrackedX, finalTrackedY);
+            float[] updatedStackLayers = buildReferenceStackLayers(updatedReferenceSource, 0);
+            preserveInitialSmallestReferenceLayer(updatedStackLayers);
+            previousFrameReferenceSource = updatedReferenceSource;
+            previousFrameReferenceStackLayers = updatedStackLayers;
+        }
 
         long totalDuration = SystemClock.elapsedRealtime() - startTime;
+        final long finalInfDuration = infDuration;
+        final long finalPostDuration = postDuration;
 
         // Convert absolute camera coordinates to normalized [0, 1] relative to camera frame
-        float gx = x_global / (float) width;
-        float gy = y_global / (float) height;
+        float gx = finalTrackedX / (float) width;
+        float gy = finalTrackedY / (float) height;
 
         // Since the frame is rotated to screen space, screen normalization is direct (1:1)
         final float screenX_norm = gx;
@@ -576,48 +949,78 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             paint.setColor(Color.RED);
             paint.setStyle(Paint.Style.FILL);
             paint.setAntiAlias(true);
-            float scaledX = lastTrackedX / (float) downsampleFactor;
-            float scaledY = lastTrackedY / (float) downsampleFactor;
+            float scaledX = finalTrackedX / (float) downsampleFactor;
+            float scaledY = finalTrackedY / (float) downsampleFactor;
             canvas.drawCircle(scaledX, scaledY, 3.0f, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.0f);
+            paint.setColor(Color.CYAN);
+            float scaledCropSize = cropSize / (float) downsampleFactor;
+            float scaledLeft = (smallW - scaledCropSize) / 2.0f;
+            float scaledTop = (smallH - scaledCropSize) / 2.0f;
+            canvas.drawRect(scaledLeft, scaledTop, scaledLeft + scaledCropSize, scaledTop + scaledCropSize, paint);
         } catch (Exception e) {
             e.printStackTrace();
         }
         final Bitmap fullFrameBmp = tmpBmp;
 
         // Save to cache for SeekBar scrolling redraws
-        cachedFlatHeatmap = outputHeatmap;
-        cachedCurrBuffer = currBuffer;
+        cachedIterationResults = iterationResults;
         cachedFullFrameBmp = fullFrameBmp;
-        cachedPx = px;
-        cachedPy = py;
 
         // Post UI rendering tasks back to the UI thread
         new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {
                 if (currentUiState != STATE_TRACKING) return;
-                
-                boolean bypassQuality = switchBypassQuality.isChecked();
-                boolean shouldDisplay = (finalQualityScore > CONFIDENCE_THRESHOLD) || bypassQuality;
-                
-                if (shouldDisplay) {
-                    int circleColor = (finalQualityScore >= CONFIDENCE_THRESHOLD) ? Color.GREEN : Color.RED;
-                    lblStatus.setText(finalQualityScore < CONFIDENCE_THRESHOLD 
-                            ? String.format("Status: Weak Lock! Quality: %.2f (Bypassed)", finalQualityScore)
-                            : "Status: Active tracking");
-                    drawTrackingIndicator(lastTrackedX, lastTrackedY, width, height, circleColor);
-                } else {
-                    lblStatus.setText(String.format("Status: Weak Lock! Quality: %.2f", finalQualityScore));
-                    // Clear tracking indicator overlay when lock is weak and bypass is disabled
-                    Bitmap emptyBitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
-                    capturedImageView.setImageBitmap(emptyBitmap);
+
+                int maxHeatmapIteration = Math.max(0, iterationResults.length - 1);
+                seekBarHeatmapIteration.setMax(maxHeatmapIteration);
+                seekBarReferenceIteration.setMax(maxHeatmapIteration);
+                if (selectedHeatmapIteration > maxHeatmapIteration) {
+                    selectedHeatmapIteration = maxHeatmapIteration;
+                    seekBarHeatmapIteration.setProgress(selectedHeatmapIteration);
                 }
-                renderDiagnostics(outputHeatmap, currBuffer, fullFrameBmp, px, py);
+                if (selectedReferenceIteration > maxHeatmapIteration) {
+                    selectedReferenceIteration = maxHeatmapIteration;
+                    seekBarReferenceIteration.setProgress(selectedReferenceIteration);
+                }
+                updateReferenceDebugLabel();
+                
+                float targetColorThreshold = targetLostQualityThreshold;
+                boolean targetLostByQuality = useQualityForTarget && finalQualityScore < targetColorThreshold;
+                int circleColor = targetLostByQuality ? Color.RED : Color.GREEN;
+                lblStatus.setText(targetLostByQuality
+                        ? String.format("Status: Weak/Lost Target | Quality: %.2f < %.2f", finalQualityScore, targetColorThreshold)
+                        : "Status: Active tracking");
+                drawTrackingIndicator(finalTrackedX, finalTrackedY, width, height, circleColor);
+                renderDiagnostics(iterationResults, selectedHeatmapIteration, fullFrameBmp);
 
                 txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
-                        preDuration, infDuration, postDuration, totalDuration));
-                txtPredictedCoords.setText(String.format("Target Pos: (%.3f, %.3f) [Quality: %.2f]", screenX_norm, screenY_norm, finalQualityScore));
-                txtBufferStatus.setText("Tracking Engine: Active");
+                        preDuration, finalInfDuration, finalPostDuration, totalDuration));
+                txtPredictedCoords.setText(String.format(
+                        "Target Pos: (%.3f, %.3f) [Quality: %.2f | Selected: %d | Stack update: %s]",
+                        screenX_norm,
+                        screenY_norm,
+                        finalQualityScore,
+                        selectedResultIndex,
+                        finalStackUpdated ? "yes" : "no"
+                ));
+                txtBufferStatus.setText(String.format(
+                        "Heatmap raw: min=%.3f max=%.3f argmax=(%d,%d) p=(%.3f,%.3f) search_center=(%.0f,%.0f) global=(%.0f,%.0f) | %s | %s",
+                        heatmapStats.minVal,
+                        heatmapStats.maxVal,
+                        heatmapStats.maxX,
+                        heatmapStats.maxY,
+                        px,
+                        py,
+                        cx,
+                        cy,
+                        finalTrackedX,
+                        finalTrackedY,
+                        heatmapOutputDebug,
+                        qualityOutputDebug
+                ));
             }
         });
     }
@@ -645,6 +1048,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         Bitmap overlayBitmap = Bitmap.createBitmap(imgW, imgH, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(overlayBitmap);
+        drawSearchFrameBoundary(canvas, imgW, imgH);
+
         Paint paint = new Paint();
         paint.setStyle(Paint.Style.STROKE);
         
@@ -664,18 +1069,84 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         capturedImageView.setImageBitmap(overlayBitmap);
     }
 
-    private void renderDiagnostics(float[] heatmap, float[] curr, Bitmap fullFrameBmp, float px, float py) {
-        // 1. Render outputHeatmap (Jet color mapping)
+    private void drawSearchFrameBoundary(Canvas canvas, int imgW, int imgH) {
+        float activeSize = Math.min(imgW, imgH);
+        float left = (imgW - activeSize) / 2.0f;
+        float top = (imgH - activeSize) / 2.0f;
+        float right = left + activeSize;
+        float bottom = top + activeSize;
+
+        Paint deadPaint = new Paint();
+        deadPaint.setStyle(Paint.Style.FILL);
+        deadPaint.setColor(Color.argb(70, 255, 80, 0));
+        if (top > 0.0f) {
+            canvas.drawRect(0.0f, 0.0f, imgW, top, deadPaint);
+        }
+        if (bottom < imgH) {
+            canvas.drawRect(0.0f, bottom, imgW, imgH, deadPaint);
+        }
+        if (left > 0.0f) {
+            canvas.drawRect(0.0f, top, left, bottom, deadPaint);
+        }
+        if (right < imgW) {
+            canvas.drawRect(right, top, imgW, bottom, deadPaint);
+        }
+
+        Paint borderPaint = new Paint();
+        borderPaint.setStyle(Paint.Style.STROKE);
+        borderPaint.setAntiAlias(true);
+        borderPaint.setStrokeWidth(Math.max(2.0f, imgW / 360.0f));
+        borderPaint.setColor(Color.CYAN);
+        canvas.drawRect(left, top, right, bottom, borderPaint);
+    }
+
+    private void renderDiagnostics(IterationResult[] iterationResults, int selectedIteration, Bitmap fullFrameBmp) {
+        if (iterationResults == null || iterationResults.length == 0) {
+            return;
+        }
+
+        int safeIteration = Math.max(0, Math.min(selectedIteration, iterationResults.length - 1));
+        IterationResult selectedResult = iterationResults[safeIteration];
+        int safeReferenceIteration = Math.max(0, Math.min(selectedReferenceIteration, iterationResults.length - 1));
+        IterationResult referenceResult = iterationResults[safeReferenceIteration];
+        float[] heatmap = selectedResult.heatmap;
+        float[] curr = selectedResult.search;
+        float px = selectedResult.iterPxNorm;
+        float py = selectedResult.iterPyNorm;
+        lblHeatmapIteration.setText(String.format(
+                "Heatmap Iter: %d/%d | q=%.2f | %s",
+                safeIteration,
+                iterationResults.length - 1,
+                selectedResult.qualityScore,
+                iterationStatusLabel(selectedResult.status)
+        ));
+
+        // 1. Render raw output heatmap with display-only min/max normalization.
         Bitmap hmBitmap = Bitmap.createBitmap(heatmapW, heatmapH, Bitmap.Config.ARGB_8888);
         int[] hmColors = new int[heatmapW * heatmapH];
+        HeatmapStats stats = selectedResult.heatmapStats;
+        float denom = stats.maxVal - stats.minVal;
+        if (Math.abs(denom) < 1e-6f) {
+            denom = 1.0f;
+        }
         for (int i = 0; i < heatmapW * heatmapH; i++) {
-            float val = Math.max(0.0f, Math.min(heatmap[i], 1.0f));
+            float val = (heatmap[i] - stats.minVal) / denom;
+            val = Math.max(0.0f, Math.min(val, 1.0f));
             int r = (int)(val * 255.0f);
             int b = (int)((1.0f - val) * 255.0f);
             int g = (int)(val * 100.0f);
             hmColors[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
         }
         hmBitmap.setPixels(hmColors, 0, heatmapW, 0, 0, heatmapW, heatmapH);
+        Canvas hmCanvas = new Canvas(hmBitmap);
+        Paint hmPaint = new Paint();
+        hmPaint.setAntiAlias(true);
+        hmPaint.setStyle(Paint.Style.STROKE);
+        hmPaint.setStrokeWidth(Math.max(1.0f, heatmapW / 64.0f));
+        hmPaint.setColor(Color.GREEN);
+        hmCanvas.drawCircle(stats.maxX, stats.maxY, Math.max(2.0f, heatmapW / 32.0f), hmPaint);
+        hmCanvas.drawLine(stats.maxX - 3.0f, stats.maxY, stats.maxX + 3.0f, stats.maxY, hmPaint);
+        hmCanvas.drawLine(stats.maxX, stats.maxY - 3.0f, stats.maxX, stats.maxY + 3.0f, hmPaint);
         heatmapImageView.setImageBitmap(hmBitmap);
 
         // 2. Render cropCurrView (the current active search crop)
@@ -700,16 +1171,11 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         // 3. Render cropHistView (the locked target reference template layer)
         Bitmap histBitmap = Bitmap.createBitmap(refW, refH, Bitmap.Config.ARGB_8888);
         int[] histColors = new int[refW * refH];
-        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
+        float[] refStackForDisplay = referenceResult.referenceStack;
         for (int y = 0; y < refH; y++) {
             for (int x = 0; x < refW; x++) {
-                int index;
-                if (refShapeIsNCHW) {
-                    index = selectedHistLayer * refH * refW + y * refW + x;
-                } else {
-                    index = y * refW * refLayers + x * refLayers + selectedHistLayer;
-                }
-                int val = (int)(refFloatBuffer.get(index) * 255.0f);
+                int index = canonicalReferenceIndex(selectedHistLayer, y, x);
+                int val = (int)(refStackForDisplay[index] * 255.0f);
                 histColors[y * refW + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
             }
         }
@@ -731,9 +1197,40 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
     }
 
+    private String iterationStatusLabel(int status) {
+        switch (status) {
+            case ITER_STATUS_SELECTED:
+                return "SELECTED";
+            default:
+                return "CANDIDATE";
+        }
+    }
+
+    private void updateQualityThresholdLabel() {
+        if (lblQualityThreshold == null) {
+            return;
+        }
+        String mode = useQualityForTarget ? "on" : "off";
+        lblQualityThreshold.setText(String.format("Quality lost threshold: %.2f (%s)", targetLostQualityThreshold, mode));
+    }
+
+    private void updateReferenceDebugLabel() {
+        if (lblHistStack == null) {
+            return;
+        }
+        lblHistStack.setText(String.format("Hist Stack (I: %d, L: %d)", selectedReferenceIteration, selectedHistLayer));
+        if (lblReferenceIteration != null) {
+            lblReferenceIteration.setText("Ref Iter: " + selectedReferenceIteration);
+        }
+    }
+
     private void resetTrackerToIdle() {
         currentUiState = STATE_IDLE;
         resultsPanel.setVisibility(View.GONE);
+        initialReferenceStackLayers = null;
+        initialReferenceSource = null;
+        previousFrameReferenceStackLayers = null;
+        previousFrameReferenceSource = null;
         
         tutorialHud.setText("Tap screen to lock on target");
         tutorialHud.setTextColor(Color.parseColor("#00e6ff"));
@@ -766,9 +1263,18 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     @Override
     protected void onResume() {
         super.onResume();
+        enableFullscreenImmersive();
         startWorkerThread();
         if (cameraHelper != null && cameraHelper.hasCameraPermission() && !isLoopActive) {
             isLoopActive = true;
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            enableFullscreenImmersive();
         }
     }
 
@@ -785,6 +1291,24 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         super.onDestroy();
     }
 
+    private static class ReferenceSource {
+        final byte[] yPlane;
+        final int width;
+        final int height;
+        final int stride;
+        final float cx;
+        final float cy;
+
+        ReferenceSource(byte[] yPlane, int width, int height, int stride, float cx, float cy) {
+            this.yPlane = Arrays.copyOf(yPlane, yPlane.length);
+            this.width = width;
+            this.height = height;
+            this.stride = stride;
+            this.cx = cx;
+            this.cy = cy;
+        }
+    }
+
     private static class ParsedShape {
         int h;
         int w;
@@ -796,6 +1320,54 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             this.w = w;
             this.c = c;
             this.isNCHW = isNCHW;
+        }
+    }
+
+    private static class HeatmapStats {
+        final float minVal;
+        final float maxVal;
+        final int maxX;
+        final int maxY;
+
+        HeatmapStats(float minVal, float maxVal, int maxX, int maxY) {
+            this.minVal = minVal;
+            this.maxVal = maxVal;
+            this.maxX = maxX;
+            this.maxY = maxY;
+        }
+    }
+
+    private static class IterationResult {
+        final float[] search;
+        final float[] referenceStack;
+        final float[] heatmap;
+        final HeatmapStats heatmapStats;
+        final float iterPxNorm;
+        final float iterPyNorm;
+        final float mappedPxNorm;
+        final float mappedPyNorm;
+        final float qualityScore;
+        int status = ITER_STATUS_CANDIDATE;
+
+        IterationResult(
+                float[] search,
+                float[] referenceStack,
+                float[] heatmap,
+                HeatmapStats heatmapStats,
+                float iterPxNorm,
+                float iterPyNorm,
+                float mappedPxNorm,
+                float mappedPyNorm,
+                float qualityScore) {
+            this.search = search;
+            this.referenceStack = referenceStack;
+            this.heatmap = heatmap;
+            this.heatmapStats = heatmapStats;
+            this.iterPxNorm = iterPxNorm;
+            this.iterPyNorm = iterPyNorm;
+            this.mappedPxNorm = mappedPxNorm;
+            this.mappedPyNorm = mappedPyNorm;
+            this.qualityScore = qualityScore;
         }
     }
 
@@ -859,5 +1431,14 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         String name = tensor.name();
         if (name == null) return false;
         return name.toLowerCase().contains(query.toLowerCase());
+    }
+
+    private String describeTensor(String label, int index) {
+        if (tflite == null || index < 0 || index >= tflite.getOutputTensorCount()) {
+            return label + "=none";
+        }
+        org.tensorflow.lite.Tensor tensor = tflite.getOutputTensor(index);
+        String name = tensor.name() == null ? "unnamed" : tensor.name();
+        return String.format("%s=%d:%s%s", label, index, name, Arrays.toString(tensor.shape()));
     }
 }

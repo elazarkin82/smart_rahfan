@@ -6,8 +6,15 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#121212"
-    android:fitsSystemWindows="true"
+    android:fitsSystemWindows="false"
     tools:context=".activities.FrameStreamActivity">
+
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/content_guideline"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintGuide_percent="0.58" />
 
     <!-- Top Navigation Bar -->
     <RelativeLayout
@@ -19,9 +26,12 @@
         app:layout_constraintTop_toTopOf="parent">
 
         <TextView
+            android:id="@+id/top_title"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_centerVertical="true"
+            android:layout_alignParentStart="true"
+            android:layout_toStartOf="@id/btn_hide_controls"
             android:text="Active Stream Tracking"
             android:textColor="#ffffff"
             android:textSize="18sp"
@@ -31,13 +41,27 @@
             android:id="@+id/btn_back"
             android:layout_width="wrap_content"
             android:layout_height="36dp"
-            android:layout_alignParentRight="true"
+            android:layout_alignParentEnd="true"
             android:layout_centerVertical="true"
             android:text="Back"
             android:textSize="12sp"
             android:backgroundTint="#2c2c2c"
             android:textColor="#00e6ff"
             android:padding="0dp" />
+
+        <Button
+            android:id="@+id/btn_hide_controls"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_toStartOf="@id/btn_back"
+            android:layout_marginEnd="8dp"
+            android:layout_centerVertical="true"
+            android:text="Hide UI"
+            android:textSize="12sp"
+            android:backgroundTint="#2c2c2c"
+            android:textColor="#00e6ff"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="0dp" />
     </RelativeLayout>
 
     <!-- Interactive Workspace (Camera Finder & Overlay) -->
@@ -47,7 +71,9 @@
         android:layout_height="0dp"
         android:background="#000000"
         app:layout_constraintTop_toBottomOf="@id/top_bar"
-        app:layout_constraintBottom_toTopOf="@id/bottom_dashboard">
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/content_guideline">
 
         <!-- 1. Live Camera Preview -->
         <androidx.camera.view.PreviewView
@@ -77,15 +103,123 @@
             android:textColor="#00e6ff"
             android:textSize="14sp"
             android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btn_toggle_controls"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_gravity="top|end"
+            android:layout_margin="12dp"
+            android:backgroundTint="#cc2c2c2c"
+            android:minWidth="72dp"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="0dp"
+            android:text="Menu"
+            android:textColor="#00e6ff"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btn_settings"
+            android:layout_width="42dp"
+            android:layout_height="36dp"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="12dp"
+            android:layout_marginEnd="92dp"
+            android:backgroundTint="#cc2c2c2c"
+            android:minWidth="42dp"
+            android:padding="0dp"
+            android:text="⚙"
+            android:textColor="#00e6ff"
+            android:textSize="16sp" />
+
+        <LinearLayout
+            android:id="@+id/settings_panel"
+            android:layout_width="260dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="56dp"
+            android:layout_marginEnd="12dp"
+            android:background="#ee1a1a1a"
+            android:orientation="vertical"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Tracker Settings"
+                android:textColor="#ffffff"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switch_experimental_prev_reference"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Experimental Prev-Frame Reference"
+                android:textColor="#ffffff"
+                android:textSize="12sp"
+                android:checked="false"
+                app:thumbTint="#00e6ff"
+                app:trackTint="#555555" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switch_use_quality"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:text="Use Quality for Target Lost"
+                android:textColor="#ffffff"
+                android:textSize="12sp"
+                android:checked="true"
+                app:thumbTint="#00e6ff"
+                app:trackTint="#555555" />
+
+            <TextView
+                android:id="@+id/lblQualityThreshold"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Quality lost threshold: 0.50 (on)"
+                android:textColor="#aaaaaa"
+                android:textSize="12sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarQualityThreshold"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:max="100"
+                android:progress="50" />
+
+            <TextView
+                android:id="@+id/lblIterations"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Iterations: 4"
+                android:textColor="#aaaaaa"
+                android:textSize="12sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarIterations"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="4"
+                android:progress="3" />
+        </LinearLayout>
     </FrameLayout>
 
     <!-- Bottom Controls & Telemetry Dashboard -->
     <ScrollView
         android:id="@+id/bottom_dashboard"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
         android:background="#1a1a1a"
-        app:layout_constraintBottom_toBottomOf="parent">
+        app:layout_constraintTop_toBottomOf="@id/top_bar"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toEndOf="@id/content_guideline"
+        app:layout_constraintEnd_toEndOf="parent">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -109,7 +243,7 @@
                     android:textStyle="bold" />
             </RelativeLayout>
 
-            <!-- Quality Filter Bypass Toggle -->
+            <!-- Quality no longer hides detection; it only colors the tracking indicator. -->
             <androidx.appcompat.widget.SwitchCompat
                 android:id="@+id/switch_bypass_quality"
                 android:layout_width="wrap_content"
@@ -119,6 +253,7 @@
                 android:textColor="#ffffff"
                 android:textSize="12sp"
                 android:checked="false"
+                android:visibility="gone"
                 app:thumbTint="#00e6ff"
                 app:trackTint="#555555" />
 
@@ -146,9 +281,10 @@
                         android:gravity="center">
 
                         <TextView
+                            android:id="@+id/lblHeatmapIteration"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Output Heatmap (256x256)"
+                            android:text="Heatmap Iter: 0"
                             android:textColor="#aaaaaa"
                             android:textSize="11sp"
                             android:layout_marginBottom="6dp" />
@@ -159,6 +295,14 @@
                             android:layout_height="110dp"
                             android:background="#000000"
                             android:scaleType="fitXY" />
+
+                        <SeekBar
+                            android:id="@+id/seekBarHeatmapIteration"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:max="0"
+                            android:progress="0"
+                            android:layout_marginTop="4dp" />
                     </LinearLayout>
 
                     <!-- Telemetry Text -->
@@ -237,9 +381,24 @@
                             android:id="@+id/lblHistStack"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Hist Stack (L: 0)"
+                            android:text="Hist Stack (I: 0, L: 0)"
                             android:textColor="#888888"
                             android:textSize="9sp"
+                            android:layout_marginTop="2dp" />
+                        <TextView
+                            android:id="@+id/lblReferenceIteration"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Ref Iter: 0"
+                            android:textColor="#888888"
+                            android:textSize="9sp"
+                            android:layout_marginTop="2dp" />
+                        <SeekBar
+                            android:id="@+id/seekBarReferenceIteration"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:max="3"
+                            android:progress="0"
                             android:layout_marginTop="2dp" />
                         <SeekBar
                             android:id="@+id/seekBarHistLayer"
