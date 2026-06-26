@@ -84,12 +84,15 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private TextView lblHistStack;
     private SeekBar seekBarHistLayer;
     private int selectedHistLayer = 0;
+    private TextView lblReferenceIteration;
+    private SeekBar seekBarReferenceIteration;
+    private int selectedReferenceIteration = 0;
     private TextView lblHeatmapIteration;
     private SeekBar seekBarHeatmapIteration;
     private int selectedHeatmapIteration = 0;
     private TextView lblIterations;
     private SeekBar seekBarIterations;
-    private volatile int iterationsNum = 1;
+    private volatile int iterationsNum = 4;
     private TextView lblQualityThreshold;
     private SeekBar seekBarQualityThreshold;
     private volatile boolean useQualityForTarget = true;
@@ -128,7 +131,9 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private java.nio.ByteBuffer outputQualityBuffer = null;
 
     private float[] initialReferenceStackLayers = null;
+    private volatile ReferenceSource initialReferenceSource = null;
     private volatile float[] previousFrameReferenceStackLayers = null;
+    private volatile ReferenceSource previousFrameReferenceSource = null;
     private volatile boolean experimentalPrevReferenceMode = false;
 
     private Interpreter tflite;
@@ -181,6 +186,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         lblHistStack = findViewById(R.id.lblHistStack);
         seekBarHistLayer = findViewById(R.id.seekBarHistLayer);
+        lblReferenceIteration = findViewById(R.id.lblReferenceIteration);
+        seekBarReferenceIteration = findViewById(R.id.seekBarReferenceIteration);
         lblHeatmapIteration = findViewById(R.id.lblHeatmapIteration);
         seekBarHeatmapIteration = findViewById(R.id.seekBarHeatmapIteration);
         lblIterations = findViewById(R.id.lblIterations);
@@ -191,7 +198,19 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 selectedHistLayer = progress;
-                lblHistStack.setText("Hist Stack (L: " + selectedHistLayer + ")");
+                updateReferenceDebugLabel();
+                if (cachedIterationResults != null) {
+                    renderDiagnostics(cachedIterationResults, selectedHeatmapIteration, cachedFullFrameBmp);
+                }
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        seekBarReferenceIteration.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                selectedReferenceIteration = progress;
+                updateReferenceDebugLabel();
                 if (cachedIterationResults != null) {
                     renderDiagnostics(cachedIterationResults, selectedHeatmapIteration, cachedFullFrameBmp);
                 }
@@ -220,12 +239,19 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                 if (selectedHeatmapIteration >= iterationsNum) {
                     selectedHeatmapIteration = iterationsNum - 1;
                 }
+                if (selectedReferenceIteration >= iterationsNum) {
+                    selectedReferenceIteration = iterationsNum - 1;
+                }
                 seekBarHeatmapIteration.setMax(Math.max(0, iterationsNum - 1));
                 seekBarHeatmapIteration.setProgress(selectedHeatmapIteration);
+                seekBarReferenceIteration.setMax(Math.max(0, iterationsNum - 1));
+                seekBarReferenceIteration.setProgress(selectedReferenceIteration);
+                updateReferenceDebugLabel();
             }
             @Override public void onStartTrackingTouch(SeekBar seekBar) {}
             @Override public void onStopTrackingTouch(SeekBar seekBar) {}
         });
+        seekBarIterations.setProgress(iterationsNum - 1);
         switchUseQuality.setChecked(useQualityForTarget);
         switchUseQuality.setOnCheckedChangeListener((buttonView, isChecked) -> {
             useQualityForTarget = isChecked;
@@ -342,6 +368,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         switchExperimentalPrevReference.setOnCheckedChangeListener((buttonView, isChecked) -> {
             experimentalPrevReferenceMode = isChecked;
             previousFrameReferenceStackLayers = null;
+            previousFrameReferenceSource = null;
         });
         setControlsVisible(false);
         
@@ -515,6 +542,17 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         return largestCropSize - layer * ((largestCropSize - smallestCropSize) / (float)(refLayers - 1));
     }
 
+    private float getReferenceCropSizeForIteration(int layer, int frameHeight, int iterationIndex) {
+        float baseSize = getReferenceCropSizeForLayer(layer, frameHeight);
+        if (iterationIndex <= 0) {
+            return baseSize;
+        }
+        if (refLayers > 1 && layer == refLayers - 1) {
+            return baseSize;
+        }
+        return Math.max(1.0f, baseSize * (float)Math.pow(0.5f, iterationIndex));
+    }
+
     private float sampleYPlaneBilinear(byte[] yPlane, int width, int height, int stride, float srcX, float srcY) {
         int x0 = (int) Math.floor(srcX);
         int y0 = (int) Math.floor(srcY);
@@ -541,9 +579,28 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     }
 
     private float[] buildReferenceStackLayers(byte[] yPlane, int width, int height, int stride, float cx, float cy) {
+        return buildReferenceStackLayers(yPlane, width, height, stride, cx, cy, 0);
+    }
+
+    private float[] buildReferenceStackLayers(ReferenceSource source, int iterationIndex) {
+        if (source == null) {
+            return null;
+        }
+        return buildReferenceStackLayers(
+                source.yPlane,
+                source.width,
+                source.height,
+                source.stride,
+                source.cx,
+                source.cy,
+                iterationIndex
+        );
+    }
+
+    private float[] buildReferenceStackLayers(byte[] yPlane, int width, int height, int stride, float cx, float cy, int iterationIndex) {
         float[] stack = new float[refLayers * refH * refW];
         for (int layer = 0; layer < refLayers; layer++) {
-            float size = getReferenceCropSizeForLayer(layer, height);
+            float size = getReferenceCropSizeForIteration(layer, height, iterationIndex);
             float half = size / 2.0f;
 
             for (int y = 0; y < refH; y++) {
@@ -573,75 +630,11 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         }
     }
 
-    private float[] selectReferenceStackForCurrentFrame() {
-        if (experimentalPrevReferenceMode && previousFrameReferenceStackLayers != null) {
-            return previousFrameReferenceStackLayers;
+    private ReferenceSource selectReferenceSourceForCurrentFrame() {
+        if (experimentalPrevReferenceMode && previousFrameReferenceSource != null) {
+            return previousFrameReferenceSource;
         }
-        return initialReferenceStackLayers;
-    }
-
-    private float sampleFloatImageBilinear(float[] image, int width, int height, float srcX, float srcY) {
-        int x0 = (int) Math.floor(srcX);
-        int y0 = (int) Math.floor(srcY);
-        int x1 = x0 + 1;
-        int y1 = y0 + 1;
-
-        float dx = srcX - (float) x0;
-        float dy = srcY - (float) y0;
-
-        x0 = Math.max(0, Math.min(width - 1, x0));
-        x1 = Math.max(0, Math.min(width - 1, x1));
-        y0 = Math.max(0, Math.min(height - 1, y0));
-        y1 = Math.max(0, Math.min(height - 1, y1));
-
-        float p00 = image[y0 * width + x0];
-        float p10 = image[y0 * width + x1];
-        float p01 = image[y1 * width + x0];
-        float p11 = image[y1 * width + x1];
-
-        return ((1.0f - dx) * (1.0f - dy) * p00)
-                + (dx * (1.0f - dy) * p10)
-                + ((1.0f - dx) * dy * p01)
-                + (dx * dy * p11);
-    }
-
-    private float[] cropAndResizeReferenceStack(float[] stackLayers) {
-        if (stackLayers == null) return null;
-
-        float[] out = new float[refLayers * refH * refW];
-        float cx = refW / 2.0f;
-        float cy = refH / 2.0f;
-        float cropSize = Math.min(refW, refH) / 2.0f;
-        float half = cropSize / 2.0f;
-
-        for (int layer = 0; layer < refLayers; layer++) {
-            if (refLayers > 1 && layer == refLayers - 1) {
-                for (int y = 0; y < refH; y++) {
-                    for (int x = 0; x < refW; x++) {
-                        int index = canonicalReferenceIndex(layer, y, x);
-                        out[index] = stackLayers[index];
-                    }
-                }
-                continue;
-            }
-
-            float[] layerImage = new float[refW * refH];
-            for (int y = 0; y < refH; y++) {
-                for (int x = 0; x < refW; x++) {
-                    layerImage[y * refW + x] = stackLayers[canonicalReferenceIndex(layer, y, x)];
-                }
-            }
-
-            for (int y = 0; y < refH; y++) {
-                for (int x = 0; x < refW; x++) {
-                    float srcX = cx - half + (x / (float)(refW - 1)) * cropSize;
-                    float srcY = cy - half + (y / (float)(refH - 1)) * cropSize;
-                    out[canonicalReferenceIndex(layer, y, x)] = sampleFloatImageBilinear(layerImage, refW, refH, srcX, srcY);
-                }
-            }
-        }
-
-        return out;
+        return initialReferenceSource;
     }
 
     private float[] calculateDiscreteArgmaxCoords(float[] heatmap, int hmW, int hmH) {
@@ -725,8 +718,10 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         int stride = width; // rotated frame stride is width
 
-        initialReferenceStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, cx, cy);
+        initialReferenceSource = new ReferenceSource(yPlane, width, height, stride, cx, cy);
+        initialReferenceStackLayers = buildReferenceStackLayers(initialReferenceSource, 0);
         previousFrameReferenceStackLayers = null;
+        previousFrameReferenceSource = null;
         writeReferenceStackToInputBuffer(initialReferenceStackLayers);
         
         currentUiState = STATE_TRACKING;
@@ -827,12 +822,11 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         
         long preDuration = SystemClock.elapsedRealtime() - preStart;
 
-        float[] baseReferenceStack = selectReferenceStackForCurrentFrame();
-        if (baseReferenceStack == null) return;
+        ReferenceSource referenceSource = selectReferenceSourceForCurrentFrame();
+        if (referenceSource == null) return;
 
         int activeIterations = Math.max(1, iterationsNum);
         IterationResult[] iterationResults = new IterationResult[activeIterations];
-        float[] iterReferenceStack = Arrays.copyOf(baseReferenceStack, baseReferenceStack.length);
         long infDuration = 0L;
         long postDuration = 0L;
 
@@ -842,6 +836,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         inputs[searchInputIndex] = searchBuffer;
 
         for (int iterIdx = 0; iterIdx < activeIterations; iterIdx++) {
+            float[] iterReferenceStack = buildReferenceStackLayers(referenceSource, iterIdx);
+            preserveInitialSmallestReferenceLayer(iterReferenceStack);
             writeReferenceStackToInputBuffer(iterReferenceStack);
 
             searchBuffer.rewind();
@@ -883,9 +879,6 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
                     qualityScore
             );
 
-            if (iterIdx < activeIterations - 1) {
-                iterReferenceStack = cropAndResizeReferenceStack(iterReferenceStack);
-            }
         }
 
         final int selectedResultIndex = Math.max(0, selectBestQualityIteration(iterationResults));
@@ -912,8 +905,10 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         final boolean finalStackUpdated = finalExperimentalMode
                 && finalQualityScore >= EXPERIMENTAL_STACK_UPDATE_QUALITY_THRESHOLD;
         if (finalStackUpdated) {
-            float[] updatedStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, finalTrackedX, finalTrackedY);
+            ReferenceSource updatedReferenceSource = new ReferenceSource(yPlane, width, height, stride, finalTrackedX, finalTrackedY);
+            float[] updatedStackLayers = buildReferenceStackLayers(updatedReferenceSource, 0);
             preserveInitialSmallestReferenceLayer(updatedStackLayers);
+            previousFrameReferenceSource = updatedReferenceSource;
             previousFrameReferenceStackLayers = updatedStackLayers;
         }
 
@@ -981,10 +976,16 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
                 int maxHeatmapIteration = Math.max(0, iterationResults.length - 1);
                 seekBarHeatmapIteration.setMax(maxHeatmapIteration);
+                seekBarReferenceIteration.setMax(maxHeatmapIteration);
                 if (selectedHeatmapIteration > maxHeatmapIteration) {
                     selectedHeatmapIteration = maxHeatmapIteration;
                     seekBarHeatmapIteration.setProgress(selectedHeatmapIteration);
                 }
+                if (selectedReferenceIteration > maxHeatmapIteration) {
+                    selectedReferenceIteration = maxHeatmapIteration;
+                    seekBarReferenceIteration.setProgress(selectedReferenceIteration);
+                }
+                updateReferenceDebugLabel();
                 
                 float targetColorThreshold = targetLostQualityThreshold;
                 boolean targetLostByQuality = useQualityForTarget && finalQualityScore < targetColorThreshold;
@@ -1106,6 +1107,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         int safeIteration = Math.max(0, Math.min(selectedIteration, iterationResults.length - 1));
         IterationResult selectedResult = iterationResults[safeIteration];
+        int safeReferenceIteration = Math.max(0, Math.min(selectedReferenceIteration, iterationResults.length - 1));
+        IterationResult referenceResult = iterationResults[safeReferenceIteration];
         float[] heatmap = selectedResult.heatmap;
         float[] curr = selectedResult.search;
         float px = selectedResult.iterPxNorm;
@@ -1168,7 +1171,7 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         // 3. Render cropHistView (the locked target reference template layer)
         Bitmap histBitmap = Bitmap.createBitmap(refW, refH, Bitmap.Config.ARGB_8888);
         int[] histColors = new int[refW * refH];
-        float[] refStackForDisplay = selectedResult.referenceStack;
+        float[] refStackForDisplay = referenceResult.referenceStack;
         for (int y = 0; y < refH; y++) {
             for (int x = 0; x < refW; x++) {
                 int index = canonicalReferenceIndex(selectedHistLayer, y, x);
@@ -1211,11 +1214,23 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         lblQualityThreshold.setText(String.format("Quality lost threshold: %.2f (%s)", targetLostQualityThreshold, mode));
     }
 
+    private void updateReferenceDebugLabel() {
+        if (lblHistStack == null) {
+            return;
+        }
+        lblHistStack.setText(String.format("Hist Stack (I: %d, L: %d)", selectedReferenceIteration, selectedHistLayer));
+        if (lblReferenceIteration != null) {
+            lblReferenceIteration.setText("Ref Iter: " + selectedReferenceIteration);
+        }
+    }
+
     private void resetTrackerToIdle() {
         currentUiState = STATE_IDLE;
         resultsPanel.setVisibility(View.GONE);
         initialReferenceStackLayers = null;
+        initialReferenceSource = null;
         previousFrameReferenceStackLayers = null;
+        previousFrameReferenceSource = null;
         
         tutorialHud.setText("Tap screen to lock on target");
         tutorialHud.setTextColor(Color.parseColor("#00e6ff"));
@@ -1274,6 +1289,24 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             cameraHelper.shutdown();
         }
         super.onDestroy();
+    }
+
+    private static class ReferenceSource {
+        final byte[] yPlane;
+        final int width;
+        final int height;
+        final int stride;
+        final float cx;
+        final float cy;
+
+        ReferenceSource(byte[] yPlane, int width, int height, int stride, float cx, float cy) {
+            this.yPlane = Arrays.copyOf(yPlane, yPlane.length);
+            this.width = width;
+            this.height = height;
+            this.stride = stride;
+            this.cx = cx;
+            this.cy = cy;
+        }
     }
 
     private static class ParsedShape {

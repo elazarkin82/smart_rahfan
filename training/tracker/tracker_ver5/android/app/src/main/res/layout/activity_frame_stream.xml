@@ -197,7 +197,7 @@
                 android:id="@+id/lblIterations"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Iterations: 1"
+                android:text="Iterations: 4"
                 android:textColor="#aaaaaa"
                 android:textSize="12sp" />
 
@@ -206,7 +206,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:max="4"
-                android:progress="0" />
+                android:progress="3" />
         </LinearLayout>
     </FrameLayout>
 
@@ -381,9 +381,24 @@
                             android:id="@+id/lblHistStack"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Hist Stack (L: 0)"
+                            android:text="Hist Stack (I: 0, L: 0)"
                             android:textColor="#888888"
                             android:textSize="9sp"
+                            android:layout_marginTop="2dp" />
+                        <TextView
+                            android:id="@+id/lblReferenceIteration"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Ref Iter: 0"
+                            android:textColor="#888888"
+                            android:textSize="9sp"
+                            android:layout_marginTop="2dp" />
+                        <SeekBar
+                            android:id="@+id/seekBarReferenceIteration"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:max="3"
+                            android:progress="0"
                             android:layout_marginTop="2dp" />
                         <SeekBar
                             android:id="@+id/seekBarHistLayer"
