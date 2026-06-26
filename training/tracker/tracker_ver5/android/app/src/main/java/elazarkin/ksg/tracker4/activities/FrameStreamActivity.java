@@ -46,6 +46,9 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private static final float QUALITY_DISPLAY_THRESHOLD = 0.50f;
     private static final float EXPERIMENTAL_STACK_UPDATE_QUALITY_THRESHOLD = 0.75f;
 
+    private static final int ITER_STATUS_CANDIDATE = 0;
+    private static final int ITER_STATUS_SELECTED = 1;
+
     private static final int STATE_IDLE = 0;
     private static final int STATE_GATHERING = 1;
     private static final int STATE_TRACKING = 2;
@@ -60,12 +63,15 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private Button btnBack;
     private Button btnToggleControls;
     private Button btnHideControls;
+    private Button btnSettings;
     private androidx.appcompat.widget.SwitchCompat switchBypassQuality;
     private androidx.appcompat.widget.SwitchCompat switchExperimentalPrevReference;
+    private androidx.appcompat.widget.SwitchCompat switchUseQuality;
 
     private View topBar;
     private View bottomDashboard;
     private View workspaceContainer;
+    private View settingsPanel;
     private LinearLayout resultsPanel;
     private ImageView heatmapImageView;
     private TextView txtLatency;
@@ -78,12 +84,19 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     private TextView lblHistStack;
     private SeekBar seekBarHistLayer;
     private int selectedHistLayer = 0;
+    private TextView lblHeatmapIteration;
+    private SeekBar seekBarHeatmapIteration;
+    private int selectedHeatmapIteration = 0;
+    private TextView lblIterations;
+    private SeekBar seekBarIterations;
+    private volatile int iterationsNum = 1;
+    private TextView lblQualityThreshold;
+    private SeekBar seekBarQualityThreshold;
+    private volatile boolean useQualityForTarget = true;
+    private volatile float targetLostQualityThreshold = QUALITY_DISPLAY_THRESHOLD;
 
-    private float[] cachedFlatHeatmap = null;
-    private float[] cachedCurrBuffer = null;
+    private IterationResult[] cachedIterationResults = null;
     private Bitmap cachedFullFrameBmp = null;
-    private float cachedPx = 0.5f;
-    private float cachedPy = 0.5f;
 
     private CameraHelper cameraHelper;
     private boolean isLoopActive = false;
@@ -151,9 +164,12 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         btnBack = findViewById(R.id.btn_back);
         btnToggleControls = findViewById(R.id.btn_toggle_controls);
         btnHideControls = findViewById(R.id.btn_hide_controls);
+        btnSettings = findViewById(R.id.btn_settings);
         switchBypassQuality = findViewById(R.id.switch_bypass_quality);
         switchExperimentalPrevReference = findViewById(R.id.switch_experimental_prev_reference);
+        switchUseQuality = findViewById(R.id.switch_use_quality);
 
+        settingsPanel = findViewById(R.id.settings_panel);
         resultsPanel = findViewById(R.id.results_panel);
         heatmapImageView = findViewById(R.id.heatmapImageView);
         txtLatency = findViewById(R.id.txt_latency);
@@ -165,14 +181,63 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         lblHistStack = findViewById(R.id.lblHistStack);
         seekBarHistLayer = findViewById(R.id.seekBarHistLayer);
+        lblHeatmapIteration = findViewById(R.id.lblHeatmapIteration);
+        seekBarHeatmapIteration = findViewById(R.id.seekBarHeatmapIteration);
+        lblIterations = findViewById(R.id.lblIterations);
+        seekBarIterations = findViewById(R.id.seekBarIterations);
+        lblQualityThreshold = findViewById(R.id.lblQualityThreshold);
+        seekBarQualityThreshold = findViewById(R.id.seekBarQualityThreshold);
         seekBarHistLayer.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 selectedHistLayer = progress;
                 lblHistStack.setText("Hist Stack (L: " + selectedHistLayer + ")");
-                if (cachedFlatHeatmap != null && cachedCurrBuffer != null) {
-                    renderDiagnostics(cachedFlatHeatmap, cachedCurrBuffer, cachedFullFrameBmp, cachedPx, cachedPy);
+                if (cachedIterationResults != null) {
+                    renderDiagnostics(cachedIterationResults, selectedHeatmapIteration, cachedFullFrameBmp);
                 }
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        seekBarHeatmapIteration.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                selectedHeatmapIteration = progress;
+                if (cachedIterationResults != null) {
+                    renderDiagnostics(cachedIterationResults, selectedHeatmapIteration, cachedFullFrameBmp);
+                } else {
+                    lblHeatmapIteration.setText("Heatmap Iter: " + selectedHeatmapIteration);
+                }
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        seekBarIterations.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                iterationsNum = progress + 1;
+                lblIterations.setText("Iterations: " + iterationsNum);
+                if (selectedHeatmapIteration >= iterationsNum) {
+                    selectedHeatmapIteration = iterationsNum - 1;
+                }
+                seekBarHeatmapIteration.setMax(Math.max(0, iterationsNum - 1));
+                seekBarHeatmapIteration.setProgress(selectedHeatmapIteration);
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        switchUseQuality.setChecked(useQualityForTarget);
+        switchUseQuality.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            useQualityForTarget = isChecked;
+            updateQualityThresholdLabel();
+        });
+        seekBarQualityThreshold.setProgress(Math.round(targetLostQualityThreshold * 100.0f));
+        updateQualityThresholdLabel();
+        seekBarQualityThreshold.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                targetLostQualityThreshold = progress / 100.0f;
+                updateQualityThresholdLabel();
             }
             @Override public void onStartTrackingTouch(SeekBar seekBar) {}
             @Override public void onStopTrackingTouch(SeekBar seekBar) {}
@@ -270,6 +335,10 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         btnBack.setOnClickListener(v -> finish());
         btnToggleControls.setOnClickListener(v -> setControlsVisible(true));
         btnHideControls.setOnClickListener(v -> setControlsVisible(false));
+        btnSettings.setOnClickListener(v -> {
+            settingsPanel.setVisibility(settingsPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+            enableFullscreenImmersive();
+        });
         switchExperimentalPrevReference.setOnCheckedChangeListener((buttonView, isChecked) -> {
             experimentalPrevReferenceMode = isChecked;
             previousFrameReferenceStackLayers = null;
@@ -438,8 +507,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
     }
 
     private float getReferenceCropSizeForLayer(int layer, int frameHeight) {
-        float smallestCropSize = (128.0f / 640.0f) * frameHeight;
-        float largestCropSize = (480.0f / 640.0f) * frameHeight;
+        float smallestCropSize = (512.0f / 600.0f) * frameHeight;
+        float largestCropSize = (512.0f / 600.0f) * frameHeight;
         if (refLayers <= 1) {
             return largestCropSize;
         }
@@ -490,6 +559,91 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         return stack;
     }
 
+    private void preserveInitialSmallestReferenceLayer(float[] stackLayers) {
+        if (stackLayers == null || initialReferenceStackLayers == null || refLayers <= 1) {
+            return;
+        }
+
+        int smallestLayer = refLayers - 1;
+        for (int y = 0; y < refH; y++) {
+            for (int x = 0; x < refW; x++) {
+                int index = canonicalReferenceIndex(smallestLayer, y, x);
+                stackLayers[index] = initialReferenceStackLayers[index];
+            }
+        }
+    }
+
+    private float[] selectReferenceStackForCurrentFrame() {
+        if (experimentalPrevReferenceMode && previousFrameReferenceStackLayers != null) {
+            return previousFrameReferenceStackLayers;
+        }
+        return initialReferenceStackLayers;
+    }
+
+    private float sampleFloatImageBilinear(float[] image, int width, int height, float srcX, float srcY) {
+        int x0 = (int) Math.floor(srcX);
+        int y0 = (int) Math.floor(srcY);
+        int x1 = x0 + 1;
+        int y1 = y0 + 1;
+
+        float dx = srcX - (float) x0;
+        float dy = srcY - (float) y0;
+
+        x0 = Math.max(0, Math.min(width - 1, x0));
+        x1 = Math.max(0, Math.min(width - 1, x1));
+        y0 = Math.max(0, Math.min(height - 1, y0));
+        y1 = Math.max(0, Math.min(height - 1, y1));
+
+        float p00 = image[y0 * width + x0];
+        float p10 = image[y0 * width + x1];
+        float p01 = image[y1 * width + x0];
+        float p11 = image[y1 * width + x1];
+
+        return ((1.0f - dx) * (1.0f - dy) * p00)
+                + (dx * (1.0f - dy) * p10)
+                + ((1.0f - dx) * dy * p01)
+                + (dx * dy * p11);
+    }
+
+    private float[] cropAndResizeReferenceStack(float[] stackLayers) {
+        if (stackLayers == null) return null;
+
+        float[] out = new float[refLayers * refH * refW];
+        float cx = refW / 2.0f;
+        float cy = refH / 2.0f;
+        float cropSize = Math.min(refW, refH) / 2.0f;
+        float half = cropSize / 2.0f;
+
+        for (int layer = 0; layer < refLayers; layer++) {
+            if (refLayers > 1 && layer == refLayers - 1) {
+                for (int y = 0; y < refH; y++) {
+                    for (int x = 0; x < refW; x++) {
+                        int index = canonicalReferenceIndex(layer, y, x);
+                        out[index] = stackLayers[index];
+                    }
+                }
+                continue;
+            }
+
+            float[] layerImage = new float[refW * refH];
+            for (int y = 0; y < refH; y++) {
+                for (int x = 0; x < refW; x++) {
+                    layerImage[y * refW + x] = stackLayers[canonicalReferenceIndex(layer, y, x)];
+                }
+            }
+
+            for (int y = 0; y < refH; y++) {
+                for (int x = 0; x < refW; x++) {
+                    float srcX = cx - half + (x / (float)(refW - 1)) * cropSize;
+                    float srcY = cy - half + (y / (float)(refH - 1)) * cropSize;
+                    out[canonicalReferenceIndex(layer, y, x)] = sampleFloatImageBilinear(layerImage, refW, refH, srcX, srcY);
+                }
+            }
+        }
+
+        return out;
+    }
+
     private float[] calculateDiscreteArgmaxCoords(float[] heatmap, int hmW, int hmH) {
         HeatmapStats stats = calculateHeatmapStats(heatmap, hmW, hmH);
 
@@ -519,6 +673,28 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         return new HeatmapStats(minVal, maxVal, maxX, maxY);
     }
 
+    private int selectBestQualityIteration(IterationResult[] iterationResults) {
+        if (iterationResults == null || iterationResults.length == 0) {
+            return -1;
+        }
+
+        for (IterationResult result : iterationResults) {
+            result.status = ITER_STATUS_CANDIDATE;
+        }
+
+        int selectedIndex = 0;
+        float bestQuality = iterationResults[0].qualityScore;
+        for (int i = 1; i < iterationResults.length; i++) {
+            if (iterationResults[i].qualityScore > bestQuality) {
+                bestQuality = iterationResults[i].qualityScore;
+                selectedIndex = i;
+            }
+        }
+
+        iterationResults[selectedIndex].status = ITER_STATUS_SELECTED;
+        return selectedIndex;
+    }
+
     private void writeReferenceStackToInputBuffer(float[] stackLayers) {
         if (stackLayers == null || refStackInputBuffer == null) return;
 
@@ -535,23 +711,6 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             }
         }
         refStackInputBuffer.rewind();
-    }
-
-    private void writeExperimentalReferenceStackToInputBuffer(float[] previousStackLayers) {
-        if (previousStackLayers == null || refStackInputBuffer == null) {
-            writeReferenceStackToInputBuffer(initialReferenceStackLayers);
-            return;
-        }
-
-        writeReferenceStackToInputBuffer(previousStackLayers);
-    }
-
-    private void prepareReferenceInputForCurrentFrame() {
-        if (experimentalPrevReferenceMode && previousFrameReferenceStackLayers != null) {
-            writeExperimentalReferenceStackToInputBuffer(previousFrameReferenceStackLayers);
-        } else {
-            writeReferenceStackToInputBuffer(initialReferenceStackLayers);
-        }
     }
 
     private void gatherReferenceFrame(byte[] yPlane, int width, int height) {
@@ -668,51 +827,73 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         
         long preDuration = SystemClock.elapsedRealtime() - preStart;
 
-        searchBuffer.rewind();
-        searchBuffer.asFloatBuffer().put(currBuffer);
-        searchBuffer.rewind();
-        
-        prepareReferenceInputForCurrentFrame();
-        
-        outputHeatmapBuffer.rewind();
-        
+        float[] baseReferenceStack = selectReferenceStackForCurrentFrame();
+        if (baseReferenceStack == null) return;
+
+        int activeIterations = Math.max(1, iterationsNum);
+        IterationResult[] iterationResults = new IterationResult[activeIterations];
+        float[] iterReferenceStack = Arrays.copyOf(baseReferenceStack, baseReferenceStack.length);
+        long infDuration = 0L;
+        long postDuration = 0L;
+
+        boolean hasQualityOutput = (qualityOutputIndex >= 0 && outputQualityBuffer != null);
         Object[] inputs = new Object[2];
         inputs[refInputIndex] = refStackInputBuffer;
         inputs[searchInputIndex] = searchBuffer;
 
-        Map<Integer, Object> outputs = new HashMap<>();
-        outputs.put(heatmapOutputIndex, outputHeatmapBuffer);
-        
-        // Check if model has a second output for quality
-        boolean hasQualityOutput = (qualityOutputIndex >= 0 && outputQualityBuffer != null);
-        if (hasQualityOutput) {
-            outputQualityBuffer.rewind();
-            outputs.put(qualityOutputIndex, outputQualityBuffer);
+        for (int iterIdx = 0; iterIdx < activeIterations; iterIdx++) {
+            writeReferenceStackToInputBuffer(iterReferenceStack);
+
+            searchBuffer.rewind();
+            searchBuffer.asFloatBuffer().put(currBuffer);
+            searchBuffer.rewind();
+
+            outputHeatmapBuffer.rewind();
+            Map<Integer, Object> outputs = new HashMap<>();
+            outputs.put(heatmapOutputIndex, outputHeatmapBuffer);
+            if (hasQualityOutput) {
+                outputQualityBuffer.rewind();
+                outputs.put(qualityOutputIndex, outputQualityBuffer);
+            }
+
+            long infStart = SystemClock.elapsedRealtime();
+            tflite.runForMultipleInputsOutputs(inputs, outputs);
+            infDuration += SystemClock.elapsedRealtime() - infStart;
+
+            float[] outputHeatmap = new float[heatmapW * heatmapH];
+            outputHeatmapBuffer.rewind();
+            outputHeatmapBuffer.asFloatBuffer().get(outputHeatmap);
+
+            long postStart = SystemClock.elapsedRealtime();
+            HeatmapStats heatmapStats = calculateHeatmapStats(outputHeatmap, heatmapW, heatmapH);
+            float iterPxNorm = heatmapStats.maxX / (float) heatmapW;
+            float iterPyNorm = heatmapStats.maxY / (float) heatmapH;
+            postDuration += SystemClock.elapsedRealtime() - postStart;
+
+            float qualityScore = hasQualityOutput ? outputQualityBuffer.getFloat(0) : heatmapStats.maxVal;
+            iterationResults[iterIdx] = new IterationResult(
+                    Arrays.copyOf(currBuffer, currBuffer.length),
+                    Arrays.copyOf(iterReferenceStack, iterReferenceStack.length),
+                    outputHeatmap,
+                    heatmapStats,
+                    iterPxNorm,
+                    iterPyNorm,
+                    iterPxNorm,
+                    iterPyNorm,
+                    qualityScore
+            );
+
+            if (iterIdx < activeIterations - 1) {
+                iterReferenceStack = cropAndResizeReferenceStack(iterReferenceStack);
+            }
         }
 
-        long infStart = SystemClock.elapsedRealtime();
-        tflite.runForMultipleInputsOutputs(inputs, outputs);
-        long infDuration = SystemClock.elapsedRealtime() - infStart;
-
-        float[] outputHeatmap = new float[heatmapW * heatmapH];
-        outputHeatmapBuffer.rewind();
-        outputHeatmapBuffer.asFloatBuffer().get(outputHeatmap);
-        final HeatmapStats heatmapStats = calculateHeatmapStats(outputHeatmap, heatmapW, heatmapH);
-
-        float qScore = 1.0f;
-        if (hasQualityOutput) {
-            qScore = outputQualityBuffer.getFloat(0);
-        } else {
-            qScore = heatmapStats.maxVal;
-        }
-        final float finalQualityScore = qScore;
-
-        long postStart = SystemClock.elapsedRealtime();
-        float[] localCoords = calculateDiscreteArgmaxCoords(outputHeatmap, heatmapW, heatmapH);
-        long postDuration = SystemClock.elapsedRealtime() - postStart;
-        
-        float px = localCoords[0]; // relative x in [0.0, 1.0] inside the crop
-        float py = localCoords[1]; // relative y in [0.0, 1.0] inside the crop
+        final int selectedResultIndex = Math.max(0, selectBestQualityIteration(iterationResults));
+        final IterationResult finalIterationResult = iterationResults[selectedResultIndex];
+        final HeatmapStats heatmapStats = finalIterationResult.heatmapStats;
+        final float finalQualityScore = finalIterationResult.qualityScore;
+        float px = finalIterationResult.mappedPxNorm;
+        float py = finalIterationResult.mappedPyNorm;
         
         // Coordinate Re-projection: Map crop-relative coordinates back to camera absolute coordinates using static center
         float halfSize = cropSize / 2.0f;
@@ -731,10 +912,14 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         final boolean finalStackUpdated = finalExperimentalMode
                 && finalQualityScore >= EXPERIMENTAL_STACK_UPDATE_QUALITY_THRESHOLD;
         if (finalStackUpdated) {
-            previousFrameReferenceStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, finalTrackedX, finalTrackedY);
+            float[] updatedStackLayers = buildReferenceStackLayers(yPlane, width, height, stride, finalTrackedX, finalTrackedY);
+            preserveInitialSmallestReferenceLayer(updatedStackLayers);
+            previousFrameReferenceStackLayers = updatedStackLayers;
         }
 
         long totalDuration = SystemClock.elapsedRealtime() - startTime;
+        final long finalInfDuration = infDuration;
+        final long finalPostDuration = postDuration;
 
         // Convert absolute camera coordinates to normalized [0, 1] relative to camera frame
         float gx = finalTrackedX / (float) width;
@@ -772,41 +957,52 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             float scaledX = finalTrackedX / (float) downsampleFactor;
             float scaledY = finalTrackedY / (float) downsampleFactor;
             canvas.drawCircle(scaledX, scaledY, 3.0f, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.0f);
+            paint.setColor(Color.CYAN);
+            float scaledCropSize = cropSize / (float) downsampleFactor;
+            float scaledLeft = (smallW - scaledCropSize) / 2.0f;
+            float scaledTop = (smallH - scaledCropSize) / 2.0f;
+            canvas.drawRect(scaledLeft, scaledTop, scaledLeft + scaledCropSize, scaledTop + scaledCropSize, paint);
         } catch (Exception e) {
             e.printStackTrace();
         }
         final Bitmap fullFrameBmp = tmpBmp;
 
         // Save to cache for SeekBar scrolling redraws
-        cachedFlatHeatmap = outputHeatmap;
-        cachedCurrBuffer = currBuffer;
+        cachedIterationResults = iterationResults;
         cachedFullFrameBmp = fullFrameBmp;
-        cachedPx = px;
-        cachedPy = py;
 
         // Post UI rendering tasks back to the UI thread
         new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {
                 if (currentUiState != STATE_TRACKING) return;
+
+                int maxHeatmapIteration = Math.max(0, iterationResults.length - 1);
+                seekBarHeatmapIteration.setMax(maxHeatmapIteration);
+                if (selectedHeatmapIteration > maxHeatmapIteration) {
+                    selectedHeatmapIteration = maxHeatmapIteration;
+                    seekBarHeatmapIteration.setProgress(selectedHeatmapIteration);
+                }
                 
-                float targetColorThreshold = finalExperimentalMode
-                        ? EXPERIMENTAL_STACK_UPDATE_QUALITY_THRESHOLD
-                        : QUALITY_DISPLAY_THRESHOLD;
-                int circleColor = finalQualityScore >= targetColorThreshold ? Color.GREEN : Color.RED;
-                lblStatus.setText(finalQualityScore < targetColorThreshold
-                        ? String.format("Status: Weak Lock! Quality: %.2f", finalQualityScore)
+                float targetColorThreshold = targetLostQualityThreshold;
+                boolean targetLostByQuality = useQualityForTarget && finalQualityScore < targetColorThreshold;
+                int circleColor = targetLostByQuality ? Color.RED : Color.GREEN;
+                lblStatus.setText(targetLostByQuality
+                        ? String.format("Status: Weak/Lost Target | Quality: %.2f < %.2f", finalQualityScore, targetColorThreshold)
                         : "Status: Active tracking");
                 drawTrackingIndicator(finalTrackedX, finalTrackedY, width, height, circleColor);
-                renderDiagnostics(outputHeatmap, currBuffer, fullFrameBmp, px, py);
+                renderDiagnostics(iterationResults, selectedHeatmapIteration, fullFrameBmp);
 
                 txtLatency.setText(String.format("Latency: Pre:%dms | TFLite:%dms | CoM:%dms (Total:%dms)", 
-                        preDuration, infDuration, postDuration, totalDuration));
+                        preDuration, finalInfDuration, finalPostDuration, totalDuration));
                 txtPredictedCoords.setText(String.format(
-                        "Target Pos: (%.3f, %.3f) [Quality: %.2f | Stack update: %s]",
+                        "Target Pos: (%.3f, %.3f) [Quality: %.2f | Selected: %d | Stack update: %s]",
                         screenX_norm,
                         screenY_norm,
                         finalQualityScore,
+                        selectedResultIndex,
                         finalStackUpdated ? "yes" : "no"
                 ));
                 txtBufferStatus.setText(String.format(
@@ -851,6 +1047,8 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
 
         Bitmap overlayBitmap = Bitmap.createBitmap(imgW, imgH, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(overlayBitmap);
+        drawSearchFrameBoundary(canvas, imgW, imgH);
+
         Paint paint = new Paint();
         paint.setStyle(Paint.Style.STROKE);
         
@@ -870,11 +1068,60 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         capturedImageView.setImageBitmap(overlayBitmap);
     }
 
-    private void renderDiagnostics(float[] heatmap, float[] curr, Bitmap fullFrameBmp, float px, float py) {
+    private void drawSearchFrameBoundary(Canvas canvas, int imgW, int imgH) {
+        float activeSize = Math.min(imgW, imgH);
+        float left = (imgW - activeSize) / 2.0f;
+        float top = (imgH - activeSize) / 2.0f;
+        float right = left + activeSize;
+        float bottom = top + activeSize;
+
+        Paint deadPaint = new Paint();
+        deadPaint.setStyle(Paint.Style.FILL);
+        deadPaint.setColor(Color.argb(70, 255, 80, 0));
+        if (top > 0.0f) {
+            canvas.drawRect(0.0f, 0.0f, imgW, top, deadPaint);
+        }
+        if (bottom < imgH) {
+            canvas.drawRect(0.0f, bottom, imgW, imgH, deadPaint);
+        }
+        if (left > 0.0f) {
+            canvas.drawRect(0.0f, top, left, bottom, deadPaint);
+        }
+        if (right < imgW) {
+            canvas.drawRect(right, top, imgW, bottom, deadPaint);
+        }
+
+        Paint borderPaint = new Paint();
+        borderPaint.setStyle(Paint.Style.STROKE);
+        borderPaint.setAntiAlias(true);
+        borderPaint.setStrokeWidth(Math.max(2.0f, imgW / 360.0f));
+        borderPaint.setColor(Color.CYAN);
+        canvas.drawRect(left, top, right, bottom, borderPaint);
+    }
+
+    private void renderDiagnostics(IterationResult[] iterationResults, int selectedIteration, Bitmap fullFrameBmp) {
+        if (iterationResults == null || iterationResults.length == 0) {
+            return;
+        }
+
+        int safeIteration = Math.max(0, Math.min(selectedIteration, iterationResults.length - 1));
+        IterationResult selectedResult = iterationResults[safeIteration];
+        float[] heatmap = selectedResult.heatmap;
+        float[] curr = selectedResult.search;
+        float px = selectedResult.iterPxNorm;
+        float py = selectedResult.iterPyNorm;
+        lblHeatmapIteration.setText(String.format(
+                "Heatmap Iter: %d/%d | q=%.2f | %s",
+                safeIteration,
+                iterationResults.length - 1,
+                selectedResult.qualityScore,
+                iterationStatusLabel(selectedResult.status)
+        ));
+
         // 1. Render raw output heatmap with display-only min/max normalization.
         Bitmap hmBitmap = Bitmap.createBitmap(heatmapW, heatmapH, Bitmap.Config.ARGB_8888);
         int[] hmColors = new int[heatmapW * heatmapH];
-        HeatmapStats stats = calculateHeatmapStats(heatmap, heatmapW, heatmapH);
+        HeatmapStats stats = selectedResult.heatmapStats;
         float denom = stats.maxVal - stats.minVal;
         if (Math.abs(denom) < 1e-6f) {
             denom = 1.0f;
@@ -921,16 +1168,11 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         // 3. Render cropHistView (the locked target reference template layer)
         Bitmap histBitmap = Bitmap.createBitmap(refW, refH, Bitmap.Config.ARGB_8888);
         int[] histColors = new int[refW * refH];
-        java.nio.FloatBuffer refFloatBuffer = refStackInputBuffer.asFloatBuffer();
+        float[] refStackForDisplay = selectedResult.referenceStack;
         for (int y = 0; y < refH; y++) {
             for (int x = 0; x < refW; x++) {
-                int index;
-                if (refShapeIsNCHW) {
-                    index = selectedHistLayer * refH * refW + y * refW + x;
-                } else {
-                    index = y * refW * refLayers + x * refLayers + selectedHistLayer;
-                }
-                int val = (int)(refFloatBuffer.get(index) * 255.0f);
+                int index = canonicalReferenceIndex(selectedHistLayer, y, x);
+                int val = (int)(refStackForDisplay[index] * 255.0f);
                 histColors[y * refW + x] = 0xFF000000 | (val << 16) | (val << 8) | val;
             }
         }
@@ -950,6 +1192,23 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
         if (fullFrameBmp != null) {
             cropFullView.setImageBitmap(fullFrameBmp);
         }
+    }
+
+    private String iterationStatusLabel(int status) {
+        switch (status) {
+            case ITER_STATUS_SELECTED:
+                return "SELECTED";
+            default:
+                return "CANDIDATE";
+        }
+    }
+
+    private void updateQualityThresholdLabel() {
+        if (lblQualityThreshold == null) {
+            return;
+        }
+        String mode = useQualityForTarget ? "on" : "off";
+        lblQualityThreshold.setText(String.format("Quality lost threshold: %.2f (%s)", targetLostQualityThreshold, mode));
     }
 
     private void resetTrackerToIdle() {
@@ -1042,6 +1301,40 @@ public class FrameStreamActivity extends AppCompatActivity implements CameraHelp
             this.maxVal = maxVal;
             this.maxX = maxX;
             this.maxY = maxY;
+        }
+    }
+
+    private static class IterationResult {
+        final float[] search;
+        final float[] referenceStack;
+        final float[] heatmap;
+        final HeatmapStats heatmapStats;
+        final float iterPxNorm;
+        final float iterPyNorm;
+        final float mappedPxNorm;
+        final float mappedPyNorm;
+        final float qualityScore;
+        int status = ITER_STATUS_CANDIDATE;
+
+        IterationResult(
+                float[] search,
+                float[] referenceStack,
+                float[] heatmap,
+                HeatmapStats heatmapStats,
+                float iterPxNorm,
+                float iterPyNorm,
+                float mappedPxNorm,
+                float mappedPyNorm,
+                float qualityScore) {
+            this.search = search;
+            this.referenceStack = referenceStack;
+            this.heatmap = heatmap;
+            this.heatmapStats = heatmapStats;
+            this.iterPxNorm = iterPxNorm;
+            this.iterPyNorm = iterPyNorm;
+            this.mappedPxNorm = mappedPxNorm;
+            this.mappedPyNorm = mappedPyNorm;
+            this.qualityScore = qualityScore;
         }
     }
 

@@ -1,63 +1,58 @@
 # Iteration Selection Rule
 
-This document summarizes the quality-based selection rule used by the tracker visual test when running with `--iterations_num`.
+This document describes the Android tracker rule used when `iterations_num > 1`.
 
-## Inputs
+## Current Rule: Independent Reference-Stack Candidates
 
-For each refinement iteration, the visual test stores:
+The current Android implementation does not use iterations as a zoom/refinement chain.
 
-- The predicted position mapped back to the original 256x256 display space.
-- The iteration-local prediction.
-- The model quality score for that iteration.
+For every camera frame:
 
-The final displayed prediction is selected from the iteration results according to the quality scores.
+1. Build one centered square `search_frame` from the current full frame.
+2. Run the model multiple times on the same `search_frame`.
+3. For each iteration, use a different reference-stack candidate:
+   - Iteration `0` uses the selected base reference stack.
+   - Later iterations use progressively cropped/resized versions of the reference stack.
+4. Keep every iteration as a candidate.
+5. Select the iteration with the highest `quality` score.
 
-## Rule
-
-1. If there are no iteration results, reject the detection.
-2. If the first iteration quality is below `0.30`, reject the detection.
-3. Otherwise, create the list of valid iterations:
-   - Iteration `0` is valid.
-   - Starting from iteration `1`, keep accepting iterations while `quality >= 0.75`.
-   - Stop at the first iteration whose quality is below `0.75`; that iteration and all later iterations are ignored.
-4. From the valid iterations:
-   - If one or more valid iterations have `quality > 0.90`, select the last such iteration.
-   - Otherwise, select the valid iteration with the highest quality score.
+The selected heatmap prediction is mapped directly inside the original centered `search_frame`.
+There is no per-iteration crop of the search frame and no mapped zoom coordinate chain.
 
 ## Pseudocode
 
 ```text
-if qualities is empty:
-    reject
+search_frame = center_square_crop(current_frame)
+reference_stack = selected_reference_stack
 
-if qualities[0] < 0.30:
-    reject
+for i in 0..iterations_num-1:
+    result[i] = model(reference_stack, search_frame)
+    if i < iterations_num-1:
+        reference_stack = crop_and_resize_reference_stack(reference_stack)
 
-valid_iters = [0]
-for i in 1..N-1:
-    if qualities[i] < 0.75:
-        break
-    valid_iters.append(i)
-
-high_quality_iters = [i for i in valid_iters if qualities[i] > 0.90]
-if high_quality_iters is not empty:
-    selected_iter = high_quality_iters[-1]
-else:
-    selected_iter = argmax(qualities[i] for i in valid_iters)
+selected_iter = argmax(result[i].quality)
+target = result[selected_iter].heatmap_argmax
 ```
 
-## Display Behavior
+## Quality Display Behavior
 
-- The selected iteration is highlighted as `SELECTED`.
-- Iterations excluded after the `0.75` cutoff are marked `IGNORED`.
-- If the detection is rejected because the first iteration quality is below `0.30`, iteration `0` is marked `REJECTED`.
-- The search-frame prediction marker is drawn at the mapped position of the selected iteration.
+Quality controls display state, not iteration selection:
 
-## Rationale
+- If quality display is enabled and the selected quality is below the configured target-lost threshold, the marker is drawn red.
+- If quality display is disabled, the selected prediction remains green regardless of quality.
+- Experimental previous-frame stack updates still use their own fixed quality threshold.
 
-The rule keeps the refinement behavior conservative:
+## Previous Rule: Subpixel Convergence Idea
 
-- A very weak first match rejects the detection immediately.
-- Later refinements are allowed only while quality remains stable enough.
-- A high-confidence refinement above `0.90` is preferred, with the latest such refinement used as the final zoomed-in result.
-- If no refinement reaches high confidence, the best quality among the valid iterations is used.
+The previous rule is kept here only as a useful idea for a future subpixel convergence experiment.
+It is not used by the current Android runtime.
+
+That rule treated iterations as a refinement chain:
+
+1. Reject the detection if the first iteration quality was below `0.30`.
+2. Continue accepting later refinements only while quality stayed at or above `0.75`.
+3. Prefer the last valid iteration above `0.90`.
+4. Otherwise select the highest-quality valid iteration.
+
+This can still be a good basis for a different mode whose goal is subpixel convergence after zooming into the target.
+It should not be mixed with the current max-quality reference-stack candidate rule.
