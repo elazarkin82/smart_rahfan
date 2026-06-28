@@ -30,7 +30,7 @@ private:
 
     static int16_t clamp_axis_value(int16_t value)
     {
-        return value < 500 ? 500 : value > 1500 ? 1500 : value;
+        return value < 200 ? 200 : value > 1800 ? 1800 : value;
     }
 
 public:
@@ -170,26 +170,26 @@ public:
         return true;
     }
 
-    static void calculate_tracking_commands(int dx, int dy, int16_t& out_yaw, int16_t& out_pitch)
+    static void calculate_tracking_commands(int dx, int dy, int16_t& out_yaw, int16_t& out_throttle)
     {
         const int16_t MID_VALUE = 1000;
         const float Kp = 25.0f; // Proportional feedback gain
         float yaw_offset;
-        float pitch_offset;
+        float throttle_offset;
         int16_t y_val;
-        int16_t p_val;
+        int16_t t_val;
 
         // Compute offsets (dx, dy are target offset from center in 256x256 space, range -128 to 128)
         yaw_offset = (float)dx * Kp;
-        pitch_offset = (float)dy * Kp;
+        throttle_offset = (float)dy * 200;
 
         // Apply control commands around MID_VALUE (1000)
         y_val = MID_VALUE + (int16_t)yaw_offset;
-        p_val = MID_VALUE - (int16_t)pitch_offset; // Invert pitch to match drone standards
+        t_val = MID_VALUE - (int16_t)throttle_offset; // Invert throttle to match drone standards
 
         // Constrain values to AXES_RANGE (0 to 2000)
         out_yaw = clamp_axis_value(y_val);
-        out_pitch = clamp_axis_value(p_val);
+        out_throttle = clamp_axis_value(t_val);
     }
 };
 
