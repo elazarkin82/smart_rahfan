@@ -8,6 +8,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#define AGRESIVITY 500
+
 class IControlerCallback
 {
 public:
@@ -30,7 +32,7 @@ private:
 
     static int16_t clamp_axis_value(int16_t value)
     {
-        return value < 200 ? 200 : value > 1800 ? 1800 : value;
+        return value < 1000 - AGRESIVITY ? 1000 - AGRESIVITY : value > 1000 + AGRESIVITY ? 1000 + AGRESIVITY : value;
     }
 
 public:
@@ -181,7 +183,7 @@ public:
 
         // Compute offsets (dx, dy are target offset from center in 256x256 space, range -128 to 128)
         yaw_offset = (float)dx * Kp;
-        throttle_offset = (float)dy * 200;
+        throttle_offset = (float)dy * 50;
 
         // Apply control commands around MID_VALUE (1000)
         y_val = MID_VALUE + (int16_t)yaw_offset;
