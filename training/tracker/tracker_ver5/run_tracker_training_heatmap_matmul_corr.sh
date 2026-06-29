@@ -17,7 +17,7 @@ echo "[TF ENV] TRACKER_GPU_MEMORY_LIMIT_MB=${TRACKER_GPU_MEMORY_LIMIT_MB}"
 #
 # --train_mode heatmap_only: Trains spatial features using coordinate distance loss on positive samples.
 
-BATCH_SIZE=64
+BATCH_SIZE=128
 
 # --dataset_cache_mode streaming for memory error
 python3 tracker_model_matmul_corr.py train \
@@ -30,7 +30,8 @@ python3 tracker_model_matmul_corr.py train \
     --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
     --log_file outputs/train_matmul_corr.log \
     --train_mode heatmap_only \
-    --batch_size ${BATCH_SIZE}
+    --batch_size ${BATCH_SIZE} \
+    --dataset_cache_mode streaming
     
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
@@ -42,7 +43,8 @@ python3 tracker_model_matmul_corr.py train \
     --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
     --log_file outputs/train_matmul_corr.log \
     --train_mode heatmap_only \
-    --batch_size ${BATCH_SIZE}
+    --batch_size ${BATCH_SIZE} \
+    --dataset_cache_mode streaming
 
 python3 tracker_model_matmul_corr.py train \
     --dataset_dir dataset_generator/compiled \
@@ -54,4 +56,5 @@ python3 tracker_model_matmul_corr.py train \
     --best_train_loss_output outputs/tracker_matmul_corr_best_train_loss.keras \
     --log_file outputs/train_matmul_corr.log \
     --train_mode heatmap_only \
-    --batch_size ${BATCH_SIZE}
+    --batch_size ${BATCH_SIZE} \
+    --dataset_cache_mode streaming
