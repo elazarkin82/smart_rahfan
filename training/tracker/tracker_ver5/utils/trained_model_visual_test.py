@@ -595,6 +595,9 @@ class ModelInferenceVisualizer:
         if len(qualities) == 0:
             return None, [], "Rejected: no iterations", "no iterations"
 
+        if qualities[0] < 0.4:
+            return None, [0], "Rejected: first iteration quality < 0.4", "rejected"
+
         valid_iters = list(range(len(qualities)))
         selected_iter = max(valid_iters, key=lambda idx: qualities[idx])
         return selected_iter, valid_iters, None, "best quality"
@@ -616,6 +619,7 @@ class ModelInferenceVisualizer:
         iter_pred_qualities = []
         crop_history = []  # List of (cx, cy, crop_size)
         iter_preds_in_iter_space = [] # List of (x, y)
+        iter_preds_mapped_search_space = [] # List of (x, y) mapped to original search space
         
         # Initialize search frame and reference stack
         curr_search = cv2.resize(search_raw[:, :, 0], (self.search_frame_size, self.search_frame_size), interpolation=cv2.INTER_LINEAR)
@@ -628,6 +632,13 @@ class ModelInferenceVisualizer:
         if ref_h != self.stack_target_size or ref_w != self.stack_target_size:
             curr_ref = self.crop_and_resize_ref_stack(curr_ref, ref_w, self.stack_target_size)
             ref_w = self.stack_target_size
+
+        ref_stack_orig = curr_ref.copy()
+        
+        # Keep track of the current search crop geometry relative to original search frame space
+        crop_cx = self.search_frame_size / 2.0
+        crop_cy = self.search_frame_size / 2.0
+        crop_size = float(self.search_frame_size)
         
         for iter_idx in range(self.iterations_num):
             # Prepare inputs for model
@@ -686,12 +697,36 @@ class ModelInferenceVisualizer:
             pcy = (y_pred / heatmap.shape[0]) * self.search_frame_size
             iter_preds_in_iter_space.append((pcx, pcy))
             
+            # Map this iteration's prediction back to the original search frame space
+            orig_x = (crop_cx - crop_size / 2.0) + pcx * (crop_size / self.search_frame_size)
+            orig_y = (crop_cy - crop_size / 2.0) + pcy * (crop_size / self.search_frame_size)
+            iter_preds_mapped_search_space.append((orig_x, orig_y))
+            
             if iter_idx < self.iterations_num - 1:
-                # Evaluate the next independent candidate with the same search frame and a tighter reference stack.
-                curr_ref = self.crop_and_resize_ref_stack(curr_ref, ref_w / 2, ref_w)
+                # Stop iterating if the first iteration quality is below 0.4
+                if iter_idx == 0 and pred_quality < 0.4:
+                    break
                 
-        # All candidates use the same search frame, so predictions are already in search-frame space.
-        iter_preds_mapped_search_space = list(iter_preds_in_iter_space)
+                # Crop a tighter search frame for the next iteration centered at the current mapped prediction
+                next_crop_size = self.search_frame_size / (2**(iter_idx + 1))
+                
+                # Crop from the original search_raw[:, :, 0] to avoid compound blur
+                curr_search = self.crop_and_resize(search_raw[:, :, 0], orig_x, orig_y, next_crop_size, self.search_frame_size)
+                
+                # Also save the crop metadata to crop_history for map_to_original compatibility
+                crop_history.append((orig_x, orig_y, next_crop_size))
+                
+                # Update geometry trackers for the next iteration
+                crop_cx = orig_x
+                crop_cy = orig_y
+                crop_size = next_crop_size
+                
+                # Crop reference stack from original reference stack
+                next_ref_crop_size = ref_w / (2**(iter_idx + 1))
+                curr_ref = self.crop_and_resize_ref_stack(ref_stack_orig, next_ref_crop_size, ref_w)
+                
+        # All candidates have been mapped to the original search frame space.
+        iter_preds_mapped_search_space = list(iter_preds_mapped_search_space)
             
         # Map to display space (256x256) for drawing
         iter_preds_mapped = []
@@ -768,41 +803,44 @@ class ModelInferenceVisualizer:
         # Draw all predicted heatmaps
         self.tk_imgs_predicted = []
         for idx in range(self.iterations_num):
-            heatmap = iter_heatmaps[idx]
-            heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
-            heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-            heatmap_color_rgb = cv2.resize(heatmap_color_rgb, (160, 160), interpolation=cv2.INTER_NEAREST)
-            tk_img = ImageTk.PhotoImage(Image.fromarray(heatmap_color_rgb))
-            self.tk_imgs_predicted.append(tk_img)
-            
             panel = self.heatmap_panels[idx]
             lbl = self.heatmap_lbls[idx]
             
-            panel.config(image=tk_img)
-            
-            # Show prediction info for this iteration
-            mx, my = iter_preds_mapped[idx]
-            px, py = iter_preds_in_iter_space[idx]
-            
-            if norm_coords is not None:
-                error = np.sqrt((mx/256.0 - norm_coords[0])**2 + (my/256.0 - norm_coords[1])**2) * 256.0
-                error_str = f"Error: {error:.1f}px"
-            else:
-                error_str = "Error: N/A"
+            if idx < len(iter_heatmaps):
+                heatmap = iter_heatmaps[idx]
+                heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
+                heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+                heatmap_color_rgb = cv2.resize(heatmap_color_rgb, (160, 160), interpolation=cv2.INTER_NEAREST)
+                tk_img = ImageTk.PhotoImage(Image.fromarray(heatmap_color_rgb))
+                self.tk_imgs_predicted.append(tk_img)
+                panel.config(image=tk_img)
                 
-            quality_suffix = ""
-            label_fg = "#33ff33"
-            panel_bd = 1
-            if idx == selected_iter:
-                quality_suffix = " SELECTED"
-                label_fg = "#ffff66"
-                panel_bd = 3
-            elif selected_iter is None and idx == 0:
-                quality_suffix = " REJECTED"
-                label_fg = "#ff3366"
-            info_text = f"Mapped: [{mx:.1f}, {my:.1f}]\nIter: [{px:.1f}, {py:.1f}]\n{error_str}\nQuality: {iter_pred_qualities[idx]:.2f}{quality_suffix}"
-            panel.config(bd=panel_bd)
-            lbl.config(text=info_text, fg=label_fg)
+                # Show prediction info for this iteration
+                mx, my = iter_preds_mapped[idx]
+                px, py = iter_preds_in_iter_space[idx]
+                
+                if norm_coords is not None:
+                    error = np.sqrt((mx/256.0 - norm_coords[0])**2 + (my/256.0 - norm_coords[1])**2) * 256.0
+                    error_str = f"Error: {error:.1f}px"
+                else:
+                    error_str = "Error: N/A"
+                    
+                quality_suffix = ""
+                label_fg = "#33ff33"
+                panel_bd = 1
+                if idx == selected_iter:
+                    quality_suffix = " SELECTED"
+                    label_fg = "#ffff66"
+                    panel_bd = 3
+                elif selected_iter is None and idx == 0:
+                    quality_suffix = " REJECTED"
+                    label_fg = "#ff3366"
+                info_text = f"Mapped: [{mx:.1f}, {my:.1f}]\nIter: [{px:.1f}, {py:.1f}]\n{error_str}\nQuality: {iter_pred_qualities[idx]:.2f}{quality_suffix}"
+                panel.config(bd=panel_bd)
+                lbl.config(text=info_text, fg=label_fg)
+            else:
+                panel.config(image="", bd=1)
+                lbl.config(text="[N/A]", fg="#888888")
             
         # Update status bar
         if selected_iter is not None:
